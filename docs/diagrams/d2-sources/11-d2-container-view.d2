@@ -1,0 +1,152 @@
+direction: down
+
+d2-config: {
+  layout-engine: elk
+}
+
+classes: {
+  external: {
+    style.fill: "#fff4e5"
+    style.stroke: "#d99100"
+    style.stroke-dash: 3
+  }
+  service: {
+    style.fill: "#eef8ee"
+    style.stroke: "#49a35a"
+  }
+  infra: {
+    style.fill: "#e8f0fe"
+    style.stroke: "#4f83ff"
+  }
+  layer: {
+    style.fill: "#f8fafc"
+    style.stroke: "#cbd5e1"
+  }
+  note: {
+    style.fill: "#fffbea"
+    style.stroke: "#eab308"
+  }
+}
+
+sources_layer: {
+  label: "Actors & Sources"
+  class: layer
+
+  user: {
+    shape: c4-person
+    label: md`**User**\nAlerts · analysis`
+  }
+
+  kis: {
+    label: md`**KIS Open API**\nRealtime ticks`
+    class: external
+  }
+
+  batch_sources: {
+    label: md`**Toss / Hankyung**\nBatch reference data`
+    class: external
+  }
+}
+
+doodream: "DooDream v1" {
+  ingress_layer: {
+    label: "Layer 1 · Ingestion & Collection"
+    class: layer
+
+    ingestion: {
+      label: md`**KIS Ingestion**\nPython\nAuth · WS · Parse`
+      class: service
+    }
+
+    batch: {
+      label: md`**Batch Enrichment**\nAirflow + Python\nReports · outbox`
+      class: service
+    }
+  }
+
+  event_layer: {
+    label: "Layer 2 · Event Backbone"
+    class: layer
+
+    kafka: {
+      shape: queue
+      label: md`**Kafka**\nstock-ticks\nstock-alerts\nstock-patterns\nenrichment-events`
+      class: infra
+    }
+
+    schema: {
+      label: md`**Schema Registry**\nAvro contracts`
+      class: infra
+    }
+  }
+
+  processing_layer: {
+    label: "Layer 3 · Processing & Delivery"
+    class: layer
+
+    stream: {
+      label: md`**Stream Detection**\nFlink\nWindows · CEP`
+      class: service
+    }
+
+    persist: {
+      label: md`**Persistence Consumer**\nPython consumer\nTicks · patterns -> DB`
+      class: service
+    }
+
+    serving: {
+      label: md`**Alert Serving API**\nFastAPI\nAlerts · push · notifications`
+      class: service
+    }
+
+    connect: {
+      label: md`**Kafka Connect / CDC**\nDebezium Source\nOutbox -> events`
+      class: service
+    }
+  }
+
+  data_layer: {
+    label: "Layer 4 · Storage & State"
+    class: layer
+
+    postgres: {
+      shape: cylinder
+      label: md`**PostgreSQL**\nSingle database\nbronze · silver · gold\nserving · integration`
+      class: infra
+    }
+  }
+}
+
+notes: {
+  label: md`**Legend**\nSolid = realtime path\nDashed = batch / CDC path`
+  class: note
+}
+
+sources_layer.user -> doodream.processing_layer.serving: "HTTP / WebSocket"
+
+sources_layer.kis -> doodream.ingress_layer.ingestion: "WebSocket ticks"
+doodream.ingress_layer.ingestion -> doodream.event_layer.schema: "Avro contracts"
+doodream.ingress_layer.ingestion -> doodream.event_layer.kafka: "Publish stock-ticks"
+
+doodream.event_layer.kafka -> doodream.processing_layer.stream: "Consume stock-ticks"
+doodream.processing_layer.stream -> doodream.event_layer.schema: "Validate schemas"
+doodream.processing_layer.stream -> doodream.event_layer.kafka: "Publish alerts / patterns"
+
+doodream.event_layer.kafka -> doodream.processing_layer.persist: "Consume ticks / patterns"
+doodream.processing_layer.persist -> doodream.data_layer.postgres: "Write tick_history / pattern_events"
+
+sources_layer.batch_sources -> doodream.ingress_layer.batch: "HTTP / scraping" {
+  style.stroke-dash: 4
+}
+doodream.ingress_layer.batch -> doodream.data_layer.postgres: "Write enrichment / outbox" {
+  style.stroke-dash: 4
+}
+doodream.data_layer.postgres -> doodream.processing_layer.connect: "Logical replication" {
+  style.stroke-dash: 4
+}
+doodream.processing_layer.connect -> doodream.event_layer.kafka: "Publish enrichment-events" {
+  style.stroke-dash: 4
+}
+
+doodream.event_layer.kafka -> doodream.processing_layer.serving: "Consume alerts / enrichment-events"
+doodream.processing_layer.serving -> doodream.data_layer.postgres: "Write notifications / snapshots / watchlists"
