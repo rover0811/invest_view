@@ -1,0 +1,51 @@
+direction: down
+
+d2-config: {
+  layout-engine: elk
+}
+
+classes: {
+  external: {
+    style.fill: "#fff4e5"
+    style.stroke: "#d99100"
+    style.stroke-dash: 3
+  }
+  internal: {
+    style.fill: "#eef6ff"
+    style.stroke: "#4f83ff"
+    style.stroke-width: 2
+  }
+  layer: {
+    style.fill: "#f8fafc"
+    style.stroke: "#cbd5e1"
+  }
+}
+
+actors: {
+  label: "Actors & External Systems"
+  class: layer
+
+  user: {
+    shape: c4-person
+    label: md`**User**\nAlerts · analysis`
+  }
+
+  kis: {
+    label: md`**KIS Open API**\nRealtime ticks`
+    class: external
+  }
+
+  batch_sources: {
+    label: md`**Toss / Hankyung**\nBatch reference data`
+    class: external
+  }
+}
+
+doodream: {
+  label: md`**DooDream v1**\nKIS-first realtime alert pipeline\nSingle PostgreSQL · Kafka backbone`
+  class: internal
+}
+
+actors.user -> doodream: "Uses"
+actors.kis -> doodream: "Streams realtime ticks"
+actors.batch_sources -> doodream: "Supplies reports / reference data"
