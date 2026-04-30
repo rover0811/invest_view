@@ -350,7 +350,7 @@ erDiagram
 
 | Topic | Key | Value 핵심 필드 | Producer | Consumer |
 | --- | --- | --- | --- | --- |
-| `stock-ticks` | `symbol` | `price`, `volume`, `trade_time`, `change_rate`, `vwap`, `open`, `high`, `low`, `cumulative_volume`, `trade_strength`, `market_session`, `trading_halted`, `time_classification`, `vi_trigger_price` | kis-ws-bridge | Flink, custom persistence consumer |
+| `stock-ticks` | `symbol` | 46필드 snake_case named field + `source_tr_id`, `market`, `received_at` 메타. Kafka header에 `session_id`, `sequence` (gap 감지용). 상세는 `12-kis-realtime-ingress-design.md` 참조 | kis-ws-bridge | Flink, custom persistence consumer |
 | `stock-alerts` | `symbol` | `alert_type`, `window_start`, `window_end`, `trigger_values`, `source_tick_event_id` | Flink | alert-service |
 | `stock-patterns` | `symbol` | `pattern_type`, `window_start`, `window_end`, `trigger_values`, `strategy_name` | Flink | custom persistence consumer, analysis consumers |
 | `enrichment-events` | `symbol` or `report_id` | `report_id`, `report_type`, `available_at`, `summary_ref`, `delivery_target` | Debezium | alert-service |
@@ -359,6 +359,8 @@ erDiagram
 
 - 포맷은 **Avro + Schema Registry**를 기본으로 한다.
 - backward compatible 변경만 허용한다.
+- `stock-ticks`는 v1에서 **KIS-oriented raw handoff contract**로 두고, KIS 46필드를 snake_case named field로 실을 수 있다.
+- Kafka header에 `session_id` + `sequence`를 부착하여 reconnect gap을 downstream이 감지할 수 있게 한다.
 - alert / pattern payload는 `trigger_values`에 집계값을 함께 담아 self-descriptive하게 발행한다.
 - Debezium과 JDBC Sink를 같이 운영하므로, 처음부터 schema naming/versioning 규칙을 통일한다.
 
@@ -366,7 +368,7 @@ erDiagram
 
 | Topic / Event | DB write path | Target table(s) | 이유 |
 | --- | --- | --- | --- |
-| `stock-ticks` | custom persistence consumer | `bronze.tick_history` | tick 저장 규칙과 향후 보정 로직을 우리가 제어하기 위해서 |
+| `stock-ticks` | custom persistence consumer | `bronze.tick_history` | KIS raw-oriented tick(46필드 + 메타)를 그대로 저장하고, 보정/표준화는 이후 단계에서 결정하기 위해서 |
 | `stock-alerts` | FastAPI `alert-service` custom consumer | `gold.alert_events`, `serving.notification_events` | DB 저장 + WebSocket push + 유저 전달 상태 관리가 함께 필요하다 |
 | `stock-patterns` | custom persistence consumer | `gold.pattern_events` | pattern 저장도 동일 consumer 계열에서 제어해 schema / validation / replay 규칙을 맞춘다 |
 | `enrichment-events` | FastAPI `alert-service` custom consumer | `serving.notification_events` 또는 리포트 도착 상태 테이블 | 유저 알림 / push 로직이 들어가므로 serving consumer가 맡는다 |
@@ -374,6 +376,9 @@ erDiagram
 ### Clarification
 
 - **tick 데이터는 우리가 만드는 custom persistence consumer로 DB에 적재한다.**
+- v1의 `stock-ticks`는 normalized domain event보다 **KIS-oriented raw handoff contract**에 가깝게 본다.
+- 따라서 downstream은 당분간 KIS semantic field를 직접 읽는 것을 허용한다.
+- reconnect gap은 body 오염 없이 **Kafka header(`session_id` + `sequence`)**로 signal한다.
 - **pattern 이벤트도 같은 계열의 custom persistence consumer로 `gold.pattern_events`에 적재한다.**
 - custom consumer는 현재 기준으로 **`stock-alerts` + `enrichment-events`를 처리하는 `alert-service`**에 집중한다.
 - 즉 v1의 consumer 계층은 `alert-service`와 `persistence consumer` 두 종류로 본다.
