@@ -48,7 +48,10 @@ async def main() -> None:
     
     try:
         logger.info("Starting KIS ingestion service...")
-        logger.info("Kafka: %s", "enabled" if producer is not None else "disabled")
+        if producer is not None:
+            logger.info("Kafka: enabled (broker=%s, topic=%s)", config.kafka_bootstrap_servers, config.kafka_topic)
+        else:
+            logger.warning("Kafka: disabled (set KIS_KAFKA_ENABLED=true to publish ticks)")
         # Accessing protected member for logging in entrypoint
         logger.info("Market: %s, Symbols: %s", connection_manager._market_router.market_name, config.watch_symbols)
         await connection_manager.start()
