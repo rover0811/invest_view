@@ -20,7 +20,7 @@ from datetime import datetime
 import requests
 import websockets
 
-from models import (
+from kis_ingestion.models import (
     APPROVAL_URL,
     WS_URL,
     TR_IDS,

@@ -9,3 +9,13 @@ dependencies = [
     "requests>=2.33.1",
     "websockets>=16.0",
 ]
+
+[tool.uv.workspace]
+members = ["services/*"]
+exclude = [
+    "services/alert_serving",
+    "services/batch_enrichment",
+    "services/event_pattern_persistence",
+    "services/stream_detection",
+    "services/tick_persistence",
+]
