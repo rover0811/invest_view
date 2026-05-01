@@ -141,21 +141,28 @@ flowchart LR
 
 ### Component definitions
 
-| Component | Responsibility |
-| --- | --- |
-| `KISTokenManager` | REST access token 발급/갱신 담당 |
-| `KISApprovalKeyManager` | WebSocket approval key 발급/갱신 담당 |
-| `KISConnectionManager` | 1세션 제약 하에서 연결 lifecycle 관리 |
-| `KISSubscriptionPool` | 유저 관심종목 union -> KIS 등록 대상 집합 관리 |
-| `MarketSessionPort` | 현재 활성 market이 어떤 TR ID 집합을 쓰는지 추상화 |
-| `KRXSessionAdapter` | KRX 기준 tick/hoga TR ID 제공 |
-| `NXTSessionAdapter` | NXT 기준 tick/hoga TR ID 제공 |
-| `MarketSessionRouter` | 런타임에 활성 market adapter를 교체하고 subscription pool에 반영 |
-| `ScheduleBasedSessionSwitcher` | 시간대 기준으로 KRX/NXT 전환 baseline 계산 |
-| `KISWebSocketClient` | KIS 실시간 메시지 수신 및 reconnect/heartbeat 처리 |
-| `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope를 해석하고 raw record string list로 분해 |
-| `KISTickParser` | KIS 인덱스 기반 필드를 domain event로 정규화 |
-| `StockTickProducer` | Avro schema 기준 `stock-ticks` 발행 |
+| Component | Responsibility | File |
+| --- | --- | --- |
+| `KISTokenManager` | REST access token 발급/갱신. async lock + double-check. httpx.AsyncClient 기반 | `token_manager.py` |
+| `KISApprovalKeyManager` | WebSocket approval key 발급/갱신. async lock + double-check | `approval_key_manager.py` |
+| `KISConnectionManager` | 1세션 제약 하에서 연결 lifecycle 관리. reconnect + resubscribe 총괄 | `connection_manager.py` |
+| `KISSubscriptionPool` | desired/actual state 분리 추적. diff → sub/unsub 산출. cap 초과 reject | `subscription_pool.py` |
+| `MarketSessionPort` | 현재 활성 market이 어떤 TR ID 집합을 쓰는지 추상화 (Protocol) | `market_session.py` |
+| `KRXSessionAdapter` | KRX 기준 tick/hoga TR ID 제공 | `market_session.py` |
+| `NXTSessionAdapter` | NXT 기준 tick/hoga TR ID 제공 | `market_session.py` |
+| `MarketSessionRouter` | 런타임에 활성 market adapter를 교체하고 subscription pool에 반영 | `market_session.py` |
+| `ScheduleBasedSessionSwitcher` | 시간대 기준으로 KRX/NXT 전환 baseline 계산 | `market_session.py` |
+| `KISWebSocketClient` | KIS 실시간 메시지 수신 및 PINGPONG 응답. websockets 기반 | `ws_client.py` |
+| `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope 해석 → `RawKISMessage`. PINGPONG/JSON ACK 분기 | `raw_parser.py` |
+| `KISTickParser` | raw record string → `ParsedTick` (49필드) 정규화 | `tick_parser.py` |
+| `StockTickProducer` | Avro schema 기준 `stock-ticks` 발행 (**v1 구현 범위 밖 — schema 파일 배치만**) | — |
+
+> **Removed components** (과설계 판정):
+> - ~~`TickSink`~~ — abstract sink 불필요. ConnectionManager가 tick_parser 결과를 직접 처리.
+> - ~~`LoggingTickSink`~~ — TickSink 제거에 따라 함께 제거.
+> - ~~`KISSettings` (핵심 컴포넌트)~~ — bootstrap input only. `KISConfig` (pydantic-settings)로 단순화.
+
+> **Note**: 모든 파일 경로는 `services/kis_ingestion/src/kis_ingestion/` 기준 상대경로다.
 
 ### Planning-phase clarification
 
@@ -169,6 +176,8 @@ flowchart LR
 - 유저 watchlist와 서비스 단위 realtime subscription pool은 개념적으로 분리하는 편이 맞다.
 - token / approval key는 영속 테이블보다 runtime manager가 더 적합하다. 이유는 보안성과 TTL 중심 lifecycle 때문이다.
 - `.env`에서 읽은 값은 별도 settings subsystem보다, auth bootstrap 단계에서 필요한 입력만 auth 관련 객체에 주입하는 쪽이 현재 repo 규모에는 더 간결하다.
+- config loader(KISSettings)를 핵심 컴포넌트로 격상하지 않는다. `KISConfig` (pydantic-settings)로 단순 데이터 홀더만 유지하고, bootstrap 단계에서 각 manager에 주입한다.
+- output sink 추상화(TickSink)를 두지 않는다. Kafka 단계 전까지는 ConnectionManager가 파싱 결과를 직접 로깅하고, Kafka 구현 시 StockTickProducer를 처음부터 설계한다.
 
 ### Implementation recommendations
 
@@ -541,6 +550,62 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 - realtime tick은 `H0STCNT0` payload를 파싱한 시계열 이벤트다.
 - 따라서 `CurrentPriceSnapshot`과 `ParsedTick`은 **같은 파일이 아니라 다른 모델**로 유지하는 편이 낫다.
 
+## 7-a. Implementation structure
+
+### Package layout
+
+monorepo 내 독립 uv workspace member로 구성한다. src layout을 사용한다.
+
+```
+invest_view/                           # monorepo root
+├── pyproject.toml                     # workspace root (members=["services/*"])
+├── schemas/
+│   └── stock-ticks.avsc               # 49-field Avro schema (서비스 간 공유 contract)
+├── services/
+│   └── kis_ingestion/
+│       ├── pyproject.toml             # 독립 패키지 (uv workspace member)
+│       ├── ws_example.py              # POC (import 경로 갱신)
+│       ├── src/
+│       │   └── kis_ingestion/
+│       │       ├── __main__.py        # entrypoint: python -m kis_ingestion
+│       │       ├── container.py       # DI container (plain factory)
+│       │       ├── config.py          # KISConfig (pydantic-settings, bootstrap input)
+│       │       ├── token_manager.py
+│       │       ├── approval_key_manager.py
+│       │       ├── ws_client.py
+│       │       ├── connection_manager.py
+│       │       ├── subscription_pool.py
+│       │       ├── market_session.py  # Port + Adapters + Router + Switcher
+│       │       ├── raw_parser.py
+│       │       ├── tick_parser.py     # KISTickParser + ParsedTick
+│       │       └── models/
+│       │           ├── __init__.py    # re-export only
+│       │           ├── constants.py
+│       │           ├── requests.py
+│       │           ├── tick.py
+│       │           └── orderbook.py
+│       └── tests/
+│           ├── conftest.py
+│           └── test_*.py              # 컴포넌트별 단위 테스트
+```
+
+### DI container
+
+- `container.py`는 객체 그래프 조립만 전담한다. 별도 DI 프레임워크 없이 plain factory 패턴.
+- `__main__.py`는 container 호출 + signal handling(SIGINT, SIGTERM → graceful shutdown)만 담당한다.
+
+### __init__.py 전략
+
+- `models/__init__.py`: re-export only (기존 패턴 유지)
+- 나머지 디렉토리: 빈 `__init__.py` 생성하지 않음 (Python 3.11 namespace packages)
+
+### KISConfig
+
+- `pydantic-settings` 기반 단순 데이터 홀더
+- env prefix: `KIS_`
+- 필드: `app_key`, `app_secret`, `ws_url`, `approval_url`, `watch_symbols` (JSON string), `subscription_cap` (default 40)
+- 핵심 아키텍처 컴포넌트가 아닌 bootstrap input으로만 취급
+
 ## 8. Kafka handoff contract
 
 | Topic | Producer | Meaning |
@@ -574,6 +639,23 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 - v1 운영 후 `subscription_cap`을 40에서 41로 올릴 수 있는지 실제 테스트로 확인
 - 향후 multi-source 확장 시 normalized contract topic을 별도로 만들지 여부
 - order book / quote depth topic 분리 시점과 schema
+
+## 10-a. v1 implementation scope
+
+### In scope (Kafka 직전까지)
+
+- uv workspace member 셋업 + src layout 마이그레이션
+- Section 4 컴포넌트 전수 구현 (StockTickProducer 제외)
+- `schemas/stock-ticks.avsc` 파일 배치 (contract 문서 용도)
+- DI container + `__main__.py` entrypoint
+- 컴포넌트별 단위 테스트 (pytest + pytest-asyncio)
+
+### Out of scope (다음 단계)
+
+- StockTickProducer (Kafka 연동 구현)
+- Dockerfile / docker-compose
+- REST current-price snapshot 호출
+- 장 캘린더 관리 (signal 기반으로 불필요)
 
 ## 10. Immediate next split after KIS
 
