@@ -189,6 +189,9 @@ cython_debug/
 # .idea/
 .idea/
 
+# Sisyphus local state
+.sisyphus/
+
 # Abstra
 #   Abstra is an AI-powered process automation framework.
 #   Ignore directories containing user credentials, local state, and settings.
