@@ -42,8 +42,14 @@ class IngestionService:
                 logger.info("Kafka: enabled (broker=%s, topic=%s)", self._config.kafka_bootstrap_servers, self._config.kafka_topic)
             else:
                 logger.warning("Kafka: disabled (set KIS_KAFKA_ENABLED=true to publish ticks)")
-            # 단일 실행 진입점: approval key → websocket → subscribe → receive loop (SIGINT까지 블로킹)
-            await self._connection_manager.start()
+            # connect → tick stream 소비 → publish (SIGINT까지 블로킹)
+            await self._connection_manager.connect()
+            async for tick, session_id, sequence in self._connection_manager:
+                if self._producer is not None:
+                    try:
+                        self._producer.publish(tick, session_id, sequence)
+                    except Exception:
+                        logger.exception("Failed to publish tick seq=%d", sequence)
         except Exception:
             logger.exception("KIS ingestion service failed")
         finally:

@@ -59,7 +59,6 @@ def create_service(config: KISConfig) -> IngestionService:
         raw_parser=raw_parser,
         tick_parser=tick_parser,
         market_router=market_router,
-        producer=producer,
     )
 
     return IngestionService(
