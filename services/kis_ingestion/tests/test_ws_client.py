@@ -1,5 +1,6 @@
 # pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownParameterType=false, reportAny=false, reportUnknownArgumentType=false
 
+import inspect
 import sys
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -30,11 +31,15 @@ async def test_connect_sets_connected_true():
     ) as mock_connect:
         client = KISWebSocketClient("ws://example.com")
 
-        await client.connect("approval-key")
+        await client.connect()
 
         assert client.connected is True
         assert client._ws is mock_ws
         mock_connect.assert_awaited_once_with("ws://example.com", ping_interval=None)
+
+
+def test_connect_does_not_accept_approval_key_argument():
+    assert list(inspect.signature(KISWebSocketClient.connect).parameters) == ["self"]
 
 
 @pytest.mark.asyncio
@@ -46,7 +51,7 @@ async def test_disconnect_sets_connected_false():
         new=AsyncMock(return_value=mock_ws),
     ):
         client = KISWebSocketClient("ws://example.com")
-        await client.connect("approval-key")
+        await client.connect()
 
     await client.disconnect()
 
