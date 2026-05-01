@@ -13,6 +13,7 @@ import websockets.exceptions
 from .approval_key_manager import KISApprovalKeyManager
 from .market_session import KRXSessionAdapter, MarketSessionRouter, NXTSessionAdapter
 from .models.requests import SubscribeMessage
+from .producer import StockTickProducer
 from .raw_parser import KISRawMessageParser, RawKISMessage
 from .subscription_pool import KISSubscriptionPool
 from .tick_parser import KISTickParser
@@ -33,6 +34,7 @@ class KISConnectionManager:
     _raw_parser: KISRawMessageParser
     _tick_parser: KISTickParser
     _market_router: MarketSessionRouter
+    _producer: StockTickProducer | None
     _approval_key: str | None
     _session_id: str
     _sequence: int
@@ -49,6 +51,7 @@ class KISConnectionManager:
         raw_parser: KISRawMessageParser,
         tick_parser: KISTickParser,
         market_router: MarketSessionRouter,
+        producer: StockTickProducer | None = None,
     ) -> None:
         self._approval_key_manager = approval_key_manager
         self._ws_client = ws_client
@@ -56,6 +59,7 @@ class KISConnectionManager:
         self._raw_parser = raw_parser
         self._tick_parser = tick_parser
         self._market_router = market_router
+        self._producer = producer
 
         self._approval_key: str | None = None
         self._session_id: str = str(uuid4())
@@ -253,6 +257,8 @@ class KISConnectionManager:
                 received_at=received_at,
             )
             self._sequence += 1
+            if self._producer is not None:
+                self._producer.publish(tick, self._session_id, self._sequence)
 
             await self._handle_market_switch(tick.market_session_code)
             logger.info(

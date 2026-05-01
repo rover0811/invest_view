@@ -14,6 +14,8 @@ created: 2026-04-29 02:53:52
 - 운영 기준은 **앱키당 1세션 / configurable subscription cap**이다. v1 기본값은 **40**으로 두고, 실제 테스트 후 조정 가능하게 한다.
 - access token과 WebSocket approval key는 **분리된 lifecycle**로 관리한다.
 - KIS scope의 책임은 **정규화된 `stock-ticks` 발행까지**이며, 이후 Flink/serving은 다른 scope다.
+- `stock-ticks` 계약은 **repo-local Avro schema(`schemas/stock-ticks.avsc`)**를 source of truth로 관리하고, **Schema Registry는 MVP 뒤로 미룬다.**
+- Decimal 필드는 Avro `bytes` + `logicalType: decimal`로 인코딩하며, v1 기준 `precision=12`, `scale=8`을 사용한다.
 
 ## 0. Scope Boundary
 
@@ -155,7 +157,7 @@ flowchart LR
 | `KISWebSocketClient` | KIS 실시간 메시지 수신 및 PINGPONG 응답. websockets 기반 | `src/kis_ingestion/ws_client.py` |
 | `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope 해석 → `RawKISMessage`. PINGPONG/JSON ACK 분기 | `src/kis_ingestion/raw_parser.py` |
 | `KISTickParser` | raw record string → `ParsedTick` (49필드) 정규화 | `src/kis_ingestion/tick_parser.py` |
-| `StockTickProducer` | Avro schema 기준 `stock-ticks` 발행 (**v1 구현 범위 밖 — schema 파일 배치만**) | — |
+| `StockTickProducer` | confluent-kafka-python + fastavro 기반 `stock-ticks` 발행. local `schemas/stock-ticks.avsc`를 source of truth로 사용하며, MVP에서는 Schema Registry를 쓰지 않는다. | `src/kis_ingestion/producer.py` |
 
 > **Removed components** (과설계 판정):
 > - ~~`TickSink`~~ — abstract sink 불필요. ConnectionManager가 tick_parser 결과를 직접 처리.
@@ -177,7 +179,7 @@ flowchart LR
 - token / approval key는 영속 테이블보다 runtime manager가 더 적합하다. 이유는 보안성과 TTL 중심 lifecycle 때문이다.
 - `.env`에서 읽은 값은 별도 settings subsystem보다, auth bootstrap 단계에서 필요한 입력만 auth 관련 객체에 주입하는 쪽이 현재 repo 규모에는 더 간결하다.
 - config loader(KISSettings)를 핵심 컴포넌트로 격상하지 않는다. `KISConfig` (pydantic-settings)로 단순 데이터 홀더만 유지하고, bootstrap 단계에서 각 manager에 주입한다.
-- output sink 추상화(TickSink)를 두지 않는다. Kafka 단계 전까지는 ConnectionManager가 파싱 결과를 직접 로깅하고, Kafka 구현 시 StockTickProducer를 처음부터 설계한다.
+- output sink 추상화(TickSink)를 두지 않는다. Kafka 단계는 `StockTickProducer`를 직접 도입하고, ConnectionManager가 파싱 결과를 producer에 바로 전달한다.
 
 ### Implementation recommendations
 
@@ -255,7 +257,7 @@ flowchart LR
 1. KIS가 raw realtime payload를 전송한다.
 2. `KISRawMessageParser`는 `TR_ID`, count, raw records를 분리한다.
 3. `KISTickParser`는 field index를 기반으로 `ParsedTick`으로 정규화한다.
-4. `StockTickProducer`는 `stock-ticks` Avro event를 발행한다.
+4. `StockTickProducer`는 local `stock-ticks.avsc` 기준으로 Avro 직렬화 후, key=`symbol`, headers=`session_id`/`sequence`로 `stock-ticks`를 발행한다.
 5. downstream(Flink / custom persistence consumer)은 여기서부터만 KIS 세부 포맷을 몰라도 된다.
 
 ### 5-3.a. Subscribe / unsubscribe wire format
@@ -455,6 +457,8 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 - **Key**: `symbol` (종목코드, string)
 - **Value**: flat Avro record (아래 49필드)
 - **Headers**: `session_id` (reconnect 시 갱신되는 UUID), `sequence` (monotonic int, gap 감지용)
+- **Schema source**: repo-local `schemas/stock-ticks.avsc` (MVP 기준 source of truth)
+- **Schema Registry**: MVP 범위에서 제외. schema file 기반으로 먼저 진행하고, registry는 후속 단계에서 도입한다.
 
 #### Value schema (49필드)
 
@@ -468,8 +472,8 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 | 2 | `price` | `STCK_PRPR` | `int` | 현재가 |
 | 3 | `change_sign` | `PRDY_VRSS_SIGN` | `string` | 전일대비부호 |
 | 4 | `change` | `PRDY_VRSS` | `int` | 전일대비 |
-| 5 | `change_rate` | `PRDY_CTRT` | `decimal` | 전일대비율 |
-| 6 | `vwap` | `WGHN_AVRG_STCK_PRC` | `decimal` | 가중평균가 |
+| 5 | `change_rate` | `PRDY_CTRT` | `decimal(12,8)` | 전일대비율 |
+| 6 | `vwap` | `WGHN_AVRG_STCK_PRC` | `decimal(12,8)` | 가중평균가 |
 | 7 | `open` | `STCK_OPRC` | `int` | 시가 |
 | 8 | `high` | `STCK_HGPR` | `int` | 고가 |
 | 9 | `low` | `STCK_LWPR` | `int` | 저가 |
@@ -481,12 +485,12 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 | 15 | `sell_count` | `SELN_CNTG_CSNU` | `int` | 매도체결건수 |
 | 16 | `buy_count` | `SHNU_CNTG_CSNU` | `int` | 매수체결건수 |
 | 17 | `net_buy_count` | `NTBY_CNTG_CSNU` | `int` | 순매수체결건수 |
-| 18 | `trade_strength` | `CTTR` | `decimal` | 체결강도 |
+| 18 | `trade_strength` | `CTTR` | `decimal(12,8)` | 체결강도 |
 | 19 | `total_sell_volume` | `SELN_CNTG_SMTN` | `int` | 총매도수량 |
 | 20 | `total_buy_volume` | `SHNU_CNTG_SMTN` | `int` | 총매수수량 |
 | 21 | `trade_type` | `CCLD_DVSN` (`CNTG_CLS_CODE` alias) | `string` | 체결구분 |
-| 22 | `buy_ratio` | `SHNU_RATE` | `decimal` | 매수비율 |
-| 23 | `prev_day_volume_rate` | `PRDY_VOL_VRSS_ACML_VOL_RATE` | `decimal` | 전일거래량대비등락율 |
+| 22 | `buy_ratio` | `SHNU_RATE` | `decimal(12,8)` | 매수비율 |
+| 23 | `prev_day_volume_rate` | `PRDY_VOL_VRSS_ACML_VOL_RATE` | `decimal(12,8)` | 전일거래량대비등락율 |
 | 24 | `open_time` | `OPRC_HOUR` | `string` | 시가시간 |
 | 25 | `open_vs_sign` | `OPRC_VRSS_PRPR_SIGN` | `string` | 시가대비구분 |
 | 26 | `open_vs_price` | `OPRC_VRSS_PRPR` | `int` | 시가대비 |
@@ -503,12 +507,29 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 | 37 | `bid_remain_1` | `BIDP_RSQN1` | `int` | 매수호가잔량1 |
 | 38 | `total_ask_remain` | `TOTAL_ASKP_RSQN` | `int` | 총매도호가잔량 |
 | 39 | `total_bid_remain` | `TOTAL_BIDP_RSQN` | `int` | 총매수호가잔량 |
-| 40 | `volume_turnover` | `VOL_TNRT` | `decimal` | 거래량회전율 |
+| 40 | `volume_turnover` | `VOL_TNRT` | `decimal(12,8)` | 거래량회전율 |
 | 41 | `prev_same_hour_volume` | `PRDY_SMNS_HOUR_ACML_VOL` | `int` | 전일동시간누적거래량 |
-| 42 | `prev_same_hour_volume_rate` | `PRDY_SMNS_HOUR_ACML_VOL_RATE` | `decimal` | 전일동시간누적거래량비율 |
+| 42 | `prev_same_hour_volume_rate` | `PRDY_SMNS_HOUR_ACML_VOL_RATE` | `decimal(12,8)` | 전일동시간누적거래량비율 |
 | 43 | `hour_class_code` | `HOUR_CLS_CODE` | `string` | 시간구분코드 |
 | 44 | `market_termination_code` | `MRKT_TRTM_CLS_CODE` | `string` | 임의종료구분코드 |
 | 45 | `vi_trigger_price` | `VI_STND_PRC` | `int` | 정적VI발동기준가 |
+
+#### Avro encoding details
+
+- Decimal 필드 7개(`change_rate`, `vwap`, `trade_strength`, `buy_ratio`, `prev_day_volume_rate`, `volume_turnover`, `prev_same_hour_volume_rate`)는 모두 아래 형식으로 고정한다.
+
+```json
+{
+  "type": "bytes",
+  "logicalType": "decimal",
+  "precision": 12,
+  "scale": 8
+}
+```
+
+- Python runtime에서는 `Decimal` 객체를 그대로 유지하고, `fastavro`가 decimal logical type으로 직렬화한다.
+- 이 선택은 Flink에서 `DECIMAL(12, 8)`로 자연스럽게 매핑되며, string 기반 재파싱을 피한다.
+- `schemas/stock-ticks.avsc`가 이 계약의 최종 source of truth다.
 
 ### Design implication
 
@@ -581,6 +602,7 @@ invest_view/                           # monorepo root
 │       │       ├── market_session.py  # Port + Adapters + Router + Switcher
 │       │       ├── raw_parser.py
 │       │       ├── tick_parser.py     # KISTickParser + ParsedTick
+│       │       ├── producer.py        # StockTickProducer (confluent-kafka-python + fastavro)
 │       │       └── models/
 │       │           ├── __init__.py    # re-export only
 │       │           ├── constants.py
@@ -606,7 +628,7 @@ invest_view/                           # monorepo root
 
 - `pydantic-settings` 기반 단순 데이터 홀더
 - env prefix: `KIS_`
-- 필드: `app_key`, `app_secret`, `ws_url`, `approval_url`, `watch_symbols` (JSON string), `subscription_cap` (default 40)
+- 필드: `app_key`, `app_secret`, `ws_url`, `approval_url`, `watch_symbols` (JSON string), `subscription_cap` (default 40), `kafka_enabled` (default false), `kafka_bootstrap_servers`, `kafka_topic`
 - 핵심 아키텍처 컴포넌트가 아닌 bootstrap input으로만 취급
 
 ## 8. Kafka handoff contract
@@ -621,6 +643,7 @@ invest_view/                           # monorepo root
 - Flink가 필요한 윈도우/패턴/알림은 이 이후 scope다.
 - KIS가 이미 제공하는 VWAP/OHLC는 **입력 필드**로 사용하고, v1에서는 이를 raw-oriented handoff contract에 그대로 포함시킬 수 있다.
 - 따라서 이 문서에서 가장 중요한 산출물은 ERD가 아니라 **`stock-ticks`의 정확한 handoff schema**다.
+- MVP에서는 local Avro schema file을 먼저 확정하고, Schema Registry는 후속 단계에서 붙인다.
 
 
 ## 9. Resolved design decisions
@@ -636,9 +659,15 @@ invest_view/                           # monorepo root
 | Q7 | market signal 보정 | TR ID를 마켓 식별의 주 원천으로 사용. `NEW_MKOP_CLS_CODE` 기반 전환은 보수적으로 운영하며 알 수 없는 코드는 무시 |
 | Q8 | REST bootstrap snapshot | v1은 없이 진행. 핵심종목이라 체결 빈도 충분 |
 | Q9 | reconnect gap 처리 | Kafka header(`session_id`+`sequence`). body clean. Flink가 gap 감지 |
+| Q10 | Kafka client | `confluent-kafka-python` sync producer를 사용. `produce()` + `poll(0)` 직접 호출 |
+| Q11 | Schema management | MVP는 repo-local `.avsc`를 source of truth로 두고, Schema Registry는 뒤로 미룸 |
+| Q12 | Decimal encoding | Avro `bytes` + `logicalType: decimal`, `precision=12`, `scale=8` |
 
 ### Implementation confirmation
-- All components implemented as designed (StockTickProducer excluded per plan)
+- 현재 merged code는 pre-Kafka 단계 컴포넌트까지 구현 완료 상태다.
+- PR #14의 다음 scoped change는 `StockTickProducer` + producer wiring + schema decimal update다.
+- Kafka MVP는 local `schemas/stock-ticks.avsc`를 source of truth로 사용하고, Schema Registry는 아직 도입하지 않는다.
+- Decimal 필드는 string이 아니라 Avro decimal logical type(`bytes`, `precision=12`, `scale=8`)으로 관리한다.
 - DI container: `src/kis_ingestion/container.py` (plain factory)
 - Entrypoint: `src/kis_ingestion/__main__.py`
 - Config: `src/kis_ingestion/config.py` (pydantic-settings, bootstrap input only)
@@ -654,13 +683,21 @@ invest_view/                           # monorepo root
 
 ## 10-a. v1 implementation scope
 
-### In scope (Kafka 직전까지)
+### Current merged implementation scope (pre-Kafka)
 
 - uv workspace member 셋업 + src layout 마이그레이션
-- Section 4 컴포넌트 전수 구현 (StockTickProducer 제외)
+- Section 4 컴포넌트 구현 (StockTickProducer 제외)
 - `schemas/stock-ticks.avsc` 파일 배치 (contract 문서 용도)
 - DI container + `__main__.py` entrypoint
 - 컴포넌트별 단위 테스트 (pytest + pytest-asyncio)
+
+### Next scoped change (PR #14 continuation)
+
+- `StockTickProducer` 구현 (`confluent-kafka-python` + `fastavro`)
+- `schemas/stock-ticks.avsc` Decimal 필드 7개를 Avro decimal logical type으로 정식 반영
+- `KISConfig`에 Kafka 설정 추가 (`kafka_enabled`, `kafka_bootstrap_servers`, `kafka_topic`)
+- `connection_manager.py`에서 ParsedTick 생성 직후 producer publish 삽입
+- `docs/design/11-design-freeze-discussion-pack.md`, `docs/design/12-kis-realtime-ingress-design.md`를 Kafka MVP 기준으로 동기화
 
 ### Implementation status
 - All in-scope components implemented in `services/kis_ingestion/src/kis_ingestion/`
@@ -669,7 +706,7 @@ invest_view/                           # monorepo root
 
 ### Out of scope (다음 단계)
 
-- StockTickProducer (Kafka 연동 구현)
+- Schema Registry 도입
 - Dockerfile / docker-compose
 - REST current-price snapshot 호출
 - 장 캘린더 관리 (signal 기반으로 불필요)
