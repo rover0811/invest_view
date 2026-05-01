@@ -143,18 +143,18 @@ flowchart LR
 
 | Component | Responsibility | File |
 | --- | --- | --- |
-| `KISTokenManager` | REST access token 발급/갱신. async lock + double-check. httpx.AsyncClient 기반 | `token_manager.py` |
-| `KISApprovalKeyManager` | WebSocket approval key 발급/갱신. async lock + double-check | `approval_key_manager.py` |
-| `KISConnectionManager` | 1세션 제약 하에서 연결 lifecycle 관리. reconnect + resubscribe 총괄 | `connection_manager.py` |
-| `KISSubscriptionPool` | desired/actual state 분리 추적. diff → sub/unsub 산출. cap 초과 reject | `subscription_pool.py` |
-| `MarketSessionPort` | 현재 활성 market이 어떤 TR ID 집합을 쓰는지 추상화 (Protocol) | `market_session.py` |
-| `KRXSessionAdapter` | KRX 기준 tick/hoga TR ID 제공 | `market_session.py` |
-| `NXTSessionAdapter` | NXT 기준 tick/hoga TR ID 제공 | `market_session.py` |
-| `MarketSessionRouter` | 런타임에 활성 market adapter를 교체하고 subscription pool에 반영 | `market_session.py` |
-| `ScheduleBasedSessionSwitcher` | 시간대 기준으로 KRX/NXT 전환 baseline 계산 | `market_session.py` |
-| `KISWebSocketClient` | KIS 실시간 메시지 수신 및 PINGPONG 응답. websockets 기반 | `ws_client.py` |
-| `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope 해석 → `RawKISMessage`. PINGPONG/JSON ACK 분기 | `raw_parser.py` |
-| `KISTickParser` | raw record string → `ParsedTick` (49필드) 정규화 | `tick_parser.py` |
+| `KISTokenManager` | REST access token 발급/갱신. async lock + double-check. httpx.AsyncClient 기반 | `src/kis_ingestion/token_manager.py` |
+| `KISApprovalKeyManager` | WebSocket approval key 발급/갱신. async lock + double-check | `src/kis_ingestion/approval_key_manager.py` |
+| `KISConnectionManager` | 1세션 제약 하에서 연결 lifecycle 관리. reconnect + resubscribe 총괄 | `src/kis_ingestion/connection_manager.py` |
+| `KISSubscriptionPool` | desired/actual state 분리 추적. diff → sub/unsub 산출. cap 초과 reject | `src/kis_ingestion/subscription_pool.py` |
+| `MarketSessionPort` | 현재 활성 market이 어떤 TR ID 집합을 쓰는지 추상화 (Protocol) | `src/kis_ingestion/market_session.py` |
+| `KRXSessionAdapter` | KRX 기준 tick/hoga TR ID 제공 | `src/kis_ingestion/market_session.py` |
+| `NXTSessionAdapter` | NXT 기준 tick/hoga TR ID 제공 | `src/kis_ingestion/market_session.py` |
+| `MarketSessionRouter` | 런타임에 활성 market adapter를 교체하고 subscription pool에 반영 | `src/kis_ingestion/market_session.py` |
+| `ScheduleBasedSessionSwitcher` | 시간대 기준으로 KRX/NXT 전환 baseline 계산 | `src/kis_ingestion/market_session.py` |
+| `KISWebSocketClient` | KIS 실시간 메시지 수신 및 PINGPONG 응답. websockets 기반 | `src/kis_ingestion/ws_client.py` |
+| `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope 해석 → `RawKISMessage`. PINGPONG/JSON ACK 분기 | `src/kis_ingestion/raw_parser.py` |
+| `KISTickParser` | raw record string → `ParsedTick` (49필드) 정규화 | `src/kis_ingestion/tick_parser.py` |
 | `StockTickProducer` | Avro schema 기준 `stock-ticks` 발행 (**v1 구현 범위 밖 — schema 파일 배치만**) | — |
 
 > **Removed components** (과설계 판정):
@@ -162,7 +162,7 @@ flowchart LR
 > - ~~`LoggingTickSink`~~ — TickSink 제거에 따라 함께 제거.
 > - ~~`KISSettings` (핵심 컴포넌트)~~ — bootstrap input only. `KISConfig` (pydantic-settings)로 단순화.
 
-> **Note**: 모든 파일 경로는 `services/kis_ingestion/src/kis_ingestion/` 기준 상대경로다.
+> **Note**: 모든 파일 경로는 `services/kis_ingestion/` 기준 상대경로다.
 
 ### Planning-phase clarification
 
@@ -634,6 +634,13 @@ invest_view/                           # monorepo root
 | Q8 | REST bootstrap snapshot | v1은 없이 진행. 핵심종목이라 체결 빈도 충분 |
 | Q9 | reconnect gap 처리 | Kafka header(`session_id`+`sequence`). body clean. Flink가 gap 감지 |
 
+### Implementation confirmation
+- All components implemented as designed (StockTickProducer excluded per plan)
+- DI container: `src/kis_ingestion/container.py` (plain factory)
+- Entrypoint: `src/kis_ingestion/__main__.py`
+- Config: `src/kis_ingestion/config.py` (pydantic-settings, bootstrap input only)
+- Avro schema: `schemas/stock-ticks.avsc`
+
 ## 10. Remaining open questions
 
 - v1 운영 후 `subscription_cap`을 40에서 41로 올릴 수 있는지 실제 테스트로 확인
@@ -649,6 +656,11 @@ invest_view/                           # monorepo root
 - `schemas/stock-ticks.avsc` 파일 배치 (contract 문서 용도)
 - DI container + `__main__.py` entrypoint
 - 컴포넌트별 단위 테스트 (pytest + pytest-asyncio)
+
+### Implementation status
+- All in-scope components implemented in `services/kis_ingestion/src/kis_ingestion/`
+- Tests in `services/kis_ingestion/tests/`
+- Avro schema at `schemas/stock-ticks.avsc`
 
 ### Out of scope (다음 단계)
 
