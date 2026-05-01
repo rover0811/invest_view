@@ -17,7 +17,7 @@ async def main() -> None:
         logger.error("Set KIS_APP_KEY and KIS_APP_SECRET environment variables")
         sys.exit(1)
     
-    connection_manager, subscription_pool, http_client = create_container(config)
+    connection_manager, subscription_pool, http_client, producer = create_container(config)
     
     # Set desired subscriptions from config
     if config.watch_symbols:
@@ -31,6 +31,12 @@ async def main() -> None:
     async def shutdown():
         logger.info("Shutting down...")
         await connection_manager.stop()
+        if producer is not None:
+            remaining = await loop.run_in_executor(None, producer.flush, 30.0)
+            if remaining > 0:
+                logger.warning("Kafka flush incomplete: %d messages not delivered", remaining)
+            else:
+                logger.info("Kafka producer flushed successfully")
         await http_client.aclose()
     
     for sig in (signal.SIGINT, signal.SIGTERM):
@@ -42,6 +48,7 @@ async def main() -> None:
     
     try:
         logger.info("Starting KIS ingestion service...")
+        logger.info("Kafka: %s", "enabled" if producer is not None else "disabled")
         # Accessing protected member for logging in entrypoint
         logger.info("Market: %s, Symbols: %s", connection_manager._market_router.market_name, config.watch_symbols)
         await connection_manager.start()

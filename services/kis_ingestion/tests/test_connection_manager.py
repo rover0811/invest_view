@@ -373,3 +373,59 @@ async def test_handle_json_response_does_not_classify_generic_sub_prefix_as_subs
 
     subscription_pool.confirm_subscribed.assert_not_called()
     subscription_pool.confirm_unsubscribed.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_handle_data_message_calls_publish():
+    manager, _, _, _, raw_parser, tick_parser, _ = make_manager()
+    mock_producer = MagicMock()
+    manager._producer = mock_producer
+
+    raw_parser.parse.return_value = SimpleNamespace(
+        encrypted=False,
+        tr_id="H0STCNT0",
+        count=1,
+        payload="payload",
+    )
+    raw_parser.split_records.return_value = ["val"] * 46
+
+    tick = SimpleNamespace(
+        market_session_code="0",
+        symbol="005930",
+        market="KRX",
+        price=73100,
+    )
+    tick_parser.parse.return_value = tick
+    manager._handle_market_switch = AsyncMock()
+
+    await manager._handle_message("raw-data")
+
+    mock_producer.publish.assert_called_once_with(
+        tick, manager.session_id, manager.sequence
+    )
+
+
+@pytest.mark.asyncio
+async def test_handle_data_message_skips_publish_when_no_producer():
+    manager, _, _, _, raw_parser, tick_parser, _ = make_manager()
+
+    raw_parser.parse.return_value = SimpleNamespace(
+        encrypted=False,
+        tr_id="H0STCNT0",
+        count=1,
+        payload="payload",
+    )
+    raw_parser.split_records.return_value = ["val"] * 46
+
+    tick = SimpleNamespace(
+        market_session_code="0",
+        symbol="005930",
+        market="KRX",
+        price=73100,
+    )
+    tick_parser.parse.return_value = tick
+    manager._handle_market_switch = AsyncMock()
+
+    await manager._handle_message("raw-data")
+
+    assert manager.sequence == 1
