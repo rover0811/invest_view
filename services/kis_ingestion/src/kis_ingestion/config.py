@@ -12,7 +12,7 @@ class KISConfig(BaseSettings):
     watch_symbols: list[str] = []
     subscription_cap: int = 40
     
-    # Kafka
+    # Kafka — False면 tick parse+log만, True면 stock-ticks 토픽에 Avro 발행
     kafka_enabled: bool = False
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic: str = "stock-ticks"
