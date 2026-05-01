@@ -94,9 +94,8 @@ async def test_start_gets_approval_key_connects_and_subscribes():
         _,
     ) = make_manager()
     subscription_pool.diff.return_value = ([("H0STCNT0", "005930")], [])
-    manager._receive_loop = AsyncMock()
 
-    await manager.start()
+    await manager.connect()
 
     approval_key_manager.get_approval_key.assert_awaited_once()
     ws_client.connect.assert_awaited_once_with()
@@ -105,7 +104,6 @@ async def test_start_gets_approval_key_connects_and_subscribes():
     assert subscribe_message.header.approval_key == "approval-key"
     assert subscribe_message.body["input"].tr_id == "H0STCNT0"
     assert subscribe_message.body["input"].tr_key == "005930"
-    manager._receive_loop.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -140,17 +138,20 @@ async def test_handle_message_data_parses_tick_and_increments_sequence():
         payload="payload",
     )
     raw_parser.split_records.return_value = [str(index) for index in range(46)]
-    tick_parser.parse.return_value = SimpleNamespace(
+    mock_tick = SimpleNamespace(
         market_session_code="0",
         symbol="005930",
         market="KRX",
         price=73100,
     )
+    tick_parser.parse.return_value = mock_tick
     manager._handle_market_switch = AsyncMock()
 
     await manager._handle_message("raw-data")
 
     assert manager.sequence == 1
+    assert len(manager._tick_buffer) == 1
+    assert manager._tick_buffer[0] == (mock_tick, manager.session_id, 1)
     tick_parser.parse.assert_called_once()
     assert tick_parser.parse.call_args.kwargs["source_tr_id"] == "H0STCNT0"
     assert tick_parser.parse.call_args.kwargs["market"] == "KRX"
@@ -376,56 +377,91 @@ async def test_handle_json_response_does_not_classify_generic_sub_prefix_as_subs
 
 
 @pytest.mark.asyncio
-async def test_handle_data_message_calls_publish():
-    manager, _, _, _, raw_parser, tick_parser, _ = make_manager()
-    mock_producer = MagicMock()
-    manager._producer = mock_producer
+async def test_connect_sets_session_and_subscribes():
+    manager, _, ws_client, subscription_pool, _, _, _ = make_manager()
+    subscription_pool.diff.return_value = ([("H0STCNT0", "005930")], [])
 
-    raw_parser.parse.return_value = SimpleNamespace(
-        encrypted=False,
-        tr_id="H0STCNT0",
-        count=1,
-        payload="payload",
-    )
-    raw_parser.split_records.return_value = ["val"] * 46
+    await manager.connect()
 
-    tick = SimpleNamespace(
-        market_session_code="0",
-        symbol="005930",
-        market="KRX",
-        price=73100,
-    )
-    tick_parser.parse.return_value = tick
-    manager._handle_market_switch = AsyncMock()
-
-    await manager._handle_message("raw-data")
-
-    mock_producer.publish.assert_called_once_with(
-        tick, manager.session_id, manager.sequence
-    )
+    assert manager._running is True
+    assert manager._sequence == 0
+    assert manager._approval_key == "approval-key"
+    ws_client.connect.assert_awaited_once()
+    ws_client.send_subscribe.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_handle_data_message_skips_publish_when_no_producer():
-    manager, _, _, _, raw_parser, tick_parser, _ = make_manager()
+async def test_iterator_yields_multiple_ticks_from_single_message():
+    manager, _, ws_client, _, raw_parser, tick_parser, _ = make_manager()
+    manager._running = True
 
     raw_parser.parse.return_value = SimpleNamespace(
-        encrypted=False,
-        tr_id="H0STCNT0",
-        count=1,
-        payload="payload",
+        encrypted=False, tr_id="H0STCNT0", count=2, payload="payload"
     )
-    raw_parser.split_records.return_value = ["val"] * 46
+    raw_parser.split_records.return_value = [str(i) for i in range(92)]
 
-    tick = SimpleNamespace(
-        market_session_code="0",
-        symbol="005930",
-        market="KRX",
-        price=73100,
-    )
-    tick_parser.parse.return_value = tick
+    tick1 = SimpleNamespace(market_session_code="0", symbol="005930", market="KRX", price=73100)
+    tick2 = SimpleNamespace(market_session_code="0", symbol="035720", market="KRX", price=52000)
+    tick_parser.parse.side_effect = [tick1, tick2]
     manager._handle_market_switch = AsyncMock()
 
-    await manager._handle_message("raw-data")
+    call_count = 0
+    async def mock_recv():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return "raw-data"
+        manager._running = False
+        raise StopAsyncIteration
+    ws_client.recv = mock_recv
 
-    assert manager.sequence == 1
+    result1 = await manager.__anext__()
+    result2 = await manager.__anext__()
+
+    assert result1 == (tick1, manager.session_id, 1)
+    assert result2 == (tick2, manager.session_id, 2)
+    assert call_count == 1
+
+
+@pytest.mark.asyncio
+async def test_iterator_reconnects_with_new_session():
+    manager, _, ws_client, _, raw_parser, tick_parser, _ = make_manager()
+    manager._running = True
+    manager._base_delay = 0
+
+    raw_parser.parse.return_value = SimpleNamespace(
+        encrypted=False, tr_id="H0STCNT0", count=1, payload="payload"
+    )
+    raw_parser.split_records.return_value = [str(i) for i in range(46)]
+    tick_parser.parse.return_value = SimpleNamespace(
+        market_session_code="0", symbol="005930", market="KRX", price=73100
+    )
+    manager._handle_market_switch = AsyncMock()
+
+    import websockets.exceptions
+    call_count = 0
+    async def mock_recv():
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            raise websockets.exceptions.ConnectionClosed(None, None)
+        return "raw-data"
+    ws_client.recv = mock_recv
+
+    with patch("kis_ingestion.connection_manager.asyncio.sleep", new=AsyncMock()):
+        manager._reconnect = AsyncMock(side_effect=lambda: setattr(manager, '_session_id', 'new-session'))
+        result = await manager.__anext__()
+
+    manager._reconnect.assert_awaited_once()
+    assert result[1] == 'new-session'
+
+
+@pytest.mark.asyncio
+async def test_iterator_stops_cleanly_on_stop():
+    manager, _, _, _, _, _, _ = make_manager()
+    manager._running = False
+
+    with pytest.raises(StopAsyncIteration):
+        await manager.__anext__()
+
+

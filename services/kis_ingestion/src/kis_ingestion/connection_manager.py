@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import Literal, cast
+from typing import Literal, Self, cast
 from uuid import uuid4
 
 import websockets.exceptions
@@ -13,10 +13,9 @@ import websockets.exceptions
 from .approval_key_manager import KISApprovalKeyManager
 from .market_session import KRXSessionAdapter, MarketSessionRouter, NXTSessionAdapter
 from .models.requests import SubscribeMessage
-from .producer import StockTickProducer
 from .raw_parser import KISRawMessageParser, RawKISMessage
 from .subscription_pool import KISSubscriptionPool
-from .tick_parser import KISTickParser
+from .tick_parser import KISTickParser, ParsedTick
 from .ws_client import KISWebSocketClient
 
 
@@ -28,13 +27,20 @@ ControlOperation = Literal["subscribe", "unsubscribe"]
 
 
 class KISConnectionManager:
+    """
+    Manages KIS WebSocket connections and subscriptions.
+    Supports the AsyncIterator pattern for consuming ticks.
+
+    Usage:
+        await manager.connect()
+        async for tick, session_id, sequence in manager:
+            ...
+    """
     _approval_key_manager: KISApprovalKeyManager
     _ws_client: KISWebSocketClient
     _subscription_pool: KISSubscriptionPool
     _raw_parser: KISRawMessageParser
     _tick_parser: KISTickParser
-    _market_router: MarketSessionRouter
-    _producer: StockTickProducer | None
     _approval_key: str | None
     _session_id: str
     _sequence: int
@@ -42,6 +48,7 @@ class KISConnectionManager:
     _max_retries: int
     _base_delay: float
     _pending_control_ops: dict[tuple[str, str], ControlOperation]
+    _tick_buffer: list[tuple[ParsedTick, str, int]]
 
     def __init__(
         self,
@@ -51,15 +58,12 @@ class KISConnectionManager:
         raw_parser: KISRawMessageParser,
         tick_parser: KISTickParser,
         market_router: MarketSessionRouter,
-        producer: StockTickProducer | None = None,
     ) -> None:
         self._approval_key_manager = approval_key_manager
         self._ws_client = ws_client
         self._subscription_pool = subscription_pool
         self._raw_parser = raw_parser
         self._tick_parser = tick_parser
-        self._market_router = market_router
-        self._producer = producer
 
         self._approval_key: str | None = None
         self._session_id: str = str(uuid4())
@@ -68,6 +72,7 @@ class KISConnectionManager:
         self._max_retries: int = 5
         self._base_delay: float = 1.0
         self._pending_control_ops: dict[tuple[str, str], ControlOperation] = {}
+        self._tick_buffer: list[tuple[ParsedTick, str, int]] = []
 
     @property
     def session_id(self) -> str:
@@ -77,7 +82,11 @@ class KISConnectionManager:
     def sequence(self) -> int:
         return self._sequence
 
-    async def start(self) -> None:
+    async def connect(self) -> None:
+        """
+        Establishes WebSocket connection and subscribes to all desired symbols.
+        This must be called before iterating over the manager.
+        """
         approval_key = await self._approval_key_manager.get_approval_key()
         await self._ws_client.connect()
 
@@ -88,12 +97,56 @@ class KISConnectionManager:
         self._pending_control_ops.clear()
 
         await self._subscribe_all()
-        await self._receive_loop()
 
     async def stop(self) -> None:
+        """Stops the connection and clears pending operations."""
         self._running = False
         self._pending_control_ops.clear()
         await self._ws_client.disconnect()
+        self._tick_buffer.clear()
+
+    def __aiter__(self) -> Self:
+        return self
+
+    async def __anext__(self) -> tuple[ParsedTick, str, int]:
+        """
+        Yields the next tick from the buffer or waits for new messages from WebSocket.
+        """
+        if self._tick_buffer:
+            return self._tick_buffer.pop(0)
+
+        while True:
+            if not self._running:
+                raise StopAsyncIteration
+
+            try:
+                raw = await self._ws_client.recv()
+            except websockets.exceptions.ConnectionClosedOK:
+                if not self._running:
+                    raise StopAsyncIteration
+                logger.info("WebSocket closed normally, reconnecting...")
+                await self._reconnect()
+                continue
+            except (
+                ConnectionError,
+                OSError,
+                RuntimeError,
+                websockets.exceptions.ConnectionClosed,
+            ) as exc:
+                if not self._running:
+                    raise StopAsyncIteration
+                logger.warning("WebSocket receive failed, reconnecting: %s", exc)
+                await self._reconnect()
+                continue
+
+            try:
+                await self._handle_message(raw)
+            except Exception:
+                logger.exception("Failed to handle KIS message")
+                continue
+
+            if self._tick_buffer:
+                return self._tick_buffer.pop(0)
 
     async def _subscribe_all(self) -> None:
         if self._approval_key is None:
@@ -111,38 +164,16 @@ class KISConnectionManager:
             )
             self._pending_control_ops[(tr_id, symbol)] = "subscribe"
 
-    async def _receive_loop(self) -> None:
-        while self._running:
-            try:
-                raw = await self._ws_client.recv()
-            except websockets.exceptions.ConnectionClosedOK:
-                if not self._running:
-                    break
-                logger.info("WebSocket closed normally, reconnecting...")
-                await self._reconnect()
-                continue
-            except (ConnectionError, OSError, RuntimeError, websockets.exceptions.ConnectionClosed) as exc:
-                if not self._running:
-                    break
-                logger.warning("WebSocket receive failed, reconnecting: %s", exc)
-                await self._reconnect()
-                continue
-
-            try:
-                await self._handle_message(raw)
-            except Exception:
-                logger.exception("Failed to handle KIS message")
-
     async def _handle_message(self, raw: str) -> None:
-        if self._raw_parser.is_pingpong(raw):
+        if self._raw_parser.is_pingpong(raw): # ws 데이터가 pingpong일 때 분기
             await self._ws_client.send_pong(raw)
             return
 
-        if self._raw_parser.is_json_response(raw):
+        if self._raw_parser.is_json_response(raw): # ws 데이터가 json_response일 때 분기
             await self._handle_json_response(raw)
             return
 
-        message = self._raw_parser.parse(raw)
+        message = self._raw_parser.parse(raw) # ws 데이터가 평소대로 왔을 때 분기
         if message is None or message.encrypted:
             return
 
@@ -257,10 +288,8 @@ class KISConnectionManager:
                 received_at=received_at,
             )
             self._sequence += 1
-            if self._producer is not None:
-                self._producer.publish(tick, self._session_id, self._sequence)
-
             await self._handle_market_switch(tick.market_session_code)
+            self._tick_buffer.append((tick, self._session_id, self._sequence))
             logger.info(
                 "Tick received session_id=%s sequence=%s symbol=%s market=%s price=%s",
                 self._session_id,
