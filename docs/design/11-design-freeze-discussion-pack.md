@@ -14,7 +14,7 @@ created: 2026-04-29 02:37:46
 - 저장소는 **단일 PostgreSQL**로 단순화한다. BigQuery / Elasticsearch는 v1 범위에서 제외한다.
 - 실시간 backbone은 **KIS WebSocket -> Kafka -> Flink -> Kafka -> FastAPI alert-service -> PostgreSQL / WebSocket**이다.
 - **실시간 소스는 KIS only**로 고정한다. Toss / 리포트 / 재무 데이터는 배치 enrichment 경로로만 다룬다.
-- 이벤트 계약은 처음부터 **Avro + Schema Registry**로 간다.
+- 이벤트 계약은 **Avro + repo-local schema file**로 먼저 확정하고, **Schema Registry는 MVP 뒤로 미룬다.**
 - Kafka Connect는 **Debezium Source 중심**으로 사용하고, `stock-ticks` / `stock-patterns` 적재는 **우리가 만드는 custom consumer**로 처리한다.
 - Agent/MCP의 조회 경로는 **PostgreSQL only**다. Kafka direct read는 하지 않는다.
 - **Paper trading / 주문 실행 / 미장 확장**은 현재 설계 확정 범위에서 제외한다.
@@ -89,8 +89,6 @@ System_Boundary(sys, "DooDream v1") {
     Container(persist, "Persistence Consumer", "Python consumer", "Consumes stock-ticks / stock-patterns and writes archival and derived tables")
     Container(batch, "Batch Enrichment", "Airflow + Python", "Loads reports/reference data and writes outbox")
     Container(connect, "Kafka Connect / CDC", "Debezium Source", "Publishes enrichment events from PostgreSQL outbox")
-    Container(schema, "Schema Registry", "Avro Registry", "Event schema management")
-
     ContainerDb(kafka, "Kafka", "Topics", "stock-ticks, stock-alerts, stock-patterns, enrichment-events")
     ContainerDb(pg, "PostgreSQL", "Single database", "bronze/silver/gold/serving/integration")
 }
@@ -98,11 +96,9 @@ System_Boundary(sys, "DooDream v1") {
 Rel(user, serving, "Uses", "HTTP / WebSocket")
 
 Rel(kis, ingestion, "Streams realtime ticks", "WebSocket")
-Rel(ingestion, schema, "Validates tick schema", "Avro")
 Rel(ingestion, kafka, "Publishes stock-ticks", "Kafka")
 
 Rel(kafka, stream, "Supplies stock-ticks", "Kafka")
-Rel(stream, schema, "Uses event schemas", "Avro")
 Rel(stream, kafka, "Publishes stock-alerts / stock-patterns", "Kafka")
 
 Rel(kafka, persist, "Supplies stock-ticks / stock-patterns", "Kafka")
@@ -122,6 +118,7 @@ Rel(serving, pg, "Reads and writes watchlists, notifications, snapshots", "SQL")
 - **왼쪽에서 오른쪽**으로 보면 된다: `KIS -> ingestion -> Kafka -> Flink -> Kafka -> FastAPI -> PostgreSQL`
 - batch는 별도 경로지만, outbox + Debezium으로 실시간 serving과 합류한다.
 - tick / pattern DB 적재는 Connect가 아니라 **custom persistence consumer**가 담당한다.
+- Schema Registry는 현재 MVP 범위에서 제외하고, repo-local Avro schema file을 source of truth로 둔다.
 - Agent / paper trading / BigQuery / Elasticsearch는 **이 C4에서 의도적으로 제외**했다. 현재 freeze 범위가 아니기 때문이다.
 
 ## 1. Scope 정의
@@ -160,7 +157,7 @@ Rel(serving, pg, "Reads and writes watchlists, notifications, snapshots", "SQL")
 | ID    | 요구사항                                                                                                |
 | ----- | --------------------------------------------------------------------------------------------------- |
 | FR-01 | 시스템은 KIS WebSocket으로 서비스 전체 기준 최대 41종목을 실시간 구독할 수 있어야 한다.                                           |
-| FR-02 | kis-ws-bridge는 KIS raw payload를 정규화하여 `stock-ticks` 토픽에 발행해야 한다.                                    |
+| FR-02 | KIS ingestion service는 KIS raw payload를 정규화하여 `stock-ticks` 토픽에 발행해야 한다.                             |
 | FR-03 | Flink는 `stock-ticks`를 소비해 5분 슬라이딩 윈도우 지표와 CEP 규칙을 계산해야 한다.                                          |
 | FR-04 | 시스템은 `PRICE_ALERT`, `VI_IMMINENT`, `MOMENTUM_SHIFT`, `TRADING_HALT` 유형의 알림 이벤트를 발행해야 한다.            |
 | FR-05 | 시스템은 골든/데드크로스, RSI, MACD 기반 패턴 이벤트를 `stock-patterns`로 발행할 수 있어야 한다.                                 |
@@ -178,7 +175,7 @@ Rel(serving, pg, "Reads and writes watchlists, notifications, snapshots", "SQL")
 | NFR-02 | 내구성    | Broker는 `replication.factor=3`, `min.insync.replicas=2`, `unclean.leader.election.enable=false`를 기본값으로 한다. |
 | NFR-03 | 멱등성    | Producer는 `acks=all`, `enable.idempotence=true`를 사용하고, consumer side effect는 DB upsert로 멱등 처리한다.           |
 | NFR-04 | 일관성    | Consumer는 `enable.auto.commit=false`, `isolation.level=read_committed`를 사용한다.                              |
-| NFR-05 | 스키마 진화 | 이벤트는 Avro + Schema Registry를 사용하고 backward compatible 변경만 허용한다.                                            |
+| NFR-05 | 스키마 진화 | 이벤트는 Avro schema file을 source of truth로 관리하고 backward compatible 변경만 허용한다. Schema Registry는 MVP 뒤로 미룬다. |
 | NFR-06 | 운영 단순성 | 학습 프로젝트이므로 단일 PostgreSQL과 제한된 토픽 수를 유지하고, 불필요한 저장소/서비스 증설은 금지한다.                                           |
 | NFR-07 | 비용 제약  | 로컬/kind 우선, 클라우드 배포는 후순위다. 상시 클라우드 운영비는 토론 기준 최소화한다.                                                       |
 | NFR-08 | 관측성    | 최소 수준의 lag, connector status, checkpoint 상태, WebSocket 연결 상태를 확인할 수 있어야 한다.                                |
@@ -225,7 +222,7 @@ flowchart LR
 | Usecase | 설명 | 주 컴포넌트 |
 | --- | --- | --- |
 | 관심 종목 등록 및 구독 풀 반영 | 유저 watchlist를 서비스 전체 구독 풀과 분리해 관리 | FastAPI, PostgreSQL, subscription manager |
-| 실시간 파생 알림 생성 | tick을 윈도우/CEP 처리해 alert/pattern 이벤트 생성 | kis-ws-bridge, Kafka, Flink |
+| 실시간 파생 알림 생성 | tick을 윈도우/CEP 처리해 alert/pattern 이벤트 생성 | KIS ingestion service, Kafka, Flink |
 | 사용자에게 실시간 알림 전달 | alert-service가 DB 저장 후 WebSocket push | FastAPI alert-service, PostgreSQL |
 | 리포트 도착 이벤트 전달 | 배치 enrichment 완료를 outbox + Debezium으로 이벤트화 | Airflow, PostgreSQL, Debezium |
 | Agent 분석 요청 처리 | Agent는 PostgreSQL에서 recent context를 읽고 답변 | Agent runtime, FastAPI, PostgreSQL |
@@ -320,7 +317,7 @@ erDiagram
 | 스키마 | 테이블 | 역할 |
 | --- | --- | --- |
 | `serving` | `users`, `watchlist_items`, `notification_events`, `symbol_snapshot` | 사용자 조회와 Agent read path |
-| `bronze` | `tick_history` | JDBC Sink가 적재하는 append-only tick 저장소. replay 기준 데이터 |
+| `bronze` | `tick_history` | custom persistence consumer가 적재하는 append-only tick 저장소. replay 기준 데이터 |
 | `silver` | `symbol_5m_metrics`, `report_artifacts` | 윈도우 지표와 배치 enrichment 결과 |
 | `gold` | `alert_events`, `pattern_events` | 사용자에게 의미 있는 파생 이벤트 저장 |
 | `integration` | `realtime_subscriptions`, `outbox_events` | KIS 등록 상태와 CDC outbox 관리 |
@@ -350,23 +347,25 @@ erDiagram
 
 | Topic | Key | Value 핵심 필드 | Producer | Consumer |
 | --- | --- | --- | --- | --- |
-| `stock-ticks` | `symbol` | `price`, `volume`, `trade_time`, `change_rate`, `vwap`, `open`, `high`, `low`, `cumulative_volume`, `trade_strength`, `market_session`, `trading_halted`, `time_classification`, `vi_trigger_price` | kis-ws-bridge | Flink, custom persistence consumer |
+| `stock-ticks` | `symbol` | 46필드 snake_case named field + `source_tr_id`, `market`, `received_at` 메타. Decimal 필드는 Avro decimal logical type을 사용하고, Kafka header에 `session_id`, `sequence`를 둔다. 상세는 `12-kis-realtime-ingress-design.md` 참조 | KIS ingestion service | Flink, custom persistence consumer |
 | `stock-alerts` | `symbol` | `alert_type`, `window_start`, `window_end`, `trigger_values`, `source_tick_event_id` | Flink | alert-service |
 | `stock-patterns` | `symbol` | `pattern_type`, `window_start`, `window_end`, `trigger_values`, `strategy_name` | Flink | custom persistence consumer, analysis consumers |
 | `enrichment-events` | `symbol` or `report_id` | `report_id`, `report_type`, `available_at`, `summary_ref`, `delivery_target` | Debezium | alert-service |
 
 ### Event schema 원칙
 
-- 포맷은 **Avro + Schema Registry**를 기본으로 한다.
+- 포맷은 **Avro + repo-local schema file**을 기본으로 한다. Schema Registry는 MVP 뒤로 미룬다.
 - backward compatible 변경만 허용한다.
+- `stock-ticks`는 v1에서 **KIS-oriented raw handoff contract**로 두고, KIS 46필드를 snake_case named field로 실을 수 있다.
+- Kafka header에 `session_id` + `sequence`를 부착하여 reconnect gap을 downstream이 감지할 수 있게 한다.
 - alert / pattern payload는 `trigger_values`에 집계값을 함께 담아 self-descriptive하게 발행한다.
-- Debezium과 JDBC Sink를 같이 운영하므로, 처음부터 schema naming/versioning 규칙을 통일한다.
+- Debezium과 custom persistence consumer를 같이 운영하므로, 처음부터 schema naming/versioning 규칙을 통일한다.
 
 ### DB write path summary
 
 | Topic / Event | DB write path | Target table(s) | 이유 |
 | --- | --- | --- | --- |
-| `stock-ticks` | custom persistence consumer | `bronze.tick_history` | tick 저장 규칙과 향후 보정 로직을 우리가 제어하기 위해서 |
+| `stock-ticks` | custom persistence consumer | `bronze.tick_history` | KIS raw-oriented tick(46필드 + 메타)를 그대로 저장하고, 보정/표준화는 이후 단계에서 결정하기 위해서 |
 | `stock-alerts` | FastAPI `alert-service` custom consumer | `gold.alert_events`, `serving.notification_events` | DB 저장 + WebSocket push + 유저 전달 상태 관리가 함께 필요하다 |
 | `stock-patterns` | custom persistence consumer | `gold.pattern_events` | pattern 저장도 동일 consumer 계열에서 제어해 schema / validation / replay 규칙을 맞춘다 |
 | `enrichment-events` | FastAPI `alert-service` custom consumer | `serving.notification_events` 또는 리포트 도착 상태 테이블 | 유저 알림 / push 로직이 들어가므로 serving consumer가 맡는다 |
@@ -374,6 +373,9 @@ erDiagram
 ### Clarification
 
 - **tick 데이터는 우리가 만드는 custom persistence consumer로 DB에 적재한다.**
+- v1의 `stock-ticks`는 normalized domain event보다 **KIS-oriented raw handoff contract**에 가깝게 본다.
+- 따라서 downstream은 당분간 KIS semantic field를 직접 읽는 것을 허용한다.
+- reconnect gap은 body 오염 없이 **Kafka header(`session_id` + `sequence`)**로 signal한다.
 - **pattern 이벤트도 같은 계열의 custom persistence consumer로 `gold.pattern_events`에 적재한다.**
 - custom consumer는 현재 기준으로 **`stock-alerts` + `enrichment-events`를 처리하는 `alert-service`**에 집중한다.
 - 즉 v1의 consumer 계층은 `alert-service`와 `persistence consumer` 두 종류로 본다.
@@ -385,7 +387,7 @@ erDiagram
 | KIS 41종목 한도 | 서비스 전체 구독 풀이 41종목에서 막힘 | v1 범위를 41종목으로 고정하고, watchlist와 realtime subscription pool을 분리한다. |
 | KIS 앱키당 1세션 | 다중 세션 확장이 즉시 어렵다 | 단일 appkey/세션 운영을 기본으로 하고, 확장은 차후 appkey 추가 전략으로 푼다. |
 | WebSocket approval key / access token 24시간 주기 | 키 갱신 실패 시 장중 수집 중단 위험 | 접속키/토큰 refresh runbook과 만료 전 갱신 로직을 우선순위 높은 운영 과제로 둔다. |
-| 인프라 비용 | Kafka + Connect + Schema Registry + Flink 조합이 학습 프로젝트치고 무겁다 | 토픽 수를 최소화하고, 로컬/kind 중심으로 개발 후 필요한 시점에만 상시 배포한다. |
+| 인프라 비용 | Kafka + Connect + Flink 조합만으로도 학습 프로젝트치고 무겁다 | Schema Registry는 MVP에서 제외하고, 토픽 수를 최소화하며 로컬/kind 중심으로 개발 후 필요한 시점에만 상시 배포한다. |
 | 팀 역량 | CDC, Flink checkpoint, Kafka consumer 멱등 처리에 학습 비용이 크다 | 역할을 ingestion / stream / serving으로 분리하고, 각 영역의 done definition을 좁게 잡는다. |
 | 단일 PostgreSQL | 저장소 SPOF이며 hot path와 read path가 한 DB에 모인다 | v1에서는 단순성을 우선하고, 테이블/스키마 분리와 retention 정책으로 버틴다. |
 | 문서-설계 불일치 | 기존 C4 문서에는 BQ/ES/paper trading이 남아 있어 회의에서 혼선이 생길 수 있다 | 이 문서를 freeze note로 사용하고, 후속으로 01~10 문서를 현재 설계에 맞게 정리한다. |
@@ -396,7 +398,7 @@ erDiagram
 
 | 트랙 | 책임 범위 | 주요 산출물 |
 | --- | --- | --- |
-| Track A. Ingestion / Platform | KIS 연결, parser, Kafka topic, Schema Registry, persistence consumer, subscription pool | kis-ws-bridge, topic/schema 정의, persistence consumer, Debezium 설정 |
+| Track A. Ingestion / Platform | KIS 연결, parser, Kafka topic, Avro schema contract, persistence consumer, subscription pool | KIS ingestion service, topic/schema 정의, persistence consumer, Debezium 설정 |
 | Track B. Stream / Data | Flink 윈도우/CEP, alert/pattern 규칙, replay 기준 데이터 정리 | Flink job, alert/pattern event contract, tick replay 기준 |
 | Track C. Serving / Product | alert-service, PostgreSQL serving schema, WebSocket push, Agent read API | FastAPI alert-service, notification 저장/전달, user-facing query path |
 
@@ -419,7 +421,7 @@ erDiagram
 | Phase | 기간 가정 | 목표 | Exit Criteria |
 | --- | --- | --- | --- |
 | Phase 0. Design Freeze | 이번 주 | scope, schema, 역할, roadmap 합의 | 이 문서 기준으로 팀 합의 완료 |
-| Phase 1. Realtime Foundation | 1주 | KIS -> Kafka -> PostgreSQL 적재 경로 확보 | `stock-ticks` 발행, JDBC Sink 적재, 41종목 구독 풀 동작 |
+| Phase 1. Realtime Foundation | 1주 | KIS -> Kafka -> PostgreSQL 적재 경로 확보 | `stock-ticks` 발행, custom persistence consumer 적재, 41종목 구독 풀 동작 |
 | Phase 2. Stream Detection | 1주 | Flink alert/pattern 생성 | `stock-alerts` / `stock-patterns`가 테스트 데이터로 안정 발행 |
 | Phase 3. Serving & Notification | 1주 | alert-service, WebSocket push, notification 저장 | 사용자에게 실시간 알림과 리포트 도착 알림 전달 가능 |
 | Phase 4. Batch Integration | 1주 | Airflow enrichment + outbox + Debezium 연결 | `enrichment-events`가 실시간 서빙 경로와 연결됨 |
