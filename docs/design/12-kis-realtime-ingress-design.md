@@ -150,7 +150,7 @@ flowchart LR
 | `MarketSessionPort` | 현재 활성 market이 어떤 TR ID 집합을 쓰는지 추상화 (Protocol) | `src/kis_ingestion/market_session.py` |
 | `KRXSessionAdapter` | KRX 기준 tick/hoga TR ID 제공 | `src/kis_ingestion/market_session.py` |
 | `NXTSessionAdapter` | NXT 기준 tick/hoga TR ID 제공 | `src/kis_ingestion/market_session.py` |
-| `MarketSessionRouter` | 런타임에 활성 market adapter를 교체하고 subscription pool에 반영 | `src/kis_ingestion/market_session.py` |
+| `MarketSessionRouter` | 런타임에 활성 market adapter를 관리. 현재 구현은 TR ID 기반 식별을 우선하며 세션 코드 기반 전환은 보수적으로 운영 | `src/kis_ingestion/market_session.py` |
 | `ScheduleBasedSessionSwitcher` | 시간대 기준으로 KRX/NXT 전환 baseline 계산 | `src/kis_ingestion/market_session.py` |
 | `KISWebSocketClient` | KIS 실시간 메시지 수신 및 PINGPONG 응답. websockets 기반 | `src/kis_ingestion/ws_client.py` |
 | `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope 해석 → `RawKISMessage`. PINGPONG/JSON ACK 분기 | `src/kis_ingestion/raw_parser.py` |
@@ -197,10 +197,10 @@ flowchart LR
 
 1. 시스템 시작 시 auth bootstrap 입력(app key / app secret)과 초기 `watch_symbols`를 확보한다.
 2. REST access token을 warm-up 한다.
-3. WebSocket approval key를 발급받는다.
+3. WebSocket approval key를 발급받는다. 이 키는 세션 연결 후 구독 메시지 헤더에 사용한다.
 4. `MarketSessionRouter`가 현재 시간대 기준 활성 market adapter를 결정한다.
-5. `KISConnectionManager`가 단일 세션을 연다.
-6. `KISSubscriptionPool`의 현재 union을 기준으로 종목 등록을 수행한다.
+5. `KISConnectionManager`가 단일 세션을 연다. 이때는 transport 연결만 수행하며 인증 키를 보내지 않는다.
+6. `KISSubscriptionPool`의 현재 union을 기준으로 종목 등록을 수행한다. 이때 발급받은 approval key를 각 메시지 헤더에 포함한다.
 7. 수신된 raw message는 parser -> tick parser -> Kafka producer 순서로 처리된다.
 
 ### 5-1.a. Auth bootstrap details
@@ -241,12 +241,14 @@ flowchart LR
 
 ### 5-2.a. Market session switching (확정)
 
-1. bootstrap 시 `ScheduleBasedSessionSwitcher`가 현재 시각 기준으로 초기 market adapter(KRX/NXT)를 결정한다.
-2. 운영 중에는 수신된 tick의 `market_session_code`(`NEW_MKOP_CLS_CODE`) signal을 기준으로 전환 여부를 판단한다.
-3. 전환이 필요하면 `MarketSessionRouter`가 active adapter를 교체한다.
-4. `KISSubscriptionPool`은 기존 desired set의 `tr_id`를 새 adapter 기준으로 갱신한다.
-5. `KISConnectionManager`는 **unsub 먼저 → sub 나중** 순서로 diff를 실행한다. 전환 중 2~3초 빈 구간은 장 전환 시점이라 허용한다.
-6. 이 방식이면 장 캘린더를 직접 관리하지 않아도 공휴일/반일장이 signal로 자동 반영된다.
+1. bootstrap 시 `ScheduleBasedSessionSwitcher`가 현재 시각 기준으로 초기 market adapter를 결정한다.
+2. 런타임 마켓 식별은 수신된 데이터의 TR ID 계열을 우선 신뢰한다. (`H0ST*`는 KRX, `H0NX*`는 NXT)
+3. `NEW_MKOP_CLS_CODE`는 세션 상태 힌트로만 유지하며, 현재 구현은 이 값에 따른 자동 전환을 보수적으로 처리한다.
+4. 지원하지 않거나 문서화되지 않은 세션 코드 값이 들어오면 전환을 수행하지 않고 로그만 남긴다.
+5. 마켓 전환이 확정되면 `MarketSessionRouter`가 활성 adapter를 교체하고 구독 풀을 갱신한다.
+6. `KISConnectionManager`는 기존 구독 해지 후 새 마켓 구독을 신청하는 순서로 동작한다.
+
+> Implementation note: KIS에서 KRX/NXT 식별을 위한 `NEW_MKOP_CLS_CODE` 매핑을 공식적으로 제공하기 전까지 런타임 전환은 보수적으로 운영한다. 현재는 TR ID를 가장 확실한 마켓 식별자로 사용하며, 알 수 없는 세션 코드에 의한 임의 전환은 방지한다.
 
 ### 5-3. Runtime tick flow
 
@@ -298,6 +300,7 @@ flowchart LR
 
 ### Subscription semantics
 
+- `approval_key`는 WebSocket 연결 시점이 아니라, 각 구독/해지 제어 메시지의 JSON 헤더에 포함한다.
 - `tr_type=1`은 subscribe, `tr_type=2`는 unsubscribe다.
 - `tr_key`는 종목 코드다.
 - 등록 상태는 request/response 한 번으로 끝나는 stateless 조회가 아니라, **세션에 붙는 지속 구독 상태**로 다룬다.
@@ -630,7 +633,7 @@ invest_view/                           # monorepo root
 | Q4 | 40 vs 41 cap | 기본값 **40**. configurable |
 | Q5 | subscribe 반영 주기 | v1 pool 고정. 주기적 체크는 market session 전환용만 |
 | Q6 | 전환 순서 | unsub 먼저. 2~3초 빈 구간 허용 |
-| Q7 | market signal 보정 | v1부터 `NEW_MKOP_CLS_CODE` signal 기반. schedule은 bootstrap만. 장 캘린더 불필요 |
+| Q7 | market signal 보정 | TR ID를 마켓 식별의 주 원천으로 사용. `NEW_MKOP_CLS_CODE` 기반 전환은 보수적으로 운영하며 알 수 없는 코드는 무시 |
 | Q8 | REST bootstrap snapshot | v1은 없이 진행. 핵심종목이라 체결 빈도 충분 |
 | Q9 | reconnect gap 처리 | Kafka header(`session_id`+`sequence`). body clean. Flink가 gap 감지 |
 
@@ -640,6 +643,8 @@ invest_view/                           # monorepo root
 - Entrypoint: `src/kis_ingestion/__main__.py`
 - Config: `src/kis_ingestion/config.py` (pydantic-settings, bootstrap input only)
 - Avro schema: `schemas/stock-ticks.avsc`
+- WebSocket 연결은 transport 전용이며, `approval_key`는 구독 제어 메시지 헤더에서 사용한다.
+- 마켓 식별은 TR ID(`H0ST*`, `H0NX*`)를 기준으로 수행하며 세션 코드는 보조 힌트로만 활용한다.
 
 ## 10. Remaining open questions
 
