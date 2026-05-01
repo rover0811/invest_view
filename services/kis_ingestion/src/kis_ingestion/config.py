@@ -11,3 +11,8 @@ class KISConfig(BaseSettings):
     token_url: str = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
     watch_symbols: list[str] = []
     subscription_cap: int = 40
+    
+    # Kafka
+    kafka_enabled: bool = False
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_topic: str = "stock-ticks"
