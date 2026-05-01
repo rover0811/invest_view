@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from datetime import datetime, timezone
-from typing import cast
+from typing import Literal, cast
 from uuid import uuid4
+
+import websockets.exceptions
 
 from .approval_key_manager import KISApprovalKeyManager
 from .market_session import KRXSessionAdapter, MarketSessionRouter, NXTSessionAdapter
@@ -19,6 +21,9 @@ from .ws_client import KISWebSocketClient
 
 logger = logging.getLogger(__name__)
 RECORD_FIELD_COUNT = 46
+SUBSCRIBE_ACK_CODES = frozenset({"OPSP0000", "OPSP0002"})
+UNSUBSCRIBE_ACK_CODES = frozenset({"OPSP0001", "OPSP0003"})
+ControlOperation = Literal["subscribe", "unsubscribe"]
 
 
 class KISConnectionManager:
@@ -34,6 +39,7 @@ class KISConnectionManager:
     _running: bool
     _max_retries: int
     _base_delay: float
+    _pending_control_ops: dict[tuple[str, str], ControlOperation]
 
     def __init__(
         self,
@@ -57,6 +63,7 @@ class KISConnectionManager:
         self._running: bool = False
         self._max_retries: int = 5
         self._base_delay: float = 1.0
+        self._pending_control_ops: dict[tuple[str, str], ControlOperation] = {}
 
     @property
     def session_id(self) -> str:
@@ -68,18 +75,20 @@ class KISConnectionManager:
 
     async def start(self) -> None:
         approval_key = await self._approval_key_manager.get_approval_key()
-        await self._ws_client.connect(approval_key)
+        await self._ws_client.connect()
 
         self._approval_key = approval_key
         self._session_id = str(uuid4())
         self._sequence = 0
         self._running = True
+        self._pending_control_ops.clear()
 
         await self._subscribe_all()
         await self._receive_loop()
 
     async def stop(self) -> None:
         self._running = False
+        self._pending_control_ops.clear()
         await self._ws_client.disconnect()
 
     async def _subscribe_all(self) -> None:
@@ -90,17 +99,25 @@ class KISConnectionManager:
 
         for tr_id, symbol in to_unsubscribe:
             await self._ws_client.send_unsubscribe(self._approval_key, tr_id, symbol)
+            self._pending_control_ops[(tr_id, symbol)] = "unsubscribe"
 
         for tr_id, symbol in to_subscribe:
             await self._ws_client.send_subscribe(
                 SubscribeMessage.subscribe(self._approval_key, tr_id, symbol)
             )
+            self._pending_control_ops[(tr_id, symbol)] = "subscribe"
 
     async def _receive_loop(self) -> None:
         while self._running:
             try:
                 raw = await self._ws_client.recv()
-            except (ConnectionError, OSError, RuntimeError) as exc:
+            except websockets.exceptions.ConnectionClosedOK:
+                if not self._running:
+                    break
+                logger.info("WebSocket closed normally, reconnecting...")
+                await self._reconnect()
+                continue
+            except (ConnectionError, OSError, RuntimeError, websockets.exceptions.ConnectionClosed) as exc:
                 if not self._running:
                     break
                 logger.warning("WebSocket receive failed, reconnecting: %s", exc)
@@ -128,16 +145,10 @@ class KISConnectionManager:
         await self._handle_data_message(message)
 
     async def _handle_market_switch(self, market_session_code: str) -> None:
-        next_adapter = self._resolve_market_adapter(market_session_code)
-        if next_adapter is None:
-            return
-
-        if next_adapter.market_name == self._market_router.market_name:
-            return
-
-        old_tr_id, new_tr_id = self._market_router.switch(next_adapter)
-        self._subscription_pool.switch_market(old_tr_id, new_tr_id)
-        await self._subscribe_all()
+        logger.info(
+            "Ignoring unsupported market session code for market switching: %s",
+            market_session_code,
+        )
 
     async def _reconnect(self) -> None:
         last_error: Exception | None = None
@@ -150,10 +161,11 @@ class KISConnectionManager:
                     await self._ws_client.disconnect()
 
                 approval_key = await self._approval_key_manager.force_refresh()
-                await self._ws_client.connect(approval_key)
+                await self._ws_client.connect()
 
                 self._approval_key = approval_key
                 self._subscription_pool.clear_actual()
+                self._pending_control_ops.clear()
                 self._session_id = str(uuid4())
                 self._sequence = 0
 
@@ -177,17 +189,37 @@ class KISConnectionManager:
         rt_cd = str(self._extract_response_value(response, "rt_cd") or "")
         tr_id = self._extract_response_value(response, "tr_id")
         symbol = self._extract_response_value(response, "tr_key")
-        tr_type = str(self._extract_response_value(response, "tr_type") or "")
-
-        if rt_cd != "0":
-            logger.warning("KIS subscription response NACK: %s", response)
-            return
+        msg_cd = str(self._extract_response_value(response, "msg_cd") or "")
+        msg1 = str(self._extract_response_value(response, "msg1") or "")
 
         if tr_id is None or symbol is None:
             logger.warning("KIS ACK missing tr_id/tr_key: %s", response)
             return
 
-        if tr_type == "2":
+        pending_key = (tr_id, symbol)
+        pending_operation = self._pending_control_ops.get(pending_key)
+        response_operation = self._classify_control_response(msg_cd, msg1, rt_cd)
+
+        if response_operation is None:
+            if rt_cd == "0" and pending_operation is not None:
+                response_operation = pending_operation
+            else:
+                logger.warning(
+                    "KIS subscription response NACK or unknown ACK: %s", response
+                )
+                return
+
+        _ = self._pending_control_ops.pop(pending_key, None)
+
+        if pending_operation is not None and pending_operation != response_operation:
+            logger.warning(
+                "KIS control response mismatch: pending=%s response=%s payload=%s",
+                pending_operation,
+                response_operation,
+                response,
+            )
+
+        if response_operation == "unsubscribe":
             self._subscription_pool.confirm_unsubscribed(tr_id, symbol)
             return
 
@@ -209,10 +241,15 @@ class KISConnectionManager:
                 )
                 continue
 
+            market_adapter = self._resolve_market_adapter_from_tr_id(message.tr_id)
+            if market_adapter is None:
+                logger.warning("Skipping tick with unsupported TR ID: %s", message.tr_id)
+                continue
+
             tick = self._tick_parser.parse(
                 raw_record_values=record_values,
                 source_tr_id=message.tr_id,
-                market=self._market_router.market_name,
+                market=market_adapter.market_name,
                 received_at=received_at,
             )
             self._sequence += 1
@@ -249,13 +286,35 @@ class KISConnectionManager:
 
         return None
 
-    def _resolve_market_adapter(
-        self, market_session_code: str
-    ) -> KRXSessionAdapter | NXTSessionAdapter | None:
-        normalized = market_session_code.strip().upper()
+    def _classify_control_response(
+        self,
+        msg_cd: str,
+        msg1: str,
+        rt_cd: str,
+    ) -> ControlOperation | None:
+        normalized_code = msg_cd.strip().upper()
+        if normalized_code in SUBSCRIBE_ACK_CODES:
+            return "subscribe"
+        if normalized_code in UNSUBSCRIBE_ACK_CODES:
+            return "unsubscribe"
 
-        if normalized in {"1", "KRX"}:
+        if rt_cd != "0":
+            return None
+
+        normalized_msg = " ".join(msg1.strip().upper().split())
+        if normalized_msg.startswith("UNSUBSCRIBE"):
+            return "unsubscribe"
+        if normalized_msg.startswith("SUBSCRIBE"):
+            return "subscribe"
+
+        return None
+
+    def _resolve_market_adapter_from_tr_id(
+        self, tr_id: str
+    ) -> KRXSessionAdapter | NXTSessionAdapter | None:
+        normalized = tr_id.strip().upper()
+        if normalized.startswith("H0ST"):
             return KRXSessionAdapter()
-        if normalized in {"2", "NXT"}:
+        if normalized.startswith("H0NX"):
             return NXTSessionAdapter()
         return None

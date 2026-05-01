@@ -21,8 +21,7 @@ class KISWebSocketClient:
     def connected(self) -> bool:
         return self._connected
 
-    async def connect(self, approval_key: str) -> None:
-        _ = approval_key
+    async def connect(self) -> None:
         if self._connected:
             return
 
