@@ -1,0 +1,18 @@
+from pydantic_settings import BaseSettings, SettingsConfigDict
+from kis_ingestion.models.constants import APPROVAL_URL, WS_URL
+
+class KISConfig(BaseSettings):
+    model_config = SettingsConfigDict(env_prefix="KIS_")
+
+    app_key: str
+    app_secret: str
+    ws_url: str = WS_URL
+    approval_url: str = APPROVAL_URL
+    token_url: str = "https://openapi.koreainvestment.com:9443/oauth2/tokenP"
+    watch_symbols: list[str] = []
+    subscription_cap: int = 40
+    
+    # Kafka — False면 tick parse+log만, True면 stock-ticks 토픽에 Avro 발행
+    kafka_enabled: bool = False
+    kafka_bootstrap_servers: str = "localhost:9092"
+    kafka_topic: str = "stock-ticks"
