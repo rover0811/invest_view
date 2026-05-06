@@ -1,0 +1,21 @@
+[project]
+name = "invest-view"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic>=2.13.3",
+    "requests>=2.33.1",
+    "websockets>=16.0",
+]
+
+[tool.uv.workspace]
+members = ["services/*"]
+exclude = [
+    "services/alert_serving",
+    "services/batch_enrichment",
+    "services/event_pattern_persistence",
+    "services/stream_detection",
+    "services/tick_persistence",
+]
