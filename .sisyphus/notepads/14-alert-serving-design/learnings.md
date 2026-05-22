@@ -130,3 +130,16 @@
 - **Verification**:
   - All 6 tests passed.
   - Evidence: `.sisyphus/evidence/task-5-jwt-valid.txt`.
+
+## Alert Service Configuration (T4)
+- **Pydantic Settings**:
+  - Implemented `AlertServiceConfig` using `pydantic-settings`.
+  - Used `env_prefix="ALERT_SERVICE_"` to isolate environment variables.
+  - Set `env_file=None` to avoid automatic `.env` loading, favoring explicit environment variables.
+- **Required Fields**:
+  - `database_url`, `kafka_bootstrap_servers`, `jwt_secret`, and `schema_registry_url` are required (no defaults).
+- **Verification**:
+  - Unit tests in `tests/test_config.py` verify that missing required fields raise `ValidationError`.
+  - Verified that environment variables correctly override defaults (e.g., `ALERT_SERVICE_KAFKA_TOPIC`).
+  - Tests run with `PYTHONPATH=src` to ensure the `alert_service` package is discoverable.
+  - Evidence recorded in `.sisyphus/evidence/task-4-config-load.txt` and `.sisyphus/evidence/task-4-config-missing.txt`.
