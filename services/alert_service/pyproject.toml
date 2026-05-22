@@ -1,0 +1,41 @@
+[project]
+name = "alert-service"
+version = "0.1.0"
+description = "Stock alerts serving service (Kafka consumer + WebSocket + REST API)"
+requires-python = ">=3.11"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "confluent-kafka[avro,schemaregistry]>=2.3",
+    "fastavro",
+    "sqlalchemy[asyncio]>=2.0",
+    "asyncpg",
+    "alembic",
+    "pydantic>=2",
+    "pydantic-settings",
+    "PyJWT>=2.13.0",
+    "anyio",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+    "pytest-asyncio",
+    "httpx",
+    "websockets",
+    "testcontainers[postgres]>=4",
+]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+markers = [
+    "qa: tests requiring real external dependencies (PostgreSQL/Kafka/SR via docker-compose)",
+]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/alert_service"]
