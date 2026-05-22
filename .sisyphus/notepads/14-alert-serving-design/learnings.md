@@ -225,3 +225,32 @@
   - QA: 9/9 passed against testcontainers postgres:16-alpine (2.27s including container startup ≈ 5s on subsequent runs, ~30s first run for image pull).
   - Unit: 30/30 passed under `-m "not qa"` (existing test suite intact).
   - Evidence: `.sisyphus/evidence/task-9-repository-tests.txt`, `task-9-alert-upsert.txt`, `task-9-watchlist-filter.txt`, `task-9-notifications-pagination.txt`.
+
+## FastAPI App, Routes & WebSocket (T11)
+- **Files**: `api/__init__.py`, `api/app.py`, `api/deps.py`, `api/heartbeat.py`, `api/routes/{health,watchlist,notifications,ws}.py`, `api/schemas/{watchlist,notification}.py`, `tests/test_api.py`.
+- **Container injection pattern**: `create_app(container)` attaches the wired objects (jwt_verifier, connection_registry, watchlist_repo, notification_repo, engine) onto `app.state.*`. Routes read them via `request.app.state.xxx` / `websocket.app.state.xxx`. This keeps the ASGI app importable without prematurely instantiating the heavy container (Kafka, Postgres engine) — T12 does the wiring.
+- **`current_user_id` dependency**: accepts both `Authorization: Bearer ...` header and `?token=...` query (for cases like SSE/initial-load); returns `uuid.UUID`. UUID parse failure surfaces as 401 (not 500). The dependency raises `HTTPException(401)` rather than returning sentinel values so FastAPI handles the response envelope.
+- **WebSocket auth pattern**:
+  - JWT verification BEFORE `websocket.accept()` — `await websocket.close(code=1008)` works in CONNECTING state (Starlette sends a 403/close frame without ever accepting).
+  - On valid token, `accept()` then `registry.add(user_id, websocket)`.
+  - Server-push only: the receive loop calls `receive_text()` but discards content; its only purpose is detecting `WebSocketDisconnect`. We don't process inbound messages in v1.
+  - `try/finally registry.remove` ensures cleanup on any exit path (normal disconnect, exception, server shutdown).
+- **Heartbeat loop**:
+  - Starlette doesn't send WS ping/pong frames automatically — application-level `{"type": "ping"}` JSON heartbeat every 25s detects dead connections.
+  - `registry.send_to_user` already auto-removes connections that raise on send (from T8), so heartbeat is purely a liveness probe; no extra dead-conn pruning needed here.
+  - Snapshot user_ids via `list(registry._by_user.keys())` before iterating — avoids "dict changed size during iteration" if a connection is added/removed mid-loop.
+- **Lifespan ordering on shutdown**: cancel heartbeat → `anyio.to_thread.run_sync(consumer.stop)` (consumer.stop is sync by T7 design) → cancel consumer task → `await engine.dispose()`. Each step wrapped in try/except so a single failure doesn't skip the rest. `engine.dispose()` LAST so in-flight repo requests can finish during the previous teardown steps.
+- **Pydantic ORM->API**: routes use `WatchlistItemOut.model_validate(item, from_attributes=True)` to convert SQLAlchemy rows to response models. `from_attributes=True` (pydantic v2 replacement for v1's `orm_mode`) is required since the DB rows are objects-with-attributes, not dicts.
+- **Symbol validation**: regex `^[A-Z0-9]{6}$` enforced via Pydantic `@field_validator`. Length is also enforced by `Field(min_length=6, max_length=6)` which gives a cleaner 422 message for length-only violations. Tested via `test_watchlist_post_invalid_symbol_format`.
+- **Watchlist PATCH return value**: after `set_notifications_enabled`, we re-fetch via `list_for_user` to return the updated row (the repo's UPDATE returns rowcount, not the row itself). 404 if the row vanished between the two calls (race-condition belt-and-suspenders).
+- **PATCH response_model**: `WatchlistItemOut | None` — FastAPI accepts unions in response_model.
+- **TestClient WebSocket gotchas**:
+  - Without `?token=` query: FastAPI's `Query(...)` raises 422 internally; TestClient surfaces this as an exception inside `websocket_connect()`. `pytest.raises(Exception)` is the right catch since the exact exception type varies by FastAPI version (WebSocketDisconnect / httpx.HTTPStatusError / similar).
+  - Invalid token: server sends close with code 1008. TestClient may or may not raise depending on whether the close frame arrives before the with-block setup completes. `try/except Exception` accommodates both.
+  - Valid token: `registry.add` must be called once during the accept handshake, `registry.remove` once on context exit. Asserted via MagicMock counts (since FakeContainer.connection_registry is mocked, the real T8 registry isn't exercised here — that's T13's integration job).
+- **FakeContainer test fixture pattern**: a pure-mock container that exposes the same attribute surface as the real T12 container. All async methods are `AsyncMock(...)`, sync ones are `MagicMock()`, and `engine.dispose` is async (`AsyncMock()`) to satisfy lifespan teardown. Reusing this in T12/T13 unit tests lets us validate the wiring without spinning up Kafka/Postgres.
+- **LSP diagnostics on api/**: 8 spurious basedpyright errors (`reportMissingImports` for fastapi, `reportAttributeAccessIssue` for `anyio.to_thread`). Same root cause as the kis_ingestion confluent-kafka issue: LSP can't resolve packages installed in the alert-service uv venv (workspace member). Verified at runtime: `import fastapi` works, `anyio.to_thread.run_sync` is callable. Tests run from the alert-service venv and pass. No code change needed; document and move on.
+- **Verification**:
+  - 13/13 tests in `tests/test_api.py` pass (`uv run --package alert-service pytest tests/test_api.py -v`).
+  - 43/43 tests pass in the full alert-service unit suite (`-m "not qa"`).
+  - Evidence: `.sisyphus/evidence/task-11-api-tests.txt`.
