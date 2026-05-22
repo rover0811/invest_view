@@ -161,3 +161,15 @@
   - Unit tests in `tests/test_db_models.py` verify metadata, composite PKs, and CHECK constraints without requiring a live DB.
   - Verified `alembic upgrade head` runs successfully with the new `target_metadata` linkage.
   - Evidence: `.sisyphus/evidence/task-6-orm-models.txt`.
+
+## WebSocket Connection Registry (T8)
+- **Implementation**: `ConnectionRegistry` in `alert_service.ws.registry`.
+- **Storage**: In-memory `dict[str, set[WebSocketLike]]`.
+- **Key Design Choices**:
+  - Used `typing.Protocol` (`WebSocketLike`) to decouple the registry from FastAPI's `WebSocket` class, making it easier to test with fakes.
+  - `send_to_user` handles broadcasting to multiple active connections for a single user.
+  - Automatic cleanup: connections that raise exceptions during `send_json` are automatically removed from the registry.
+  - Single-instance only: the registry is in-memory and does not support multi-instance scaling (e.g., via Redis pub/sub) in v1.
+- **Verification**:
+  - 9 unit tests covering: basic add/remove, multiple connections per user, no-op removals for unknown users/connections, and broadcast/failure handling in `send_to_user`.
+  - Evidence: `.sisyphus/evidence/task-8-registry-tests.txt`.
