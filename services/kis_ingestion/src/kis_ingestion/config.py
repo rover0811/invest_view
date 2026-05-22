@@ -16,3 +16,4 @@ class KISConfig(BaseSettings):
     kafka_enabled: bool = False
     kafka_bootstrap_servers: str = "localhost:9092"
     kafka_topic: str = "stock-ticks"
+    schema_registry_url: str = "http://localhost:8081"

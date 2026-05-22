@@ -1,28 +1,13 @@
 import logging
 from collections.abc import Callable, Sequence
 from importlib import import_module
-from io import BytesIO
+from pathlib import Path
 from typing import Protocol, cast
 
 from .tick_parser import ParsedTick
 
 
 logger = logging.getLogger(__name__)
-
-
-class FastAvroSchemaModule(Protocol):
-    def load_schema(self, path: str) -> object: ...
-
-
-class FastAvroModule(Protocol):
-    schema: FastAvroSchemaModule
-
-    def schemaless_writer(
-        self,
-        fo: BytesIO,
-        schema: object,
-        record: dict[str, object],
-    ) -> None: ...
 
 
 class KafkaMessage(Protocol):
@@ -54,32 +39,95 @@ class ProducerLike(Protocol):
     def __len__(self) -> int: ...
 
 
-ProducerFactory = Callable[[dict[str, str]], ProducerLike]
+ProducerFactory = Callable[[dict[str, object]], ProducerLike]
 
-fastavro = cast(FastAvroModule, cast(object, import_module("fastavro")))
-fastavro_schema = cast(FastAvroSchemaModule, cast(object, import_module("fastavro.schema")))
-Producer = cast(ProducerFactory, cast(object, getattr(import_module("confluent_kafka"), "Producer")))
+
+class SchemaRegistryClientLike(Protocol):
+    pass
+
+
+class SchemaRegistryClientFactory(Protocol):
+    def __call__(self, conf: dict[str, str]) -> SchemaRegistryClientLike: ...
+
+
+class AvroSerializerCallable(Protocol):
+    def __call__(self, value: dict[str, object], ctx: object) -> bytes: ...
+
+
+class AvroSerializerFactory(Protocol):
+    def __call__(
+        self,
+        schema_registry_client: SchemaRegistryClientLike,
+        schema_str: str,
+        conf: dict[str, object] | None = None,
+    ) -> AvroSerializerCallable: ...
+
+
+class SerializationContextFactory(Protocol):
+    def __call__(self, topic: str, field: object) -> object: ...
+
+
+class MessageFieldType(Protocol):
+    VALUE: object
+
+
+Producer = cast(
+    ProducerFactory,
+    cast(object, getattr(import_module("confluent_kafka"), "Producer")),
+)
+SchemaRegistryClient = cast(
+    SchemaRegistryClientFactory,
+    cast(object, getattr(import_module("confluent_kafka.schema_registry"), "SchemaRegistryClient")),
+)
+AvroSerializer = cast(
+    AvroSerializerFactory,
+    cast(object, getattr(import_module("confluent_kafka.schema_registry.avro"), "AvroSerializer")),
+)
+SerializationContext = cast(
+    SerializationContextFactory,
+    cast(object, getattr(import_module("confluent_kafka.serialization"), "SerializationContext")),
+)
+MessageField = cast(
+    MessageFieldType,
+    cast(object, getattr(import_module("confluent_kafka.serialization"), "MessageField")),
+)
 
 
 class StockTickProducer:
     """Publishes ParsedTick as Avro-serialized messages to Kafka stock-ticks topic."""
 
-    def __init__(self, bootstrap_servers: str, topic: str, schema_path: str) -> None:
-        self._producer: ProducerLike = Producer({"bootstrap.servers": bootstrap_servers})
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        topic: str,
+        schema_path: str,
+        schema_registry_url: str,
+    ) -> None:
         self._topic: str = topic
-        self._schema: object = fastavro_schema.load_schema(schema_path)
+        self._sr_client: SchemaRegistryClientLike = SchemaRegistryClient({"url": schema_registry_url})
+        schema_str = Path(schema_path).read_text()
+        self._value_serializer: AvroSerializerCallable = AvroSerializer(
+            self._sr_client,
+            schema_str,
+            conf={"auto.register.schemas": False},
+        )
+        self._producer: ProducerLike = Producer({
+            "bootstrap.servers": bootstrap_servers,
+            "acks": "all",
+            "enable.idempotence": True,
+        })
 
     def publish(self, tick: ParsedTick, session_id: str, sequence: int) -> None:
         tick_dict = cast(dict[str, object], tick.model_dump())
-        buffer = BytesIO()
-        fastavro.schemaless_writer(buffer, self._schema, tick_dict)
-        avro_bytes = buffer.getvalue()
-
         try:
+            value_bytes = self._value_serializer(
+                tick_dict,
+                SerializationContext(self._topic, MessageField.VALUE),
+            )
             self._producer.produce(
                 topic=self._topic,
                 key=tick.symbol.encode("utf-8"),
-                value=avro_bytes,
+                value=value_bytes,
                 headers=[
                     ("session_id", session_id.encode("utf-8")),
                     ("sequence", str(sequence).encode("utf-8")),
