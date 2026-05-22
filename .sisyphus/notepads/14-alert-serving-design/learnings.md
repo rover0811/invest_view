@@ -254,3 +254,10 @@
   - 13/13 tests in `tests/test_api.py` pass (`uv run --package alert-service pytest tests/test_api.py -v`).
   - 43/43 tests pass in the full alert-service unit suite (`-m "not qa"`).
   - Evidence: `.sisyphus/evidence/task-11-api-tests.txt`.
+- AlertPusher unit tests implemented with 100% coverage of core logic (duplicate handling, fanout, connection registry integration).
+
+## Container and Entrypoint Implementation
+- Wired all components using a plain `Container` class, following the factory pattern.
+- Created `__main__.py` as the entrypoint for `uv run python -m alert_service`.
+- Discovered that `AlertConsumer` requires a valid Avro schema path during initialization, which needs to be handled in tests by pointing to the workspace root `schemas/` directory.
+- Verified that the DI graph builds correctly and the entrypoint imports without issues.
