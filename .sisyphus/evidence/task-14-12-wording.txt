@@ -1,0 +1,9 @@
+
+## Freeze Sync Extract
+
+- 실시간 ingress source는 **KIS only**다.
+--
+| Q10 | Kafka client | `confluent-kafka-python` sync producer를 사용. `produce()` + `poll(0)` 직접 호출 |
+| Q11 | Schema management | Confluent Schema Registry + repo-local `.avsc` 조합. CI/script로 사전 등록, compatibility BACKWARD |
+| Q12 | Decimal encoding | Avro `bytes` + `logicalType: decimal`, `precision=12`, `scale=8` |
+| Q13 | Tick delivery pattern | `KISConnectionManager`가 AsyncIterator로 동작하며, `IngestionService`가 이를 소비하여 producer에 전달하는 파이프라인 구조 채택 |

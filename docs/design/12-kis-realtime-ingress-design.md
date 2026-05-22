@@ -14,7 +14,7 @@ created: 2026-04-29 02:53:52
 - 운영 기준은 **앱키당 1세션 / configurable subscription cap**이다. v1 기본값은 **40**으로 두고, 실제 테스트 후 조정 가능하게 한다.
 - access token과 WebSocket approval key는 **분리된 lifecycle**로 관리한다.
 - KIS scope의 책임은 **정규화된 `stock-ticks` 발행까지**이며, 이후 Flink/serving은 다른 scope다.
-- `stock-ticks` 계약은 **repo-local Avro schema(`schemas/stock-ticks.avsc`)**를 source of truth로 관리하고, **Schema Registry는 MVP 뒤로 미룬다.**
+- `stock-ticks` 계약은 **Confluent Schema Registry + `schemas/stock-ticks.avsc`**를 source of truth로 관리한다. 등록은 CI/script로 사전 수행한다.
 - Decimal 필드는 Avro `bytes` + `logicalType: decimal`로 인코딩하며, v1 기준 `precision=12`, `scale=8`을 사용한다.
 
 ## 0. Scope Boundary
@@ -161,7 +161,7 @@ flowchart LR
 | `KISRawMessageParser` | `0|TR_ID|건수|payload` envelope 해석 → `RawKISMessage`. PINGPONG/JSON ACK 분기 | `src/kis_ingestion/raw_parser.py` |
 | `KISTickParser` | raw record string → `ParsedTick` (49필드) 정규화 | `src/kis_ingestion/tick_parser.py` |
 | `IngestionService` | 전체 lifecycle 관리 및 AsyncIterator 소비를 통한 Kafka 발행 주도 | `src/kis_ingestion/service.py` |
-| `StockTickProducer` | confluent-kafka-python + fastavro 기반 `stock-ticks` 발행. local `schemas/stock-ticks.avsc`를 source of truth로 사용하며, MVP에서는 Schema Registry를 쓰지 않는다. | `src/kis_ingestion/producer.py` |
+| `StockTickProducer` | `confluent-kafka-python` + `fastavro` 기반 `stock-ticks` 발행. **Confluent SR client + AvroSerializer 사용** (14번 도입 이후) | `src/kis_ingestion/producer.py` |
 
 > **Removed components** (과설계 판정):
 > - ~~`TickSink`~~ — abstract sink 불필요. ConnectionManager가 tick_parser 결과를 직접 처리.
@@ -464,7 +464,7 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 - **Value**: flat Avro record (아래 49필드)
 - **Headers**: `session_id` (reconnect 시 갱신되는 UUID), `sequence` (monotonic int, gap 감지용)
 - **Schema source**: repo-local `schemas/stock-ticks.avsc` (MVP 기준 source of truth)
-- **Schema Registry**: MVP 범위에서 제외. schema file 기반으로 먼저 진행하고, registry는 후속 단계에서 도입한다.
+- **Schema Registry**: Confluent Schema Registry를 사용하며, repo-local schema file을 Registry에 사전 등록하여 사용한다.
 
 #### Value schema (49필드)
 
@@ -649,7 +649,7 @@ invest_view/                           # monorepo root
 - Flink가 필요한 윈도우/패턴/알림은 이 이후 scope다.
 - KIS가 이미 제공하는 VWAP/OHLC는 **입력 필드**로 사용하고, v1에서는 이를 raw-oriented handoff contract에 그대로 포함시킬 수 있다.
 - 따라서 이 문서에서 가장 중요한 산출물은 ERD가 아니라 **`stock-ticks`의 정확한 handoff schema**다.
-- MVP에서는 local Avro schema file을 먼저 확정하고, Schema Registry는 후속 단계에서 붙인다.
+- Confluent Schema Registry를 사용하며, repo-local schema file을 Registry에 사전 등록하여 사용한다.
 
 
 ## 9. Resolved design decisions
@@ -666,14 +666,14 @@ invest_view/                           # monorepo root
 | Q8 | REST bootstrap snapshot | v1은 없이 진행. 핵심종목이라 체결 빈도 충분 |
 | Q9 | reconnect gap 처리 | Kafka header(`session_id`+`sequence`). body clean. Flink가 gap 감지 |
 | Q10 | Kafka client | `confluent-kafka-python` sync producer를 사용. `produce()` + `poll(0)` 직접 호출 |
-| Q11 | Schema management | MVP는 repo-local `.avsc`를 source of truth로 두고, Schema Registry는 뒤로 미룸 |
+| Q11 | Schema management | Confluent Schema Registry + repo-local `.avsc` 조합. CI/script로 사전 등록, compatibility BACKWARD |
 | Q12 | Decimal encoding | Avro `bytes` + `logicalType: decimal`, `precision=12`, `scale=8` |
 | Q13 | Tick delivery pattern | `KISConnectionManager`가 AsyncIterator로 동작하며, `IngestionService`가 이를 소비하여 producer에 전달하는 파이프라인 구조 채택 |
 
 ### Implementation confirmation
 - 현재 merged code는 pre-Kafka 단계 컴포넌트까지 구현 완료 상태다.
 - PR #14의 다음 scoped change는 `StockTickProducer` + producer wiring + schema decimal update다.
-- Kafka MVP는 local `schemas/stock-ticks.avsc`를 source of truth로 사용하고, Schema Registry는 아직 도입하지 않는다.
+- Kafka MVP는 Confluent Schema Registry를 사용하며, `schemas/stock-ticks.avsc`를 Registry에 사전 등록하여 사용한다.
 - Decimal 필드는 string이 아니라 Avro decimal logical type(`bytes`, `precision=12`, `scale=8`)으로 관리한다.
 - DI container: `src/kis_ingestion/container.py` (plain factory)
 - Entrypoint: `src/kis_ingestion/__main__.py`
@@ -694,7 +694,7 @@ invest_view/                           # monorepo root
 
 - uv workspace member 셋업 + src layout 마이그레이션
 - Section 4 컴포넌트 구현 (StockTickProducer 제외)
-- `schemas/stock-ticks.avsc` 파일 배치 (contract 문서 용도)
+- Confluent Schema Registry 등록 (T0.6에서 수행) + `schemas/stock-ticks.avsc` 파일 배치 (contract 문서 용도)
 - DI container + `__main__.py` entrypoint
 - 컴포넌트별 단위 테스트 (pytest + pytest-asyncio)
 
@@ -713,7 +713,6 @@ invest_view/                           # monorepo root
 
 ### Out of scope (다음 단계)
 
-- Schema Registry 도입
 - Dockerfile / docker-compose
 - REST current-price snapshot 호출
 - 장 캘린더 관리 (signal 기반으로 불필요)

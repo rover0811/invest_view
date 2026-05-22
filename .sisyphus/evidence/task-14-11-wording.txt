@@ -1,0 +1,10 @@
+| FR-05 | 시스템은 골든/데드크로스, RSI, MACD 기반 패턴 이벤트를 `stock-patterns`로 발행할 수 있어야 한다.                                 |
+| FR-06 | alert-service는 `stock-alerts`를 소비해 PostgreSQL에 저장하고 사용자에게 WebSocket으로 전달해야 한다. `enrichment-events` 알림 전달은 별도 consumer (`15-batch-enrichment-design.md`)에서 다룬다. |
+| FR-07 | Toss / Hankyung 등 비실시간 소스는 Airflow에서 PostgreSQL로 직접 적재하고, 사용자 알림이 필요한 경우 outbox에 기록해야 한다.           |
+| FR-08 | Debezium은 outbox를 CDC하여 `enrichment-events`를 Kafka에 발행해야 한다.                                        |
+--
+| NFR-04 | 일관성    | Consumer는 `enable.auto.commit=false`, `isolation.level=read_committed`를 사용한다.                              |
+| NFR-05 | 스키마 진화 | 이벤트는 **Confluent Schema Registry를 source of truth로 관리**하며 backward compatible 변경만 허용한다. Schema 파일은 repo의 `schemas/`에 두고 CI/script로 Registry에 등록한다. Compatibility mode는 BACKWARD. |
+| NFR-06 | 운영 단순성 | 학습 프로젝트이므로 단일 PostgreSQL과 제한된 토픽 수를 유지하고, 불필요한 저장소/서비스 증설은 금지한다.                                           |
+| NFR-07 | 비용 제약  | 로컬/kind 우선, 클라우드 배포는 후순위다. 상시 클라우드 운영비는 토론 기준 최소화한다.                                                       |
+| NFR-08 | 관측성    | 최소 수준의 lag, connector status, checkpoint 상태, WebSocket 연결 상태를 확인할 수 있어야 한다.                                |
