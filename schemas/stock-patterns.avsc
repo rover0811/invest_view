@@ -1,0 +1,25 @@
+{
+  "namespace": "com.investview.patterns",
+  "type": "record",
+  "name": "StockPattern",
+  "doc": "Technical pattern event emitted from Flink CEP (golden/dead cross MVP).",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_time", "type": "string"},
+    {"name": "source", "type": "string", "default": "KIS"},
+    {"name": "market", "type": "string"},
+    {"name": "symbol", "type": "string"},
+    {"name": "pattern_type", "type": {
+      "type": "enum",
+      "name": "PatternType",
+      "symbols": ["GOLDEN_CROSS", "DEAD_CROSS"]
+    }},
+    {"name": "detected_at", "type": "string"},
+    {"name": "short_ma_period", "type": "int"},
+    {"name": "long_ma_period", "type": "int"},
+    {"name": "short_ma", "type": {"type": "bytes", "logicalType": "decimal", "precision": 18, "scale": 8}},
+    {"name": "long_ma", "type": {"type": "bytes", "logicalType": "decimal", "precision": 18, "scale": 8}},
+    {"name": "trigger_price", "type": "int"},
+    {"name": "schema_version", "type": "int", "default": 1}
+  ]
+}

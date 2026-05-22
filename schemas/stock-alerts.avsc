@@ -1,0 +1,26 @@
+{
+  "namespace": "com.investview.alerts",
+  "type": "record",
+  "name": "StockAlert",
+  "doc": "Derived alert event emitted from Flink sliding window (e.g. sudden surge/plunge).",
+  "fields": [
+    {"name": "event_id", "type": "string"},
+    {"name": "event_time", "type": "string"},
+    {"name": "source", "type": "string", "default": "KIS"},
+    {"name": "market", "type": "string"},
+    {"name": "symbol", "type": "string"},
+    {"name": "alert_type", "type": {
+      "type": "enum",
+      "name": "AlertType",
+      "symbols": ["SURGE", "PLUNGE", "VOLUME_SPIKE"]
+    }},
+    {"name": "window_start", "type": "string"},
+    {"name": "window_end", "type": "string"},
+    {"name": "price_start", "type": "int"},
+    {"name": "price_end", "type": "int"},
+    {"name": "return_rate", "type": {"type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 8}},
+    {"name": "window_volume", "type": "long"},
+    {"name": "threshold", "type": {"type": "bytes", "logicalType": "decimal", "precision": 12, "scale": 8}},
+    {"name": "schema_version", "type": "int", "default": 1}
+  ]
+}
