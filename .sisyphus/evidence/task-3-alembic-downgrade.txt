@@ -1,0 +1,5 @@
+Alembic Downgrade Base Output:
+
+PSQL Table List (should be empty):
+
+Re-upgrading to head for next tasks...

@@ -1,0 +1,12 @@
+Alembic Upgrade Head Output:
+
+PSQL Table List:
+                   List of relations
+    Schema     |        Name         | Type  |  Owner   
+---------------+---------------------+-------+----------
+ alert_service | alert_events        | table | postgres
+ alert_service | notification_events | table | postgres
+ alert_service | users               | table | postgres
+ alert_service | watchlist_items     | table | postgres
+(4 rows)
+
