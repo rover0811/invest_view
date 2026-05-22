@@ -13,3 +13,46 @@ from pathlib import Path
 _SRC = Path(__file__).resolve().parents[1] / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
+
+import pytest
+import pytest_asyncio
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@pytest.fixture(scope="session")
+def postgres_container():
+    """testcontainers-managed Postgres for repository QA tests."""
+    from testcontainers.postgres import PostgresContainer
+
+    container = PostgresContainer("postgres:16-alpine")
+    container.start()
+    yield container
+    container.stop()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def db_engine(postgres_container):
+    from alert_service.db.session import create_engine
+    from alert_service.db.models import Base
+
+    url = (
+        postgres_container.get_connection_url()
+        .replace("postgresql+psycopg2", "postgresql+asyncpg")
+        .replace("postgresql://", "postgresql+asyncpg://")
+    )
+    engine = create_engine(url)
+    async with engine.begin() as conn:
+        await conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS alert_service")
+        await conn.run_sync(Base.metadata.create_all)
+    yield engine
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
+        await conn.exec_driver_sql("DROP SCHEMA IF EXISTS alert_service CASCADE")
+    await engine.dispose()
+
+
+@pytest_asyncio.fixture(scope="function")
+async def db_session_factory(db_engine) -> async_sessionmaker[AsyncSession]:
+    from alert_service.db.session import create_session_factory
+
+    return create_session_factory(db_engine)

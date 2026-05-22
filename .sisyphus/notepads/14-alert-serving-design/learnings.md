@@ -202,3 +202,26 @@
   - This task's spec mandates the simpler direct-import shape (matches the spec literally). Tests pass at runtime; LSP errors are spurious (no type stubs upstream). If a future task wants the producer's clean LSP profile, refactor consumer.py to the Protocol shim pattern — patch targets (`alert_service.kafka.consumer.Consumer`, `.AvroDeserializer`, etc.) stay the same so tests don't need to change.
 - **`stop()` is sync** by design — designed to be wrapped in `anyio.to_thread.run_sync` by the caller (e.g., FastAPI shutdown handler). Sets `_stop_event` and calls `consumer.close()`. Background tasks see the event flip on their next iteration and exit cleanly.
 - **`start()` log line oddity**: includes `self._consumer.list_topics(timeout=2.0)` in the log format args — this is a 2s metadata RPC on startup. Acceptable cost for a once-per-process operation; mocked in tests as a return-value MagicMock.
+
+## Repository Layer (T9)
+- **Files**: `repository/__init__.py`, `repository/users.py`, `repository/watchlist.py`, `repository/alert_events.py`, `repository/notifications.py`
+- **Session ownership**: Each repository takes `session_factory: async_sessionmaker[AsyncSession]` and opens/commits sessions internally per-method. No transaction is ever held across method boundaries — each repo method is its own unit of work. Trade-off documented: callers cannot compose multi-repo atomic transactions in v1; if/when that's needed, refactor to a UoW pattern or pass session arg.
+- **Idempotent upserts**:
+  - `AlertEventRepository.upsert`: `pg_insert(AlertEvent).on_conflict_do_nothing(index_elements=["alert_event_id"]).returning(AlertEvent.alert_event_id)`. Returns `True` if new row inserted, `False` if duplicate (RETURNING is empty on conflict-do-nothing → `scalar_one_or_none()` is None).
+  - `NotificationRepository.bulk_create_pending`: same `on_conflict_do_nothing` + `returning(notification_id)` pattern but using the unique constraint `notification_events_user_alert_uq` on `(user_id, alert_event_id)`. Returns the list of NEWLY inserted notification_ids only (replay-safe).
+- **Watchlist duplicate handling**: SQLAlchemy `IntegrityError` (PK collision on composite `(user_id, symbol)`) is caught, `await session.rollback()` is called, and a domain-specific `WatchlistDuplicateError` is raised. Catching at the repo boundary keeps SQL exceptions from leaking to upper layers.
+- **DELETE/UPDATE rowcount check**: `result.rowcount or 0` — asyncpg sometimes reports `None` instead of 0 for no-op DELETEs, so the `or 0` guard is required to make the boolean return contract deterministic.
+- **testcontainers pattern**:
+  - `postgres_container` fixture is session-scoped (sync fixture, started once, stopped at session end).
+  - `db_engine` is function-scoped async fixture — creates schema + tables per-test, drops them after. Slightly slower than truncate-between-tests but guarantees full isolation.
+  - URL transform: `postgres_container.get_connection_url()` returns `postgresql+psycopg2://...`; replace both `postgresql+psycopg2` and `postgresql://` prefixes with `postgresql+asyncpg://` to get an async-compatible URL.
+  - `await conn.exec_driver_sql("CREATE SCHEMA IF NOT EXISTS alert_service")` BEFORE `Base.metadata.create_all` — SQLAlchemy will not create the schema itself for explicit `{"schema": "..."}` table args.
+- **Timezone gotcha (CRITICAL)**:
+  - T6 models declare timestamp columns as plain `Mapped[datetime]` without `timezone=True` → SQLAlchemy maps them to PostgreSQL `TIMESTAMP WITHOUT TIME ZONE`.
+  - asyncpg refuses to insert `datetime.now(timezone.utc)` (tz-aware) into TIMESTAMP-without-TZ columns with `DataError: can't subtract offset-naive and offset-aware datetimes`.
+  - Fix in tests: `datetime.now(timezone.utc).replace(tzinfo=None)` — keep "logical UTC" but strip the tzinfo before passing to repository methods.
+  - Future-proofing: when T10/T11 build pusher/routes, ensure they strip tz before persistence, or refactor T6 models to use `Mapped[datetime] = mapped_column(server_default=text("now()"), nullable=False)` with explicit `TIMESTAMP(timezone=True)` if tz-aware storage is desired.
+- **Verification**:
+  - QA: 9/9 passed against testcontainers postgres:16-alpine (2.27s including container startup ≈ 5s on subsequent runs, ~30s first run for image pull).
+  - Unit: 30/30 passed under `-m "not qa"` (existing test suite intact).
+  - Evidence: `.sisyphus/evidence/task-9-repository-tests.txt`, `task-9-alert-upsert.txt`, `task-9-watchlist-filter.txt`, `task-9-notifications-pagination.txt`.
