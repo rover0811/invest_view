@@ -81,29 +81,6 @@
 
 ## Alert Service Alembic Setup (T3)
 - **Alembic Configuration**:
-  - 
-  - 
-  -  is dynamically overridden in `env.py` via `ALERT_SERVICE_DATABASE_URL` or `DATABASE_URL` environment variables.
-- **Async Migration Support**:
-  - Implemented async migration runner in `env.py` using `async_engine_from_config` and `connection.run_sync(do_run_migrations)`.
-  - This follows the standard SQLAlchemy/Alembic async cookbook pattern.
-- **Schema Design**:
-  - Created a dedicated `alert_service` schema to isolate service tables from the `public` schema.
-  - **Tables**:
-    - `users`: Minimal user profile (UUID PK, nickname, created_at).
-    - `watchlist_items`: Composite PK on `(user_id, symbol)`. No surrogate ID.
-    - `alert_events`: Stores triggered alerts. Includes CHECK constraints for `market` (KRX, NXT), `alert_type` (PRICE_ALERT, VI_IMMINENT, MOMENTUM_SHIFT, TRADING_HALT), and `severity` (INFO, WARNING, CRITICAL).
-    - `notification_events`: Tracks delivery of alerts to users. Includes CHECK constraints for `delivery_status` (PENDING, SENT, FAILED) and `failure_reason` (no_connection, send_error).
-- **Key Alembic Settings**:
-  - `include_schemas=True` in `context.configure` is CRITICAL for managing the non-public `alert_service` schema.
-  - `target_metadata = None` for now (T6 will update this once SQLAlchemy models are defined).
-- **Verification**:
-  - Successfully ran `upgrade head` and `downgrade base` against the local PostgreSQL container.
-  - Verified table structures, indexes, and CHECK constraints via `psql`.
-  - Evidence recorded in `.sisyphus/evidence/task-3-alembic-schema.txt` and `.sisyphus/evidence/task-3-alembic-downgrade.txt`.
-
-## Alert Service Alembic Setup (T3)
-- **Alembic Configuration**:
   - `script_location = alembic`
   - `prepend_sys_path = .`
   - `sqlalchemy.url` is dynamically overridden in `env.py` via `ALERT_SERVICE_DATABASE_URL` or `DATABASE_URL` environment variables.
@@ -124,22 +101,6 @@
   - Successfully ran `upgrade head` and `downgrade base` against the local PostgreSQL container.
   - Verified table structures, indexes, and CHECK constraints via `psql`.
   - Evidence recorded in `.sisyphus/evidence/task-3-alembic-schema.txt` and `.sisyphus/evidence/task-3-alembic-downgrade.txt`.
-
-## JWT Verification (Task 5)
-- **Library**: PyJWT 2.x.
-- **Implementation**:  class in .
-- **Key Design Choices**:
-  - HS256 algorithm only (symmetric key).
-  -  requires  as a list (e.g., ).
-  -  is caught separately from  to provide more specific error messages, although it is a subclass of the latter.
-  -  is configurable (e.g.,  or ).
-  - Resulting  is coerced to  to ensure consistency.
-- **Testing**:
-  - 6 unit tests covering: valid token, expired token, bad signature, missing claim, custom claim, and malformed token.
-  - Tests use  to correctly import the  package when running from the service root.
-- **Verification**:
-  - All 6 tests passed.
-  - Evidence: `.sisyphus/evidence/task-5-jwt-valid.txt`.
 
 ## Alert Service Configuration (T4)
 - **Pydantic Settings**:
