@@ -1,4 +1,3 @@
-from typing import List
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,7 +33,7 @@ class AlertServiceConfig(BaseSettings):
     jwt_user_id_claim: str = "sub"
 
     # CORS
-    allow_origins: List[str] = []
+    allow_origins: list[str] = []
 
     # HTTP
     http_host: str = "0.0.0.0"

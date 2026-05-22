@@ -14,4 +14,4 @@ tests/test_jwt.py::test_verify_raises_on_missing_sub_claim PASSED        [ 66%]
 tests/test_jwt.py::test_verify_uses_custom_claim PASSED                  [ 83%]
 tests/test_jwt.py::test_verify_raises_on_malformed_token PASSED          [100%]
 
-============================== 6 passed in 0.02s ===============================
+============================== 6 passed in 0.01s ===============================
