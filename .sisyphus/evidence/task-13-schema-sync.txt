@@ -1,0 +1,11 @@
+alert_event_id
+symbol
+market
+alert_type
+severity
+observation_start_at
+observation_end_at
+triggered_at
+trigger_values
+source_tick_event_id
+rule_name

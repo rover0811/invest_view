@@ -1,0 +1,17 @@
+## Freeze Sync Extract
+## 0. Scope Boundary
+## 1. Why separate this file
+## 2. External constraints
+## 3. Alert Serving scope responsibilities
+## 4. Proposed components
+## 5. Core flows
+## 6. External interface draft
+## 7. `stock-alerts` consume contract
+## 7-a. Implementation structure
+## 8. DB schema
+## 9. Future Scaling
+## 10. Resolved design decisions
+## 11. Remaining open questions
+## 12. v1 implementation scope
+## 13. Immediate next split after Alert Serving
+## Related Notes

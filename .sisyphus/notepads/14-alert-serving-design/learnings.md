@@ -261,3 +261,19 @@
 - Created `__main__.py` as the entrypoint for `uv run python -m alert_service`.
 - Discovered that `AlertConsumer` requires a valid Avro schema path during initialization, which needs to be handled in tests by pointing to the workspace root `schemas/` directory.
 - Verified that the DI graph builds correctly and the entrypoint imports without issues.
+
+## Alert Serving Design Learnings
+
+- **Single Instance Trade-off**: For v1, keeping the service single-instance simplifies WebSocket session management significantly by avoiding the need for a distributed registry (e.g., Redis Pub/Sub).
+- **Delivery Status Tracking**: Tracking delivery status (PENDING, SENT, FAILED) in the database allows for reliable recovery and auditing of alerts.
+- **Avro Logical Types**: Using  logical type in Avro ensures consistent time representation across Kafka and the Python service.
+- **Idempotency**: Using a unique constraint on  in the  table ensures that users don't receive duplicate notifications for the same alert event.
+- **Backpressure**: Implementing a bounded queue in the Kafka consumer prevents the service from being overwhelmed by a burst of alerts.
+
+## Alert Serving Design Learnings
+
+- **Single Instance Trade-off**: For v1, keeping the service single-instance simplifies WebSocket session management significantly by avoiding the need for a distributed registry (e.g., Redis Pub/Sub).
+- **Delivery Status Tracking**: Tracking delivery status (PENDING, SENT, FAILED) in the database allows for reliable recovery and auditing of alerts.
+- **Avro Logical Types**: Using `timestamp-millis` logical type in Avro ensures consistent time representation across Kafka and the Python service.
+- **Idempotency**: Using a unique constraint on `(user_id, alert_event_id)` in the `notification_events` table ensures that users don't receive duplicate notifications for the same alert event.
+- **Backpressure**: Implementing a bounded queue in the Kafka consumer prevents the service from being overwhelmed by a burst of alerts.
