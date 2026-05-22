@@ -5,6 +5,14 @@ from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import async_engine_from_config
 from alembic import context
 import os
+import sys
+from pathlib import Path
+
+_SRC = Path(__file__).resolve().parent.parent / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
+from alert_service.db.models import Base
 
 config = context.config
 # Override URL from env
@@ -15,7 +23,7 @@ if database_url:
 if config.config_file_name is not None:
     fileConfig(config.config_file_name)
 
-target_metadata = None  # TODO(T6): set to Base.metadata once db.models exists
+target_metadata = Base.metadata
 
 def do_run_migrations(connection: Connection) -> None:
     context.configure(connection=connection, target_metadata=target_metadata, include_schemas=True)

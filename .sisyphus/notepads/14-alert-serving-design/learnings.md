@@ -143,3 +143,21 @@
   - Verified that environment variables correctly override defaults (e.g., `ALERT_SERVICE_KAFKA_TOPIC`).
   - Tests run with `PYTHONPATH=src` to ensure the `alert_service` package is discoverable.
   - Evidence recorded in `.sisyphus/evidence/task-4-config-load.txt` and `.sisyphus/evidence/task-4-config-missing.txt`.
+
+## Alert Service DB Models & Session (T6)
+- **SQLAlchemy 2.x ORM**:
+  - Implemented models using `DeclarativeBase`, `Mapped[...]`, and `mapped_column(...)`.
+  - All tables explicitly use `{"schema": "alert_service"}` in `__table_args__` to match the Alembic migration.
+  - **Tables**: `User`, `WatchlistItem`, `AlertEvent`, `NotificationEvent`.
+  - **Constraints**: Mirrored all CHECK constraints from Alembic (market, alert_type, severity, delivery_status, failure_reason).
+  - **WatchlistItem**: Uses a composite primary key on `(user_id, symbol)`.
+- **Async Session Factory**:
+  - Created `create_engine` and `create_session_factory` in `alert_service.db.session`.
+  - Uses `create_async_engine` with `future=True` and `async_sessionmaker` with `AsyncSession`.
+- **Alembic Integration**:
+  - Updated `alembic/env.py` to set `target_metadata = Base.metadata`.
+  - Added `sys.path` manipulation in `env.py` to ensure the `alert_service` package is importable during migrations.
+- **Verification**:
+  - Unit tests in `tests/test_db_models.py` verify metadata, composite PKs, and CHECK constraints without requiring a live DB.
+  - Verified `alembic upgrade head` runs successfully with the new `target_metadata` linkage.
+  - Evidence: `.sisyphus/evidence/task-6-orm-models.txt`.
