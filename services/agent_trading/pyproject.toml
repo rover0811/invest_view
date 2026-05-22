@@ -1,0 +1,24 @@
+[project]
+name = "agent-trading"
+version = "0.1.0"
+description = "LLM agent that queries alert-serving + research MCP to produce analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "pydantic",
+    "pydantic-settings",
+    "httpx",
+]
+
+[tool.uv]
+dev-dependencies = [
+    "pytest",
+    "pytest-asyncio",
+    "respx",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agent_trading"]
