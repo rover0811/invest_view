@@ -8,7 +8,7 @@ dependencies = [
     "httpx",
     "websockets",
     "pydantic-settings",
-    "confluent-kafka",
+    "confluent-kafka[avro,schemaregistry]>=2.3",
     "fastavro",
 ]
 
