@@ -1,0 +1,18 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.12, pytest-9.0.3, pluggy-1.6.0 -- /Users/rover0811/PycharmProjects/invest_view/.venv/bin/python3
+cachedir: .pytest_cache
+rootdir: /Users/rover0811/PycharmProjects/invest_view/services/alert_service
+configfile: pyproject.toml
+plugins: asyncio-1.3.0, anyio-4.13.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 7 items
+
+tests/test_kafka_consumer.py::test_start_subscribes_to_topic PASSED      [ 14%]
+tests/test_kafka_consumer.py::test_poll_handles_none_message PASSED      [ 28%]
+tests/test_kafka_consumer.py::test_poll_handles_partition_eof PASSED     [ 42%]
+tests/test_kafka_consumer.py::test_poll_commits_and_skips_on_serialization_error PASSED [ 57%]
+tests/test_kafka_consumer.py::test_dispatch_calls_on_message_and_commits PASSED [ 71%]
+tests/test_kafka_consumer.py::test_dispatch_does_not_commit_when_handler_raises PASSED [ 85%]
+tests/test_kafka_consumer.py::test_stop_sets_event_and_closes PASSED     [100%]
+
+============================== 7 passed in 2.60s ===============================

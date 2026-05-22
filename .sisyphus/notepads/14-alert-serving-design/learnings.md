@@ -173,3 +173,32 @@
 - **Verification**:
   - 9 unit tests covering: basic add/remove, multiple connections per user, no-op removals for unknown users/connections, and broadcast/failure handling in `send_to_user`.
   - Evidence: `.sisyphus/evidence/task-8-registry-tests.txt`.
+
+## Alert Consumer (T7)
+- **Files**: `kafka/__init__.py`, `kafka/consumer.py`, `tests/test_kafka_consumer.py`
+- **Architecture**: plain `confluent_kafka.Consumer` (NOT `DeserializingConsumer` — experimental, same reasoning as T0.7 producer) + explicit `AvroDeserializer(...)` call in poll loop.
+- **Threading model**:
+  - `consumer.poll(timeout)` is BLOCKING/sync; run via `loop.run_in_executor(None, ...)` so the event loop stays responsive.
+  - A bounded `asyncio.Queue(maxsize=1000)` decouples the sync poll thread from the async `on_message` dispatch task. Full queue → `await queue.put()` blocks the poll loop → natural backpressure to Kafka.
+  - `_run_dispatch_loop` exit condition `while not stop_event.is_set() OR not queue.empty()` — drains the queue before exiting on shutdown.
+- **Commit semantics**:
+  - `enable.auto.commit=False`, `isolation.level=read_committed` (consumer config).
+  - On `on_message` SUCCESS → manual `consumer.commit(message=msg, asynchronous=False)`.
+  - On `on_message` FAILURE → DO NOT commit; will be redelivered on next session (alert events are idempotent per `event_id` so re-delivery is safe).
+  - On deserialization failure (SerializationError, non-dict, tombstone) → commit + skip (no DLQ per spec).
+- **Schema Registry**:
+  - `AvroDeserializer(sr_client, schema_str, from_dict=lambda obj, ctx: obj)` — `from_dict` short-circuits Avro→Python class conversion and yields a plain dict.
+  - Schema file path comes from `AlertServiceConfig.avro_schema_path` (default `schemas/stock-alerts.avsc`); SR URL from `config.schema_registry_url`.
+  - Pre-registered by T0.6 (id=2); consumer does NOT auto-register.
+- **Test strategy** (pure unit, no docker):
+  - Fixture `consumer_patches` patches `Consumer`, `SchemaRegistryClient`, `AvroDeserializer`, `Path` at the `alert_service.kafka.consumer` module level.
+  - For poll loop tests, drive iterations via a `side_effect` on `consumer.poll` that flips `stop_event` after N calls — `await consumer._run_poll_loop()` runs the real coroutine end-to-end, no `asyncio.wait_for` racing tricks.
+  - For dispatch tests, put items directly on `consumer._queue` then pre-set `stop_event` — the loop condition `not stop_event.is_set() OR not queue.empty()` guarantees the message gets processed before exit.
+  - `consumer._stop_event.set()` is called from inside a `run_in_executor` thread in some tests — safe because `asyncio.Event.set()` only mutates an internal flag and walks `_waiters` (empty in this code path — we only call `is_set()`, never `wait()`).
+  - 7 tests, all pass: subscribe, none-msg no-op, partition-eof no-op, serialization-error commit+skip, dispatch success commit, dispatch handler-raise no-commit, stop event+close.
+- **LSP / type-stub note**:
+  - `confluent_kafka` ships no type stubs, so direct `from confluent_kafka import ...` triggers basedpyright `reportMissingImports` (4 errors) and cascading `reportUnknownXxx` warnings.
+  - T0.7 producer.py worked around this with a `cast + import_module + Protocol` shim and is LSP-clean.
+  - This task's spec mandates the simpler direct-import shape (matches the spec literally). Tests pass at runtime; LSP errors are spurious (no type stubs upstream). If a future task wants the producer's clean LSP profile, refactor consumer.py to the Protocol shim pattern — patch targets (`alert_service.kafka.consumer.Consumer`, `.AvroDeserializer`, etc.) stay the same so tests don't need to change.
+- **`stop()` is sync** by design — designed to be wrapped in `anyio.to_thread.run_sync` by the caller (e.g., FastAPI shutdown handler). Sets `_stop_event` and calls `consumer.close()`. Background tasks see the event flip on their next iteration and exit cleanly.
+- **`start()` log line oddity**: includes `self._consumer.list_topics(timeout=2.0)` in the log format args — this is a 2s metadata RPC on startup. Acceptable cost for a once-per-process operation; mocked in tests as a return-value MagicMock.
