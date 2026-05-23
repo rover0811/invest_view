@@ -47,6 +47,7 @@ def create_service(config: KISConfig) -> IngestionService:
             bootstrap_servers=config.kafka_bootstrap_servers,
             topic=config.kafka_topic,
             schema_path=schema_path,
+            schema_registry_url=config.schema_registry_url,
         )
 
     if config.watch_symbols:
