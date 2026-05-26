@@ -1,0 +1,13 @@
+.git
+.gitignore
+.idea/
+.vscode/
+*.iml
+src/test/
+k8s/
+scripts/
+*.md
+target/maven-status/
+target/classes/
+target/test-classes/
+target/dependency-reduced-pom.xml

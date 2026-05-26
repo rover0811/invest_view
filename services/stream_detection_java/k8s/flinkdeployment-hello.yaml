@@ -1,0 +1,26 @@
+# Wave 1.5: HelloFlinkJob smoke deployment (finite fromSequence job)
+# Final job spec is in Task 5.2 (flinkdeployment.yaml).
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: stream-detection-hello
+spec:
+  image: stream-detection-java:dev
+  imagePullPolicy: IfNotPresent
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "1"
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  job:
+    jarURI: local:///opt/flink/usrlib/stream-detection.jar
+    entryClass: com.invest_view.stream_detection.HelloFlinkJob
+    parallelism: 1
+    upgradeMode: stateless
