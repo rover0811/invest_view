@@ -3,7 +3,7 @@ kind: FlinkDeployment
 metadata:
   name: stream-detection-echo
 spec:
-  image: stream-detection-java:echo4
+  image: stream-detection-java:echo8
   imagePullPolicy: IfNotPresent
   flinkVersion: v1_18
   flinkConfiguration:

@@ -12,10 +12,9 @@ import org.apache.avro.io.Decoder;
 import org.apache.avro.io.DecoderFactory;
 import org.apache.flink.api.common.serialization.DeserializationSchema;
 import org.apache.flink.api.common.typeinfo.TypeInformation;
-import org.apache.flink.formats.avro.SchemaCoder;
-import org.apache.flink.formats.avro.registry.confluent.ConfluentSchemaRegistryCoder;
 import org.apache.flink.formats.avro.typeutils.GenericRecordAvroTypeInfo;
-import org.apache.flink.formats.avro.utils.MutableByteArrayInputStream;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -54,6 +53,8 @@ public final class DecimalAwareAvroDeserializationSchema
         implements DeserializationSchema<GenericRecord> {
 
     private static final long serialVersionUID = 1L;
+    private static final Logger LOG = LoggerFactory.getLogger(DecimalAwareAvroDeserializationSchema.class);
+    private transient boolean diagLogged;
 
     /** Schema in its toString() form so the instance is serializable. */
     private final String readerSchemaString;
@@ -68,9 +69,8 @@ public final class DecimalAwareAvroDeserializationSchema
     private transient Schema readerSchema;
     private transient GenericData genericData;
     private transient GenericDatumReader<GenericRecord> datumReader;
-    private transient MutableByteArrayInputStream inputStream;
     private transient Decoder decoder;
-    private transient SchemaCoder schemaCoder;
+    private transient SchemaRegistryClient schemaRegistryClient;
 
     public DecimalAwareAvroDeserializationSchema(Schema readerSchema, String schemaRegistryUrl) {
         this(readerSchema, schemaRegistryUrl, null);
@@ -97,11 +97,30 @@ public final class DecimalAwareAvroDeserializationSchema
             return null;
         }
         checkInitialized();
-        inputStream.setBuffer(message);
-        final Schema writerSchema = schemaCoder.readSchema(inputStream);
-        datumReader.setSchema(writerSchema);
-        datumReader.setExpected(readerSchema);
-        return datumReader.read(null, decoder);
+        if (message.length < 5 || message[0] != 0x00) {
+            throw new IOException("Not a Confluent-encoded Avro message (bad magic byte)");
+        }
+        final int schemaId = ((message[1] & 0xff) << 24)
+                | ((message[2] & 0xff) << 16)
+                | ((message[3] & 0xff) << 8)
+                | (message[4] & 0xff);
+        final Schema writerSchema;
+        try {
+            writerSchema = schemaRegistryClient.getById(schemaId);
+        } catch (Exception e) {
+            throw new IOException("Failed to fetch schema id=" + schemaId, e);
+        }
+        decoder = DecoderFactory.get().binaryDecoder(
+                message, 5, message.length - 5, (org.apache.avro.io.BinaryDecoder) decoder);
+        GenericDatumReader<GenericRecord> reader =
+                new GenericDatumReader<>(writerSchema, readerSchema, genericData);
+        GenericRecord result = reader.read(null, decoder);
+        if (!diagLogged) {
+            diagLogged = true;
+            LOG.warn("DIAG decode SUCCESS symbol={} change_rate={}",
+                    result.get("symbol"), result.get("change_rate"));
+        }
+        return result;
     }
 
     @Override
@@ -127,12 +146,9 @@ public final class DecimalAwareAvroDeserializationSchema
         this.genericData.addLogicalTypeConversion(new Conversions.DecimalConversion());
         this.genericData.addLogicalTypeConversion(new TimeConversions.TimestampMillisConversion());
         this.datumReader = new GenericDatumReader<>(null, this.readerSchema, this.genericData);
-        this.inputStream = new MutableByteArrayInputStream();
-        this.decoder = DecoderFactory.get().binaryDecoder(this.inputStream, null);
-        final SchemaRegistryClient client =
+        this.schemaRegistryClient =
                 (injectedClient != null)
                         ? injectedClient
                         : new CachedSchemaRegistryClient(schemaRegistryUrl, 1000);
-        this.schemaCoder = new ConfluentSchemaRegistryCoder(client);
     }
 }
