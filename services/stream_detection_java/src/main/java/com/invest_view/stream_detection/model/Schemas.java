@@ -43,6 +43,11 @@ public final class Schemas {
     public static final Schema TICK = stripLogicalTypes(load("/avro/stock-ticks.avsc"));
     public static final Schema ALERT = stripLogicalTypes(load("/avro/stock-alerts.avsc"));
 
+    /** Un-stripped TICK schema — preserves logicalType=decimal annotations. For tests + future Decimal-aware paths. */
+    public static final Schema TICK_RAW = load("/avro/stock-ticks.avsc");
+    /** Un-stripped ALERT schema — preserves timestamp-millis logicalTypes. Symmetric companion to TICK_RAW. */
+    public static final Schema ALERT_RAW = load("/avro/stock-alerts.avsc");
+
     private static Schema load(String resourcePath) {
         try (InputStream in = Schemas.class.getResourceAsStream(resourcePath)) {
             Objects.requireNonNull(in, "Avro schema not found on classpath: " + resourcePath);

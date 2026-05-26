@@ -4,7 +4,6 @@ import com.invest_view.stream_detection.model.Schemas;
 import org.apache.avro.generic.GenericRecord;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
-import org.apache.flink.formats.avro.registry.confluent.ConfluentRegistryAvroDeserializationSchema;
 
 /**
  * Builds a Flink 1.18 {@link KafkaSource} that reads Avro-encoded
@@ -32,8 +31,8 @@ public final class TickKafkaSource {
                 .setGroupId(GROUP_ID)
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setValueOnlyDeserializer(
-                        ConfluentRegistryAvroDeserializationSchema.forGeneric(
-                                Schemas.TICK, schemaRegistryUrl))
+                        new DecimalAwareAvroDeserializationSchema(
+                                Schemas.TICK_RAW, schemaRegistryUrl))
                 .build();
     }
 }
