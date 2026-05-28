@@ -114,6 +114,30 @@ public final class DecimalAwareAvroDeserializationSchema
                 message, 5, message.length - 5, (org.apache.avro.io.BinaryDecoder) decoder);
         GenericDatumReader<GenericRecord> reader =
                 new GenericDatumReader<>(writerSchema, readerSchema, genericData);
+
+        // DIAG: Hypothesis B/C — verify the conversion is actually visible to the reader path.
+        if (!diagLogged) {
+            try {
+                org.apache.avro.Schema.Field crField = writerSchema.getField("change_rate");
+                org.apache.avro.LogicalType crLogical =
+                        crField == null ? null : crField.schema().getLogicalType();
+                org.apache.avro.Conversion<?> viaGenericData =
+                        crLogical == null ? null : genericData.getConversionFor(crLogical);
+                org.apache.avro.Conversion<?> viaReaderData =
+                        crLogical == null ? null : reader.getData().getConversionFor(crLogical);
+                org.apache.avro.Conversion<?> viaFieldByClass =
+                        crLogical == null ? null : genericData.getConversionByClass(java.math.BigDecimal.class, crLogical);
+                LOG.warn(
+                        "DIAG B/C lookup change_rate logical={} viaGenericData={} viaReaderData={} viaFieldByClass={}",
+                        crLogical,
+                        viaGenericData == null ? "NULL" : viaGenericData.getClass().getName(),
+                        viaReaderData == null ? "NULL" : viaReaderData.getClass().getName(),
+                        viaFieldByClass == null ? "NULL" : viaFieldByClass.getClass().getName());
+            } catch (Exception e) {
+                LOG.warn("DIAG B/C lookup FAILED ex={}", e.toString());
+            }
+        }
+
         GenericRecord result = reader.read(null, decoder);
         if (!diagLogged) {
             diagLogged = true;
