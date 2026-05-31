@@ -3,7 +3,7 @@ kind: FlinkDeployment
 metadata:
   name: stream-detection
 spec:
-  image: stream-detection-java:rules1
+  image: stream-detection-java:rules2
   imagePullPolicy: Never
   flinkVersion: v1_18
   flinkConfiguration:
