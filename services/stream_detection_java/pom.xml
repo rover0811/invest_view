@@ -172,7 +172,7 @@
                             <outputDirectory>${project.build.directory}/generated-sources/avro</outputDirectory>
                             <stringType>String</stringType>
                             <enableDecimalLogicalType>true</enableDecimalLogicalType>
-                            <createSetters>false</createSetters>
+                            <createSetters>true</createSetters>
                         </configuration>
                     </execution>
                 </executions>
