@@ -1,3 +1,5 @@
+name: invest_view
+
 services:
   kafka:
     image: confluentinc/cp-kafka:7.9.0
@@ -51,3 +53,62 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+
+  topic-init:
+    image: confluentinc/cp-kafka:7.9.0
+    depends_on:
+      kafka:
+        condition: service_healthy
+    restart: "no"
+    command: >
+      bash -c "kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic stock-ticks --partitions 3 --replication-factor 1 && kafka-topics --bootstrap-server kafka:29092 --create --if-not-exists --topic stock-alerts --partitions 3 --replication-factor 1"
+
+  kis_ingestion:
+    build:
+      context: .
+      dockerfile: services/kis_ingestion/Dockerfile
+    env_file: .env
+    environment:
+      KIS_KAFKA_ENABLED: "true"
+      KIS_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      KIS_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      KIS_SUBSCRIPTION_CAP: "40"
+      KIS_KAFKA_TOPIC: stock-ticks
+      KIS_WATCH_SYMBOLS: '["005930","000660","005380","035420","035720","051910","006400","068270","105560","055550","000270","012330","005490","028260","066570","015760","032830","003550","017670","096770","034730","018260","009150","011200","086790","033780","010130","259960","316140","024110","138040","030200","090430","010950","011170","047050","002790","161390","078930","071050"]'
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+
+  alert_service:
+    build:
+      context: .
+      dockerfile: services/alert_service/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      ALERT_SERVICE_DATABASE_URL: postgresql+asyncpg://postgres:postgres@postgres:5432/invest_view
+      ALERT_SERVICE_KAFKA_BOOTSTRAP_SERVERS: kafka:29092
+      ALERT_SERVICE_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      ALERT_SERVICE_AVRO_SCHEMA_PATH: /app/schemas/stock-alerts.avsc
+      ALERT_SERVICE_JWT_SECRET: dev-secret-change-me
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+      topic-init:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
