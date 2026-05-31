@@ -16,5 +16,6 @@ exclude = [
     "services/batch_enrichment",
     "services/event_pattern_persistence",
     "services/stream_detection",
+    "services/stream_detection_java",
     "services/tick_persistence",
 ]
