@@ -157,10 +157,32 @@ async def test_dispatch_does_not_commit_when_handler_raises(mock_config, consume
     await consumer._queue.put((msg, payload))
     consumer._stop_event.set()
 
-    await consumer._run_dispatch_loop()
+    with pytest.raises(RuntimeError, match="boom"):
+        await consumer._run_dispatch_loop()
 
     handler.assert_awaited_once_with(payload)
     consumer._consumer.commit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_fail_fast_does_not_advance_to_later_message(mock_config, consumer_patches):
+    handler = AsyncMock(side_effect=[RuntimeError("boom"), None])
+    consumer = AlertConsumer(mock_config, handler, poll_timeout=0.01)
+
+    msg1 = _make_msg(offset=10)
+    msg2 = _make_msg(offset=20)
+    payload1 = {"alert_id": "a1"}
+    payload2 = {"alert_id": "a2"}
+    await consumer._queue.put((msg1, payload1))
+    await consumer._queue.put((msg2, payload2))
+    consumer._stop_event.set()
+
+    with pytest.raises(RuntimeError, match="boom"):
+        await consumer._run_dispatch_loop()
+
+    handler.assert_awaited_once_with(payload1)
+    consumer._consumer.commit.assert_not_called()
+    assert consumer._queue.get_nowait() == (msg2, payload2)
 
 
 def test_stop_sets_event_and_closes(mock_config, consumer_patches):

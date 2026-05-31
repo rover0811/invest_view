@@ -132,6 +132,7 @@ class AlertConsumer:
                     msg.offset(),
                     exc,
                 )
+                raise
 
     def stop(self) -> None:
         self._stop_event.set()
