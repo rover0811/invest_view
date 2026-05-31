@@ -1,13 +1,15 @@
-.git
-.gitignore
-.idea/
-.vscode/
+# T5.1 .dockerignore — exclude everything that's NOT needed in the build context.
+# IMPORTANT: do NOT exclude target/ — the Dockerfile COPY needs the fat JAR.
+
+# Editor/IDE clutter
 *.iml
+.idea/
+
+# Test sources (we ship only main classes via the fat JAR)
 src/test/
-k8s/
-scripts/
-*.md
-target/maven-status/
-target/classes/
-target/test-classes/
-target/dependency-reduced-pom.xml
+
+# VCS metadata
+.git/
+
+# Logs and intermediate files
+*.log

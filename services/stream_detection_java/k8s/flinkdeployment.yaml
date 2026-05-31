@@ -1,0 +1,50 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: stream-detection
+spec:
+  image: stream-detection-java:rules1
+  imagePullPolicy: Never
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "1"
+    state.checkpoints.dir: file:///opt/flink/checkpoints
+    execution.checkpointing.interval: "60000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  job:
+    jarURI: local:///opt/flink/usrlib/stream-detection.jar
+    entryClass: com.invest_view.stream_detection.StreamDetectionJob
+    parallelism: 1
+    upgradeMode: stateless
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "kafka:29092"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
+            - name: PRICE_ALERT_THRESHOLD
+              value: "0.03"
+            - name: VI_PROXIMITY_THRESHOLD
+              value: "0.01"
+            - name: WINDOW_SECONDS
+              value: "300"
+            - name: SLIDE_SECONDS
+              value: "60"
+          volumeMounts:
+            - name: checkpoint-storage
+              mountPath: /opt/flink/checkpoints
+      volumes:
+        - name: checkpoint-storage
+          emptyDir: {}
