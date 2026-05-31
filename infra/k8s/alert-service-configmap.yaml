@@ -5,7 +5,7 @@ metadata:
   labels:
     app: alert-service
 data:
-  ALERT_SERVICE_KAFKA_BOOTSTRAP_SERVERS: "kafka:29092"
+  ALERT_SERVICE_KAFKA_BOOTSTRAP_SERVERS: "invest-kafka-kafka-bootstrap.kafka.svc:9092"
   ALERT_SERVICE_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
   ALERT_SERVICE_AVRO_SCHEMA_PATH: "/app/schemas/stock-alerts.avsc"
   ALERT_SERVICE_KAFKA_TOPIC: "stock-alerts"
