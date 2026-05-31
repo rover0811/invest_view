@@ -122,12 +122,53 @@ async def test_notifications_bulk_create_and_mark(db_session_factory, seeded_use
     await alert_repo.upsert(_alert_payload(alert_event_id=aid))
     created = await notif_repo.bulk_create_pending([seeded_user], aid, "005930")
     assert len(created) == 1
+    assert created[0][0] == seeded_user
     again = await notif_repo.bulk_create_pending([seeded_user], aid, "005930")
-    assert again == []
-    nid = created[0]
+    assert again == created
+    nid = created[0][1]
     await notif_repo.mark_sent(nid, datetime.now(timezone.utc).replace(tzinfo=None))
     items = await notif_repo.list_for_user(seeded_user, since=None, limit=10)
     assert len(items) == 1 and items[0].delivery_status == "SENT"
+
+
+async def test_notifications_bulk_create_pending_replay_returns_only_pending_pairs(
+    db_session_factory,
+):
+    alert_repo = AlertEventRepository(db_session_factory)
+    notif_repo = NotificationRepository(db_session_factory)
+    aid = uuid.uuid4()
+    user_pending, user_sent, user_failed = uuid.uuid4(), uuid.uuid4(), uuid.uuid4()
+    async with db_session_factory() as session:
+        session.add_all(
+            [
+                User(user_id=user_pending, nickname="pending"),
+                User(user_id=user_sent, nickname="sent"),
+                User(user_id=user_failed, nickname="failed"),
+            ]
+        )
+        await session.commit()
+    await alert_repo.upsert(_alert_payload(alert_event_id=aid))
+
+    created = await notif_repo.bulk_create_pending(
+        [user_pending, user_sent, user_failed], aid, "005930"
+    )
+    assert {uid for uid, _nid in created} == {user_pending, user_sent, user_failed}
+    by_user = dict(created)
+
+    await notif_repo.mark_sent(
+        by_user[user_sent], datetime.now(timezone.utc).replace(tzinfo=None)
+    )
+    await notif_repo.mark_failed(
+        by_user[user_failed],
+        datetime.now(timezone.utc).replace(tzinfo=None),
+        "no_connection",
+    )
+
+    replay = await notif_repo.bulk_create_pending(
+        [user_pending, user_sent, user_failed], aid, "005930"
+    )
+
+    assert replay == [(user_pending, by_user[user_pending])]
 
 
 async def test_notifications_mark_failed(db_session_factory, seeded_user):
@@ -137,7 +178,7 @@ async def test_notifications_mark_failed(db_session_factory, seeded_user):
     await alert_repo.upsert(_alert_payload(alert_event_id=aid))
     nids = await notif_repo.bulk_create_pending([seeded_user], aid, "005930")
     await notif_repo.mark_failed(
-        nids[0], datetime.now(timezone.utc).replace(tzinfo=None), "no_connection"
+        nids[0][1], datetime.now(timezone.utc).replace(tzinfo=None), "no_connection"
     )
     items = await notif_repo.list_for_user(seeded_user, since=None, limit=10)
     assert items[0].delivery_status == "FAILED"
