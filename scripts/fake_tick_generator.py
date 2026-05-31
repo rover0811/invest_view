@@ -103,6 +103,7 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=10, help="Ticks per second (across all symbols)")
     parser.add_argument("--duration", type=int, default=30, help="Seconds to run (0=infinite)")
     parser.add_argument("--broker", default="localhost:9092", help="Kafka bootstrap servers")
+    parser.add_argument("--schema-registry", default="http://localhost:8081", help="Schema Registry URL")
     parser.add_argument("--topic", default="stock-ticks", help="Kafka topic")
     args = parser.parse_args()
 
@@ -110,12 +111,13 @@ def main() -> None:
     interval = 1.0 / args.rate if args.rate > 0 else 0.1
 
     logger.info("Starting fake tick generator: symbols=%s rate=%.1f/s duration=%ss", symbols, args.rate, args.duration)
-    logger.info("Kafka: broker=%s topic=%s", args.broker, args.topic)
+    logger.info("Kafka: broker=%s topic=%s schema_registry=%s", args.broker, args.topic, args.schema_registry)
 
     producer = StockTickProducer(
         bootstrap_servers=args.broker,
         topic=args.topic,
         schema_path=SCHEMA_PATH,
+        schema_registry_url=args.schema_registry,
     )
 
     session_id = str(uuid4())
