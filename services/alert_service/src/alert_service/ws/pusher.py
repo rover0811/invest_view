@@ -29,6 +29,8 @@ from alert_service.ws.registry import ConnectionRegistry
 
 logger = logging.getLogger(__name__)
 
+_SENTINEL_ALERT_EVENT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
 
 def _strip_tz(dt: Any) -> Any:
     if isinstance(dt, datetime) and dt.tzinfo is not None:
@@ -60,6 +62,9 @@ class AlertPusher:
 
     async def handle(self, event: dict[str, Any]) -> None:
         alert_event_id = self._coerce_uuid(event["alert_event_id"])
+        # Decision D: reserved nil UUID is an always-on fatal replay seam.
+        if alert_event_id == _SENTINEL_ALERT_EVENT_ID:
+            raise RuntimeError("SENTINEL_FATAL: nil alert_event_id")
         symbol = event["symbol"]
 
         record = {

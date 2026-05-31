@@ -42,6 +42,59 @@ def _make_msg(*, value=None, error=None, topic="stock-alerts", offset=42, partit
     return msg
 
 
+class _DoneTask:
+    def __init__(self, exc: BaseException | None = None, cancelled: bool = False) -> None:
+        self._exc = exc
+        self._cancelled = cancelled
+
+    def cancelled(self) -> bool:
+        return self._cancelled
+
+    def exception(self) -> BaseException | None:
+        return self._exc
+
+    def get_name(self) -> str:
+        return "fake-consumer-task"
+
+
+@pytest.mark.asyncio
+async def test_consumer_supervision_records_task_exception(mock_config, consumer_patches):
+    consumer = AlertConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
+    consumer_patches["Consumer"].return_value.poll.return_value = None
+
+    await consumer.start()
+    assert consumer.is_alive()
+
+    error = RuntimeError("dispatch died")
+    consumer._on_task_done(_DoneTask(error))
+
+    await asyncio.wait_for(consumer.wait_dead(), timeout=0.1)
+    assert consumer.fatal_error is error
+    assert not consumer.is_alive()
+
+    consumer.stop()
+    await asyncio.wait_for(consumer._poll_task, timeout=0.2)
+    await asyncio.wait_for(consumer._dispatch_task, timeout=0.2)
+
+
+@pytest.mark.asyncio
+async def test_consumer_supervision_ignores_cancelled_task(mock_config, consumer_patches):
+    consumer = AlertConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
+    consumer_patches["Consumer"].return_value.poll.return_value = None
+
+    await consumer.start()
+    consumer._on_task_done(_DoneTask(RuntimeError("cancelled"), cancelled=True))
+
+    with pytest.raises(asyncio.TimeoutError):
+        await asyncio.wait_for(consumer.wait_dead(), timeout=0.01)
+    assert consumer.fatal_error is None
+    assert consumer.is_alive()
+
+    consumer.stop()
+    await asyncio.wait_for(consumer._poll_task, timeout=0.2)
+    await asyncio.wait_for(consumer._dispatch_task, timeout=0.2)
+
+
 @pytest.mark.asyncio
 async def test_start_subscribes_to_topic(mock_config, consumer_patches):
     consumer = AlertConsumer(mock_config, AsyncMock(), poll_timeout=0.01)

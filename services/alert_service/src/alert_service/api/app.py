@@ -10,7 +10,6 @@ import logging
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator
 
-import anyio
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -24,7 +23,7 @@ logger = logging.getLogger(__name__)
 def create_app(container: Any) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        consumer_task = asyncio.create_task(container.alert_consumer.start(), name="alert-consumer-start")
+        await container.alert_consumer.start()
         heartbeat_task = asyncio.create_task(
             heartbeat_loop(container.connection_registry), name="heartbeat-loop"
         )
@@ -38,16 +37,9 @@ def create_app(container: Any) -> FastAPI:
                 pass
 
             try:
-                await anyio.to_thread.run_sync(container.alert_consumer.stop)
+                await asyncio.to_thread(container.alert_consumer.stop)
             except Exception as exc:
                 logger.warning("consumer.stop raised: %s", exc)
-
-            consumer_task.cancel()
-            try:
-                await consumer_task
-            except (asyncio.CancelledError, Exception):
-                pass
-
             await container.engine.dispose()
 
     app = FastAPI(title="alert-service", lifespan=lifespan)
@@ -56,6 +48,7 @@ def create_app(container: Any) -> FastAPI:
     app.state.connection_registry = container.connection_registry
     app.state.watchlist_repo = container.watchlist_repo
     app.state.notification_repo = container.notification_repo
+    app.state.alert_consumer = container.alert_consumer
     app.state.engine = container.engine
 
     app.add_middleware(

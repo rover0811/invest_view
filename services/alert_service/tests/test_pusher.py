@@ -65,6 +65,19 @@ async def test_no_watchers_skips_notifications(deps):
     notif_repo.bulk_create_pending.assert_not_called()
 
 
+async def test_nil_alert_event_id_raises_sentinel_before_upsert(deps):
+    alert_repo, watchlist_repo, notif_repo, registry = deps
+    pusher = AlertPusher(alert_repo, watchlist_repo, notif_repo, registry)
+
+    with pytest.raises(RuntimeError, match="SENTINEL_FATAL: nil alert_event_id"):
+        await pusher.handle(_event(alert_event_id=uuid.UUID(int=0)))
+
+    alert_repo.upsert.assert_not_awaited()
+    watchlist_repo.find_users_for_symbol.assert_not_awaited()
+    notif_repo.bulk_create_pending.assert_not_awaited()
+    registry.send_to_user.assert_not_called()
+
+
 async def test_connected_user_marked_sent(deps):
     alert_repo, watchlist_repo, notif_repo, registry = deps
     uid = uuid.uuid4()
