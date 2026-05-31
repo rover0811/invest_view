@@ -10,9 +10,9 @@ Usage (run inside the alert_service project env, which ships confluent_kafka):
         --alert-event-id 11111111-1111-1111-1111-111111111111 \
         --symbol 005930 --rule-name qa-synthetic
 
-Requires: docker-compose.dev.yml Kafka on localhost:9092 and Schema Registry on
-localhost:8081 (the stock-alerts-value subject must already be registered, which
-it is because Flink produces and alert_service consumes that topic).
+In-cluster QA: `make inject-alert` runs this as a Job against the Strimzi bootstrap and
+in-cluster Schema Registry (the stock-alerts-value subject is already registered, since
+Flink produces and alert_service consumes that topic). For host-local runs, port-forward.
 
 Synthetic-only: defaults to rule_name=qa-synthetic. Never use real rule_names.
 """

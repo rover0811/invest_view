@@ -8,7 +8,7 @@ Kafka의 `stock-alerts` 토픽을 구독하여 수신된 알림 이벤트를 Pos
 상세 설정 항목은 `services/alert_service/.env.example`을 참조하십시오.
 
 - **데이터베이스**: `ALERT_SERVICE_DATABASE_URL` (postgresql+asyncpg://...)
-- **Kafka**: `ALERT_SERVICE_KAFKA_BOOTSTRAP_SERVERS=kafka:29092`, `ALERT_SERVICE_SCHEMA_REGISTRY_URL`
+- **Kafka**: `ALERT_SERVICE_KAFKA_BOOTSTRAP_SERVERS=invest-kafka-kafka-bootstrap.kafka.svc:9092`, `ALERT_SERVICE_SCHEMA_REGISTRY_URL`
 - **Avro**: `ALERT_SERVICE_AVRO_SCHEMA_PATH=/app/schemas/stock-alerts.avsc`
 - **보안**: `ALERT_SERVICE_JWT_SECRET` (개발 환경에서는 compose에 정의된 기본값 사용)
 
@@ -17,12 +17,12 @@ Kafka의 `stock-alerts` 토픽을 구독하여 수신된 알림 이벤트를 Pos
 
 ## 배포 및 실행
 ```bash
-docker compose -f docker-compose.dev.yml up -d alert_service
+make images apps   # 이미지 빌드 + kind load + 배포 (alert_service 포함)
 ```
 
 ## 모니터링 및 상태 확인
 ```bash
-docker compose -f docker-compose.dev.yml logs -f alert_service
+kubectl logs -f deploy/alert-service
 ```
 
 ### 정상 상태 (Healthy)

@@ -88,11 +88,10 @@ We use `SpecificRecord` (Avro code generation) instead of `GenericRecord` to ens
 - **Java 17**: JDK 17 is required and enforced by the `maven-enforcer-plugin`.
   - macOS: `export JAVA_HOME="$(brew --prefix openjdk@17)/libexec/openjdk.jdk/Contents/Home"`
 - **Python 3.11 + uv**: For running synthetic test producers and downstream services.
-- **docker-compose**: The development stack from the repo root must be running.
 
 Quick verification:
 ```bash
-docker compose -f docker-compose.dev.yml ps | grep -E "(kafka|schema-registry|postgres).*healthy" | wc -l   # should print 3
+kubectl get kafka,deploy/schema-registry,statefulset/postgres -A   # infra Ready in the cluster
 java -version 2>&1 | head -1   # should show 17
 mvn -v | head -1               # should show 3.9+
 kind version                    # should show 0.20+
@@ -101,17 +100,17 @@ helm version --short            # should show v3+
 
 ## Setup
 
-Run the bootstrap script to prepare the environment:
+Infrastructure now runs entirely in the `kind` cluster — there is no Docker Compose and no
+kind↔compose network bridge. Prepare the environment via the top-level `Makefile`:
 ```bash
-bash services/stream_detection_java/scripts/setup-kind.sh
+kind create cluster --name invest-flink   # one-time (Makefile never creates the cluster)
+make operators         # Strimzi operator
+make flink-operator    # Flink Kubernetes Operator (installs cert-manager if needed)
+make infra-up          # Strimzi Kafka cluster + topics + in-cluster Schema Registry + Postgres
+make schemas           # register stock-ticks-value, stock-alerts-value
 ```
-
-This script performs the following idempotent steps:
-1. Creates the `invest-flink` kind cluster.
-2. Connects the kind cluster to the `invest_view_default` Docker network, allowing pods to reach Kafka and Schema Registry by their service names.
-3. Installs `cert-manager` v1.13.3 (required for the Flink Operator).
-4. Installs the Flink Kubernetes Operator v1.14.0.
-5. Registers the required Avro schemas (`stock-ticks-value`, `stock-alerts-value`).
+Pods reach Kafka/SR/Postgres over in-cluster DNS
+(`invest-kafka-kafka-bootstrap.kafka.svc:9092`, `schema-registry:8081`, `postgres:5432`).
 
 ## Build
 
@@ -148,25 +147,18 @@ Access the **Flink Web UI** at: http://localhost:8083
 
 ## Verify
 
-To verify the end-to-end flow, use the synthetic test producer to generate ticks that trigger all three rules:
+To verify the end-to-end flow, inject synthetic ticks via the Makefile QA injector (runs an
+in-cluster Job against the Strimzi bootstrap), then wait for window processing:
 
 ```bash
-uv run --project services/kis_ingestion python services/stream_detection_java/scripts/produce_test_ticks.py
+make inject-tick
 sleep 25  # Wait for window processing and alert propagation
 ```
 
-Verify the alerts in Kafka:
+Verify the alerts landed in Postgres (requires `alert_service` running):
 ```bash
-docker exec invest_view-schema-registry-1 kafka-avro-console-consumer \
-  --bootstrap-server kafka:29092 --topic stock-alerts \
-  --property schema.registry.url=http://schema-registry:8081 \
-  --from-beginning --timeout-ms 10000
-```
-
-Verify the alerts in Postgres (requires `alert_service` to be running):
-```bash
-docker exec invest_view-postgres-1 psql -U postgres -d invest_view -c \
-  "SELECT alert_type, count(*) FROM alert_service.alert_events GROUP BY 1"
+kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c \
+  "SELECT rule_name, count(*) FROM alert_service.alert_events GROUP BY 1"
 ```
 
 ## Troubleshooting
@@ -176,12 +168,13 @@ The image is local to the kind cluster. Ensure you've run `kind load docker-imag
 `docker exec invest-flink-control-plane crictl images | grep stream-detection`
 
 ### `Schema not found` / SR 404
-Ensure schemas are registered. Run `bash scripts/register_all_schemas.sh` from the repo root. Verify with:
-`curl -s http://localhost:8081/subjects`
+Ensure schemas are registered. Run `make schemas` from the repo root. Verify with a temporary
+port-forward: `kubectl port-forward svc/schema-registry 8081:8081` then `curl -s http://localhost:8081/subjects`.
 
-### `Connection refused: kafka:29092`
-The kind cluster must be on the same Docker network as Kafka. Re-run `setup-kind.sh` or manually connect:
-`docker network connect invest_view_default invest-flink-control-plane`
+### `Connection refused` to Kafka
+Pods reach Kafka over in-cluster DNS at `invest-kafka-kafka-bootstrap.kafka.svc:9092` (no
+Docker bridge). Verify the Strimzi cluster is Ready (`kubectl -n kafka get kafka`) and that the
+FlinkDeployment env `KAFKA_BOOTSTRAP_SERVERS` points at that bootstrap.
 
 ### FlinkDeployment stuck in DEPLOYING
 Check the operator logs and deployment description:

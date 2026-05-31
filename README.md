@@ -33,20 +33,40 @@ KIS Open API 기반 실시간 수집, Kafka/Flink 기반 이벤트 처리, FastA
 
 ## 운영 (Operations)
 
-### 전체 서비스 기동
-모든 인프라(Kafka, Postgres 등)와 서비스(Ingestion, Alert 등)를 한 번에 실행합니다.
-```bash
-docker compose -f docker-compose.dev.yml up -d
-```
-실행되는 파이프라인: `KIS -> Kafka -> Flink(kind) -> Kafka -> alert_service -> Postgres`
+모든 인프라(Strimzi Kafka, in-cluster Schema Registry, PVC Postgres), 서비스(kis_ingestion, alert_service), Flink 작업이 단일 `kind` 클러스터(`invest-flink`) 위에서 실행됩니다. Docker Compose 및 과거의 kind↔compose 네트워크 브릿지는 더 이상 사용하지 않으며, 모든 구성요소는 in-cluster DNS(`invest-kafka-kafka-bootstrap.kafka.svc:9092`, `schema-registry:8081`, `postgres:5432`)로 통신합니다. 모든 운영 작업은 루트 `Makefile`로 수행합니다 (`make help` 참조).
 
-### Flink 브릿지 복구 (중요)
-Flink 작업은 `kind` 클러스터(`invest-flink-control-plane`)에서 실행되며, Docker Compose 네트워크(`invest_view_default`)에 브릿지로 연결되어 있습니다.
-`docker compose down` 명령을 실행하면 이 브릿지 연결이 끊어집니다. 연결을 복구하려면 다음 스크립트를 다시 실행하십시오:
+### 사전 준비 (최초 1회)
 ```bash
-bash services/stream_detection_java/scripts/setup-kind.sh
+kind create cluster --name invest-flink   # 클러스터 생성 (Makefile은 클러스터를 생성/삭제하지 않음)
+make operators                            # Strimzi 오퍼레이터 설치
+make flink-operator                       # Flink 오퍼레이터 설치 (필요 시 cert-manager 포함)
 ```
-이 스크립트는 멱등성이 보장되므로 안전하게 다시 실행할 수 있습니다.
+
+### 전체 스택 기동
+```bash
+make secrets    # 루트 .env(KIS_APP_KEY/KIS_APP_SECRET)로부터 k8s Secret 생성
+make infra-up   # Kafka 클러스터 / 토픽 / Schema Registry / Postgres
+make schemas    # Avro subject 등록 (stock-ticks-value, stock-alerts-value)
+make images     # kis_ingestion:qa / alert_service:qa 빌드 + kind load
+make apps       # alert_service / kis_ingestion 배포
+make flink      # 두 개의 FlinkDeployment 적용
+make wait       # 전체 스택 Ready 대기 (infra + apps + flink)
+```
+실행되는 파이프라인: `KIS -> Kafka(Strimzi) -> Flink(kind) -> Kafka -> alert_service -> Postgres`
+
+Flink 이미지(`stream-detection-java`) 빌드는 `bash services/stream_detection_java/scripts/deploy.sh`로 수행합니다 (mvn package + docker build + kind load — 앱 이미지 빌드 도구).
+
+### 합성 데이터 주입 (QA)
+```bash
+make inject-alert    # 합성 StockAlert 1건 발행 (옵션: make inject-alert ALERT_ID=<uuid>)
+make inject-tick     # 합성 StockTick 발행
+```
+
+### 종료
+```bash
+make down              # 앱 + flink + infra 삭제 (클러스터/오퍼레이터는 유지)
+make teardown-cluster  # 위험: kind 클러스터 전체 삭제
+```
 
 ### 실시간 데이터 검증
 평일 장중(09:00 KST 이후) 실시간 데이터의 E2E 흐름 검증 방법은 OP-1 절차를 참조하십시오.
@@ -56,13 +76,13 @@ bash services/stream_detection_java/scripts/setup-kind.sh
 **[OPERATOR]** 이 절차는 실제 시장 데이터가 존재하는 평일 장중(09:00 KST 이후)에 운영자가 수동으로 수행합니다. 본 프로젝트의 자동화된 검증(AC-1~AC-7)은 이미 통과되었으며, 이 단계는 실제 KIS API와의 연동을 최종 확인하는 단계입니다. **Plan 완료를 차단하지 않는 비차단(non-blocking) 절차입니다.**
 
 1. **사전 조건**
-   - Docker Compose 스택 기동: `docker compose -f docker-compose.dev.yml up -d`
-   - Flink 브릿지 연결 확인: `bash services/stream_detection_java/scripts/setup-kind.sh` (필요 시)
+   - 전체 스택 기동 및 Ready 확인: `make wait`
+   - Flink Job 상태 확인: `kubectl get flinkdeployment` (stream-detection 이 RUNNING)
 
 2. **실시간 Tick 수신 확인**
    `kis_ingestion` 서비스의 로그를 통해 실제 시장 데이터가 유입되는지 확인합니다.
    ```bash
-   docker compose -f docker-compose.dev.yml logs -f kis_ingestion
+   kubectl logs -f deploy/kis-ingestion
    ```
    로그에 `Tick received` 또는 Kafka 발행 관련 로그가 실시간으로 흐르는지 확인합니다.
 

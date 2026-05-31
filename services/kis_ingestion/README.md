@@ -10,19 +10,19 @@ KIS Open API WebSocket 실시간 시세를 수집하여 Kafka(`stock-ticks` 토�
 ## 환경 설정
 상세 설정 항목은 `services/kis_ingestion/.env.example`을 참조하십시오.
 
-- **인증**: `KIS_APP_KEY`, `KIS_APP_SECRET`은 루트 `.env` 파일에서 관리되며 Docker Compose를 통해 주입됩니다.
+- **인증**: `KIS_APP_KEY`, `KIS_APP_SECRET`은 루트 `.env` 파일에서 관리되며 `make secrets`로 k8s Secret(`kis-credentials`)에 주입됩니다.
 - **Kafka**: `KIS_KAFKA_ENABLED=true` 설정이 필수입니다.
-- **주소**: Compose 환경 내에서 `kafka:29092`, `schema-registry:8081`을 사용합니다.
+- **주소**: in-cluster Strimzi 부트스트랩 `invest-kafka-kafka-bootstrap.kafka.svc:9092` 와 `schema-registry:8081`을 사용합니다.
 - **구독**: `KIS_SUBSCRIPTION_CAP=40`으로 제한되어 있으며, `KIS_WATCH_SYMBOLS`에 JSON 배열 문자열 형태로 대상 종목 코드를 설정합니다.
 
 ## 배포 및 실행
 ```bash
-docker compose -f docker-compose.dev.yml up -d kis_ingestion
+make images apps   # 이미지 빌드 + kind load + 배포 (kis_ingestion 포함)
 ```
 
 ## 모니터링 및 상태 확인
 ```bash
-docker compose -f docker-compose.dev.yml logs -f kis_ingestion
+kubectl logs -f deploy/kis-ingestion
 ```
 
 ### 정상 상태 (Healthy Idle)
@@ -30,7 +30,7 @@ docker compose -f docker-compose.dev.yml logs -f kis_ingestion
 - `oauth2/Approval` POST 요청 결과 `200 OK`
 - WebSocket 연결 성공
 - 40개 종목 구독 완료
-- `Kafka: enabled (broker=kafka:29092, topic=stock-ticks)` 메시지 출력
+- `Kafka: enabled (broker=invest-kafka-kafka-bootstrap.kafka.svc:9092, topic=stock-ticks)` 메시지 출력
 
 **참고**: 장 마감 후 또는 주말(20:00 KST 이후)에는 연결은 유지되나 실시간 체결 데이터(ticks)가 수신되지 않는 것이 정상입니다.
 
