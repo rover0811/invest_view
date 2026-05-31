@@ -1,6 +1,6 @@
 package com.invest_view.stream_detection.sink;
 
-import org.apache.avro.generic.GenericRecord;
+import com.invest_view.events.StockAlert;
 import org.apache.flink.connector.kafka.sink.KafkaSink;
 import org.junit.jupiter.api.Test;
 
@@ -10,7 +10,7 @@ public class AlertKafkaSinkTest {
 
     @Test
     public void buildReturnsNonNullSinkWithInternalHostnames() {
-        KafkaSink<GenericRecord> sink = AlertKafkaSink.build(
+        KafkaSink<StockAlert> sink = AlertKafkaSink.build(
                 "kafka:29092",
                 "http://schema-registry:8081");
 

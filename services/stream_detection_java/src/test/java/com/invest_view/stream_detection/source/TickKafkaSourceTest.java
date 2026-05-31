@@ -1,6 +1,6 @@
 package com.invest_view.stream_detection.source;
 
-import org.apache.avro.generic.GenericRecord;
+import com.investview.ticks.StockTick;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.junit.jupiter.api.Test;
 
@@ -14,7 +14,7 @@ public class TickKafkaSourceTest {
 
     @Test
     public void buildReturnsConfiguredKafkaSource() {
-        KafkaSource<GenericRecord> source = TickKafkaSource.build(BOOTSTRAP, SCHEMA_REGISTRY_URL);
+        KafkaSource<StockTick> source = TickKafkaSource.build(BOOTSTRAP, SCHEMA_REGISTRY_URL);
         assertNotNull(source, "KafkaSource builder must produce a non-null source");
     }
 

@@ -1,14 +1,21 @@
 package com.invest_view.stream_detection.source;
 
-import com.invest_view.stream_detection.model.Schemas;
-import org.apache.avro.generic.GenericRecord;
+import com.investview.ticks.StockTick;
 import org.apache.flink.connector.kafka.source.KafkaSource;
 import org.apache.flink.connector.kafka.source.enumerator.initializer.OffsetsInitializer;
+import org.apache.flink.formats.avro.registry.confluent.ConfluentRegistryAvroDeserializationSchema;
 
 /**
  * Builds a Flink 1.18 {@link KafkaSource} that reads Avro-encoded
  * {@code stock-ticks} records via Confluent Schema Registry, emitting
- * {@link GenericRecord} payloads decoded against {@link Schemas#TICK}.
+ * {@link StockTick} SpecificRecord payloads.
+ *
+ * <p>The Avro-generated {@link StockTick} class registers
+ * {@link org.apache.avro.Conversions.DecimalConversion} on its static
+ * {@code MODEL$} field via {@code enableDecimalLogicalType=true} codegen
+ * (see {@code pom.xml} avro-maven-plugin config). This ensures Flink's
+ * {@code AvroSerializer.copy()} and the {@code SpecificDatumReader} both
+ * honor BigDecimal end-to-end, sidestepping FLINK-11030.
  *
  * <p>Bootstrap server and Schema Registry URL are parameters of
  * {@link #build(String, String)} — they are NOT hardcoded. Auto-registration
@@ -24,15 +31,15 @@ public final class TickKafkaSource {
     private TickKafkaSource() {
     }
 
-    public static KafkaSource<GenericRecord> build(String bootstrap, String schemaRegistryUrl) {
-        return KafkaSource.<GenericRecord>builder()
+    public static KafkaSource<StockTick> build(String bootstrap, String schemaRegistryUrl) {
+        return KafkaSource.<StockTick>builder()
                 .setBootstrapServers(bootstrap)
                 .setTopics(TOPIC)
                 .setGroupId(GROUP_ID)
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setValueOnlyDeserializer(
-                        new DecimalAwareAvroDeserializationSchema(
-                                Schemas.TICK_RAW, schemaRegistryUrl))
+                        ConfluentRegistryAvroDeserializationSchema.forSpecific(
+                                StockTick.class, schemaRegistryUrl))
                 .build();
     }
 }
