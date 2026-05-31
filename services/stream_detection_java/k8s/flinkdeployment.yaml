@@ -31,7 +31,7 @@ spec:
         - name: flink-main-container
           env:
             - name: KAFKA_BOOTSTRAP_SERVERS
-              value: "kafka:29092"
+              value: "invest-kafka-kafka-bootstrap.kafka.svc:9092"
             - name: SCHEMA_REGISTRY_URL
               value: "http://schema-registry:8081"
             - name: PRICE_ALERT_THRESHOLD
