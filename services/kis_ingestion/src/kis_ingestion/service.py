@@ -52,6 +52,7 @@ class IngestionService:
                         logger.exception("Failed to publish tick seq=%d", sequence)
         except Exception:
             logger.exception("KIS ingestion service failed")
+            raise
         finally:
             await self._shutdown(loop)
 
