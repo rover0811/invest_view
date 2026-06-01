@@ -145,6 +145,17 @@ The deployment script:
 
 Access the **Flink Web UI** at: http://localhost:8083
 
+### Stateless redeploy & pattern warmup
+
+The Flink job uses `upgradeMode: stateless` with `emptyDir` checkpoints. On every redeploy, all keyed state resets. This includes the rolling state for pattern detectors (MA5/MA20 history, RSI 14-period window, MACD EMA12/26/signal).
+
+After a stateless redeploy, the pattern rules require a warmup period before they emit events again:
+- **Golden/Dead cross**: Needs 20 closed 5m bars (MA_LONG).
+- **RSI**: Needs 15 closed 5m bars (RSI_PERIOD+1).
+- **MACD**: Needs ~35 closed 5m bars (MACD_SLOW + signal).
+
+**Operational Note**: Prefer redeploying out of market hours. Expect no pattern events for roughly 130 minutes of market data (~26 closed 5m bars) after a stateless redeploy. This is by design for v1; stateful upgrades via PVC/savepoints are deferred.
+
 ## Verify
 
 To verify the end-to-end flow, inject synthetic ticks via the Makefile QA injector (runs an

@@ -143,37 +143,32 @@ make teardown-cluster  # 위험: kind 클러스터 전체 삭제
    SELECT * FROM serving.symbol_snapshot LIMIT 10;
    ```
 
-5. **패턴 탐지 확인 (Gold)**
-   Flink에 의해 탐지된 기술적 패턴이 `gold.pattern_events`에 적재되는지 확인합니다.
-   ```sql
-   SELECT pattern_type, symbol, count(*) 
-   FROM gold.pattern_events 
-   WHERE triggered_at > now() - interval '1 hour' 
-   GROUP BY 1, 2;
-   ```
+5. **패턴 탐지 및 Kafka 발행 확인 (Gold)**
+   Flink에 의해 탐지된 기술적 패턴이 `stock-patterns` 토픽으로 발행되고 `gold.pattern_events`에 적재되는지 확인합니다.
+   - **Kafka 토픽 확인**: `stock-patterns` 토픽이 존재하며 데이터가 흐르는지 확인합니다 (kcat 또는 in-cluster 클라이언트 사용).
+   - **DB 적재 확인**:
+     ```bash
+     kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c "SELECT pattern_type, count(*) FROM gold.pattern_events WHERE triggered_at > now() - interval '1 hour' GROUP BY 1;"
+     ```
+   *참고: Flink 재배포 직후에는 [패턴 웜업](#stateless-redeploy--pattern-warmup) 기간 동안 결과가 비어있을 수 있습니다.*
 
-6. **통합 타임라인 확인 (Serving)**
-   알림(Alert)과 패턴(Pattern)이 통합된 타임라인 뷰를 확인합니다.
-   ```sql
-   SELECT event_kind, event_type, triggered_at 
-   FROM serving.symbol_signal_timeline 
-   WHERE symbol = '<symbol>' 
-   ORDER BY triggered_at DESC LIMIT 20;
-   ```
+6. **통합 타임라인 및 서빙 확인 (Serving)**
+   알림(Alert)과 패턴(Pattern)이 통합된 타임라인 뷰와 API 응답을 확인합니다.
+   - **타임라인 뷰**:
+     ```bash
+     kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c "SELECT event_kind, count(*) FROM serving.symbol_signal_timeline WHERE symbol='<symbol>' GROUP BY 1;"
+     ```
+   - **API 응답**:
+     ```bash
+     # 로컬 포트 포워딩
+     kubectl port-forward deploy/alert-service 8000:8000
+     
+     # 타임라인 데이터 조회
+     curl -s localhost:8000/api/timeline/<symbol>
+     ```
 
-7. **Serving API 응답 확인**
-   alert-service를 통해 서빙되는 API의 JSON 응답을 확인합니다.
-   ```bash
-   # 로컬 포트 포워딩
-   kubectl port-forward deploy/alert-service 8000:8000
-   
-   # 캔들 데이터 조회
-   curl -s localhost:8000/api/candles/<symbol> | head
-   
-   # 타임라인 데이터 조회
-   curl -s localhost:8000/api/timeline/<symbol> | head
-   ```
-   응답에 OHLC 데이터 및 alert/pattern 이벤트가 포함되어야 합니다.
+7. **Stateless redeploy & pattern warmup**
+   Flink 작업은 `stateless` 모드로 동작하므로, 재배포 시 모든 패턴 탐지 상태가 초기화됩니다. MA20, RSI, MACD 등 기술적 지표가 다시 계산되기까지 약 130분(5분봉 26개)의 장중 데이터 웜업이 필요합니다. 이 기간 동안 `gold.pattern_events`가 비어있는 것은 정상입니다.
 
 8. **성공 기준**
    - `bronze.tick_history` 카운트 증가.
