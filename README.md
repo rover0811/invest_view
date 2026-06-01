@@ -106,3 +106,78 @@ make teardown-cluster  # 위험: kind 클러스터 전체 삭제
 
 5. **성공 기준**
    위 SQL 쿼리 결과, 3개 규칙 중 최소 하나 이상에서 1건 이상의 데이터가 조회되어야 합니다.
+
+### OP-2: tick persistence + pattern + serving API E2E 검증
+
+**[OPERATOR]** 이 절차는 tick 적재, 5분봉 집계, 패턴 탐지 및 서빙 API의 데이터 흐름을 검증합니다. 실제 시장 데이터가 존재하는 평일 장중에 수행하며, **Plan 완료를 차단하지 않는 비차단(non-blocking) 절차입니다.**
+
+1. **사전 조건**
+   - 전체 스택 기동 및 Ready 확인: `make wait`
+   - 서비스 상태 확인: `kubectl get deploy/tick-persistence deploy/event-pattern-persistence` (Ready)
+   - Flink Job 상태 확인: `kubectl get flinkdeployment` (stream-detection 이 RUNNING)
+
+2. **실시간 Tick 적재 확인 (Bronze)**
+   `bronze.tick_history` 테이블에 데이터가 실시간으로 쌓이는지 확인합니다.
+   ```bash
+   kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c "SELECT count(*) FROM bronze.tick_history;"
+   ```
+   장중 실행 시 카운트가 지속적으로 증가해야 합니다.
+
+3. **5분봉 집계 확인 (Silver)**
+   `silver.symbol_5m_metrics` 테이블에 OHLC 데이터가 정상적으로 생성되는지 확인합니다.
+   ```sql
+   -- 최신 10개 5분봉 조회
+   SELECT symbol, bucket_start, open, high, low, close, tick_count, is_final 
+   FROM silver.symbol_5m_metrics 
+   ORDER BY bucket_start DESC LIMIT 10;
+
+   -- OHLC 불변식 검증 (결과가 0이어야 함)
+   SELECT count(*) 
+   FROM silver.symbol_5m_metrics 
+   WHERE NOT (low <= open AND open <= high AND low <= close AND close <= high);
+   ```
+
+4. **현재 상태 스냅샷 확인 (Serving)**
+   `serving.symbol_snapshot` 테이블에 종목별 최신 상태가 유지되는지 확인합니다.
+   ```sql
+   SELECT * FROM serving.symbol_snapshot LIMIT 10;
+   ```
+
+5. **패턴 탐지 확인 (Gold)**
+   Flink에 의해 탐지된 기술적 패턴이 `gold.pattern_events`에 적재되는지 확인합니다.
+   ```sql
+   SELECT pattern_type, symbol, count(*) 
+   FROM gold.pattern_events 
+   WHERE triggered_at > now() - interval '1 hour' 
+   GROUP BY 1, 2;
+   ```
+
+6. **통합 타임라인 확인 (Serving)**
+   알림(Alert)과 패턴(Pattern)이 통합된 타임라인 뷰를 확인합니다.
+   ```sql
+   SELECT event_kind, event_type, triggered_at 
+   FROM serving.symbol_signal_timeline 
+   WHERE symbol = '<symbol>' 
+   ORDER BY triggered_at DESC LIMIT 20;
+   ```
+
+7. **Serving API 응답 확인**
+   alert-service를 통해 서빙되는 API의 JSON 응답을 확인합니다.
+   ```bash
+   # 로컬 포트 포워딩
+   kubectl port-forward deploy/alert-service 8000:8000
+   
+   # 캔들 데이터 조회
+   curl -s localhost:8000/api/candles/<symbol> | head
+   
+   # 타임라인 데이터 조회
+   curl -s localhost:8000/api/timeline/<symbol> | head
+   ```
+   응답에 OHLC 데이터 및 alert/pattern 이벤트가 포함되어야 합니다.
+
+8. **성공 기준**
+   - `bronze.tick_history` 카운트 증가.
+   - `silver.symbol_5m_metrics` OHLC 불변식 통과.
+   - `serving.symbol_signal_timeline`에서 alert와 pattern이 모두 조회됨.
+   - API 호출 시 정상적인 JSON 데이터 반환.
+
