@@ -66,10 +66,7 @@ def make_tick(symbol: str, base_price: int, seq: int) -> ParsedTick:
         bid_price_1=price - random.randint(50, 200),
         trade_volume=random.randint(1, 5000),
         cumulative_volume=random.randint(100000, 5000000),
-        # avsc types cumulative_amount as Avro int (32-bit, max 2_147_483_647); a larger
-        # KRW amount is written by lenient Python fastavro but rejected by Flink/Java
-        # ("Invalid int encoding"). Keep synthetic values inside the int32 range.
-        cumulative_amount=random.randint(1000000000, 2000000000),
+        cumulative_amount=random.randint(10_000_000_000, 5_000_000_000_000),
         sell_count=random.randint(1000, 50000),
         buy_count=random.randint(1000, 50000),
         net_buy_count=random.randint(-10000, 10000),
