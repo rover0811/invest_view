@@ -46,13 +46,16 @@ make flink-operator                       # Flink 오퍼레이터 설치 (필요
 ```bash
 make secrets    # 루트 .env(KIS_APP_KEY/KIS_APP_SECRET)로부터 k8s Secret 생성
 make infra-up   # Kafka 클러스터 / 토픽 / Schema Registry / Postgres
-make schemas    # Avro subject 등록 (stock-ticks-value, stock-alerts-value)
-make images     # kis_ingestion:qa / alert_service:qa 빌드 + kind load
-make apps       # alert_service / kis_ingestion 배포
+make schemas    # Avro subject 등록 (stock-ticks-value, stock-alerts-value, stock-patterns-value)
+make images     # kis_ingestion:qa / alert_service:qa / tick_persistence:qa / event_pattern_persistence:qa 빌드 + kind load
+make apps       # alert_service / kis_ingestion / tick_persistence / event_pattern_persistence 배포
 make flink      # 두 개의 FlinkDeployment 적용
 make wait       # 전체 스택 Ready 대기 (infra + apps + flink)
 ```
-실행되는 파이프라인: `KIS -> Kafka(Strimzi) -> Flink(kind) -> Kafka -> alert_service -> Postgres`
+실행되는 파이프라인:
+- Alert path: `KIS -> Kafka(stock-ticks) -> Flink -> Kafka(stock-alerts) -> alert_service -> Postgres`
+- Tick persistence: `Kafka(stock-ticks) -> tick_persistence -> Postgres(bronze/silver/serving)`
+- Pattern persistence: `Flink -> Kafka(stock-patterns) -> event_pattern_persistence -> Postgres(gold)`
 
 Flink 이미지(`stream-detection-java`) 빌드는 `bash services/stream_detection_java/scripts/deploy.sh`로 수행합니다 (mvn package + docker build + kind load — 앱 이미지 빌드 도구).
 

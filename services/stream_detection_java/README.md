@@ -1,19 +1,27 @@
 # stream-detection-java
 
 > Apache Flink (Java) streaming pipeline that consumes Korean stock ticks from Kafka,
-> applies 3 real-time detection rules (PRICE_ALERT, VI_IMMINENT, TRADING_HALT),
-> and publishes alerts back to Kafka for downstream services.
+> applies 3 real-time alert rules (PRICE_ALERT, VI_IMMINENT, TRADING_HALT) and
+> 3 technical pattern rules (Golden/Dead Cross, RSI, MACD),
+> and publishes to the `stock-alerts` and `stock-patterns` Kafka topics.
 >
 > Part of the `invest_view` portfolio project — see the [project README](../../README.md) for the broader architecture.
 
 ## Overview
 
-The `stream-detection-java` service is a high-performance streaming application built on Apache Flink. It consumes `StockTick` events from the `stock-ticks` Kafka topic, processes them through a series of real-time detection rules, and emits `StockAlert` events to the `stock-alerts` topic.
+The `stream-detection-java` service is a high-performance streaming application built on Apache Flink. It consumes `StockTick` events from the `stock-ticks` Kafka topic, processes alert and technical-pattern rules, and emits `StockAlert` events to `stock-alerts` and `StockPattern` events to `stock-patterns`.
 
-The service implements three core detection rules:
+The service implements six detection rules across two output topics:
+
+**Alert rules → `stock-alerts`**
 - **PRICE_ALERT**: Detects significant price movements (≥3% spread) within a 5-minute sliding window (1-minute slide), keyed by symbol.
 - **VI_IMMINENT**: A per-tick check that fires when the current price is within 1% of the Static VI (Volatility Interruption) trigger price.
 - **TRADING_HALT**: A stateful detector that monitors the `trading_halted` status and fires when it transitions from "N" to "Y".
+
+**Pattern rules → `stock-patterns`**
+- **Golden/Dead Cross**: MA5 crosses MA20 upward (`GOLDEN_CROSS`) or downward (`DEAD_CROSS`) on closed 5-minute bars.
+- **RSI**: Emits `RSI_OVERSOLD` (<30) or `RSI_OVERBOUGHT` (>70) on closed 5-minute bars.
+- **MACD**: Emits `MACD_BULLISH` or `MACD_BEARISH` on EMA12/26/signal crossover after the documented warmup window.
 
 This Java implementation serves as a robust alternative to the Python PyFlink reference (`services/stream_detection/`). By using the Java DataStream API and Avro `SpecificRecord` serialization, we sidestep the `BigDecimal` serialization issues (FLINK-11030) encountered in the Python implementation.
 
@@ -28,52 +36,23 @@ KIS Open API (WebSocket realtime price feed)
         │
         ▼
 ┌──────────────────┐
-│  kis_ingestion   │  (Python, services/kis_ingestion/)
-│  raw tick parser │
+│  kis_ingestion   │
 └────────┬─────────┘
-         │
-         ▼ (Avro StockTick, schema_id=5)
+         ▼ (Avro StockTick)
 ┌────────────────────────────────────┐
-│  Kafka topic: stock-ticks          │
-│  Confluent Schema Registry         │
+│ Kafka topic: stock-ticks           │
 └────────┬───────────────────────────┘
-         │
          ▼
 ┌──────────────────────────────────────────────────────────┐
-│  THIS SERVICE: stream-detection-java                     │
-│  Flink 1.18.1 on Kubernetes (Flink Operator 1.14.0)      │
-│                                                          │
-│  ┌──────────────────────────────────────────────────┐   │
-│  │  StreamDetectionJob.main()                       │   │
-│  │   ├─ KafkaSource<StockTick> via SpecificRecord   │   │
-│  │   ├─ Watermark: received_at ISO8601, 10s slack   │   │
-│  │   │                                              │   │
-│  │   ├─→ filter(isEligible).keyBy(symbol)           │   │
-│  │   │   .window(SlidingEvent 5min/1min)            │   │
-│  │   │   .aggregate(PriceAlertAggregator) ──┐       │   │
-│  │   │                                       ▼      │   │
-│  │   ├─→ flatMap(VIImminentFlatMap) ────→ union ─┐  │   │
-│  │   │                                            ▼  │   │
-│  │   ├─→ keyBy(symbol).process(                      │   │
-│  │   │     TradingHaltDetector w/ ValueState) ────┐  │   │
-│  │   │                                            ▼  │   │
-│  │   │                                       KafkaSink │   │
-│  │   │                                            │   │
-│  │   └─ checkpoint: EXACTLY_ONCE / 60s / file:// /opt/flink/checkpoints
-│  └──────────────────────────────────────────────────┘   │
-└────────┬─────────────────────────────────────────────────┘
-         │
-         ▼ (Avro StockAlert, schema_id=…)
-┌────────────────────────────────────┐
-│  Kafka topic: stock-alerts         │
-└────────┬───────────────────────────┘
-         │
-         ▼
-┌──────────────────┐
-│  alert_service   │  (Python, services/alert_service/)
-│  Kafka consumer  │
-│   → Postgres     │  (alert_service.alert_events, PK = alert_event_id)
-└──────────────────┘
+│ stream-detection-java                                    │
+│  ├─ Alert rules: Price / VI / Halt ───────► stock-alerts │
+│  └─ Pattern rules: Cross / RSI / MACD ────► stock-patterns│
+└────────┬──────────────────────────────┬──────────────────┘
+         ▼                              ▼
+┌──────────────────┐          ┌──────────────────────────────┐
+│ alert_service    │          │ event_pattern_persistence    │
+│ → alert_events   │          │ → gold.pattern_events        │
+└──────────────────┘          └──────────────────────────────┘
 ```
 
 We use `SpecificRecord` (Avro code generation) instead of `GenericRecord` to ensure type safety and avoid runtime casting issues with logical types like `decimal`. This pivot was critical for handling the high-precision price data required for financial calculations.
@@ -107,7 +86,7 @@ kind create cluster --name invest-flink   # one-time (Makefile never creates the
 make operators         # Strimzi operator
 make flink-operator    # Flink Kubernetes Operator (installs cert-manager if needed)
 make infra-up          # Strimzi Kafka cluster + topics + in-cluster Schema Registry + Postgres
-make schemas           # register stock-ticks-value, stock-alerts-value
+make schemas           # register stock-ticks-value, stock-alerts-value, stock-patterns-value
 ```
 Pods reach Kafka/SR/Postgres over in-cluster DNS
 (`invest-kafka-kafka-bootstrap.kafka.svc:9092`, `schema-registry:8081`, `postgres:5432`).
@@ -123,7 +102,7 @@ mvn clean package
 The build process:
 - Generates Avro `SpecificRecord` classes from `.avsc` files.
 - Compiles the Java source code.
-- Runs unit tests (expecting ≥60 passes).
+- Runs unit tests (expecting ≥80 passes).
 - Packages everything into `target/stream-detection-java-1.0-SNAPSHOT.jar`.
 
 The resulting JAR is a shaded fat JAR containing all dependencies, including the Flink Kafka connector, Confluent serdes, and the UUID generator.
@@ -137,7 +116,7 @@ bash services/stream_detection_java/scripts/deploy.sh
 
 The deployment script:
 1. Rebuilds the JAR (skipping tests).
-2. Builds a Docker image tagged `stream-detection-java:rules1`.
+2. Builds a Docker image tagged `stream-detection-java:rules3`.
 3. Loads the image into the kind cluster.
 4. Applies the `k8s/flinkdeployment.yaml` manifest.
 5. Waits for the job to reach the `RUNNING` state.
@@ -172,10 +151,18 @@ kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c \
   "SELECT rule_name, count(*) FROM alert_service.alert_events GROUP BY 1"
 ```
 
+Verify pattern events landed in Postgres (requires `event_pattern_persistence` running):
+```bash
+kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c \
+  "SELECT pattern_type, count(*) FROM gold.pattern_events GROUP BY 1"
+```
+
+Pattern events may be empty immediately after a stateless redeploy until the warmup window completes.
+
 ## Troubleshooting
 
 ### `ImagePullBackOff` / `ErrImageNeverPull`
-The image is local to the kind cluster. Ensure you've run `kind load docker-image stream-detection-java:rules1 --name invest-flink`. You can verify the image presence with:
+The image is local to the kind cluster. Ensure you've run `kind load docker-image stream-detection-java:rules3 --name invest-flink`. You can verify the image presence with:
 `docker exec invest-flink-control-plane crictl images | grep stream-detection`
 
 ### `Schema not found` / SR 404

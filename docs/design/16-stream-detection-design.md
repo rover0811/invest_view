@@ -24,21 +24,21 @@ created: 2026-06-01
 
 ### In Scope
 
-- **Real-time Detection**: 가격 변동성(Price Alert), VI 근접(VI Imminent), 거래 정지 상태 전이(Trading Halt) 감지
-- **Stateful Processing**: 5분 슬라이딩 윈도우 및 상태 기반 전이 감지
+- **Real-time Alert Detection**: 가격 변동성(Price Alert), VI 근접(VI Imminent), 거래 정지 상태 전이(Trading Halt) 감지
+- **Technical Pattern Detection**: 골든/데드크로스(MA5/MA20), RSI(14), MACD(12/26/9) 기반 패턴을 closed 5분봉 기준으로 감지하고 `stock-patterns` 토픽으로 발행
+- **Stateful Processing**: 5분 슬라이딩 윈도우, 상태 기반 전이, bar-close 기반 패턴 상태 처리
 - **Idempotent ID Generation**: Python과 호환되는 UUID5 기반 멱등 키 생성
 - **Schema Validation**: 기동 시 SR 연동 및 스키마 정합성 체크
 
 ### Out of Scope
 
-- **Stock Patterns**: 골든/데드크로스, RSI, MACD 등 기술적 지표 패턴 발행 (→ Future Work)
 - **Savepoint Management**: 자동화된 세이브포인트 관리 및 PVC 기반 체크포인트 (v1은 emptyDir/stateless)
 - **Dynamic Rule Injection**: 런타임 규칙 변경 (현재는 환경 변수 기반 정적 설정)
 - **Parallelism Scaling**: v1은 병렬도 1로 고정하여 운영 복잡도 최소화
 
 ### Boundary Statement
 
-Stream Detection의 책임은 **Kafka `stock-ticks`를 소비하여 정의된 3종의 비즈니스 룰에 따라 실시간 이벤트를 감지하고, 이를 멱등적인 UUID와 함께 `stock-alerts` 토픽으로 발행하는 것**까지다.
+Stream Detection의 책임은 **Kafka `stock-ticks`를 소비하여 3종의 알림 룰(`stock-alerts`)과 3종의 기술적 패턴 룰(`stock-patterns`)을 실시간으로 감지하고, 멱등적인 UUID와 함께 각 토픽으로 발행하는 것**까지다.
 
 ## 1. Pipeline Architecture
 
@@ -51,17 +51,27 @@ flowchart LR
     Source[(Kafka: stock-ticks)] --> WM[TickWatermarkStrategy]
     WM --> Split{Parallel Branches}
     
-    subgraph Detection Rules
+    subgraph Alert Rules
         Split --> PA[PriceAlert Window]
         Split --> VI[VI Imminent FlatMap]
         Split --> TH[TradingHalt Process]
     end
-    
-    PA --> Union[Union Stream]
-    VI --> Union
-    TH --> Union
-    
-    Union --> Sink[(Kafka: stock-alerts)]
+
+    subgraph Pattern Rules
+        Split --> CR[MA Cross Detector]
+        Split --> RSI[RSI Detector]
+        Split --> MACD[MACD Detector]
+    end
+
+    PA --> AlertUnion[Alert Union]
+    VI --> AlertUnion
+    TH --> AlertUnion
+    AlertUnion --> AlertSink[(Kafka: stock-alerts)]
+
+    CR --> PatternUnion[Pattern Union]
+    RSI --> PatternUnion
+    MACD --> PatternUnion
+    PatternUnion --> PatternSink[(Kafka: stock-patterns)]
 ```
 
 ### Environment Configuration
@@ -80,6 +90,10 @@ flowchart LR
 | `vi_imminent_1pct` | `VI_IMMINENT` | Per-tick FlatMap. `\|price - vi_trigger\| / vi_trigger <= threshold(1%)` | `price`, `vi_trigger_price`, `distance_ratio`, `threshold` | `received_at` (ISO8601) | `WARNING` |
 | `trading_halt_transition` | `TRADING_HALT` | KeyedProcessFunction. `prev=="N" AND current=="Y"` 전이만 발동 | `prev_state`, `new_state`, `transition_time` | `transitionTimeMs` | `CRITICAL` |
 
+### MACD Warmup Suppression
+
+`MacdDetector`는 `closedBarCount >= slowPeriod + signalPeriod` 조건을 만족하기 전까지 모든 MACD 신호를 억제한다. 기본값 기준으로 26 + 9 = **35개의 closed 5분봉**이 필요하다. 이는 EMA 초기화 구간의 스퓨리어스 crossover 신호를 방지하기 위한 guard이며, stateless 재배포 후 패턴 웜업 기간과 동일한 운영상 의미를 가진다.
+
 ### Common Eligibility Filter
 - `trading_halted == "N"` (Trading Halt 룰 제외)
 - `price > 0`
@@ -94,7 +108,7 @@ Avro `GenericRecord` 사용 시 `decimal` logicalType이 `ByteBuffer`로 역직�
 
 ### Kafka Connectors
 - **Source**: `stock-ticks` 토픽, `stream-detection-java` 그룹 ID, `latest` 오프셋부터 시작. `ConfluentRegistryAvroDeserializationSchema` 사용.
-- **Sink**: `stock-alerts` 토픽, `AT_LEAST_ONCE` 보장. `auto.register.schemas=false` (사전 등록 필수).
+- **Sinks**: `stock-alerts` 및 `stock-patterns` 토픽, `AT_LEAST_ONCE` 보장. `auto.register.schemas=false` (사전 등록 필수).
 
 ## 4. Idempotent Deduplication
 
@@ -118,7 +132,7 @@ Avro `GenericRecord` 사용 시 `decimal` logicalType이 `ByteBuffer`로 역직�
 ### Infrastructure
 - **Flink Version**: 1.18.1
 - **Flink Operator**: 1.14.0
-- **Image**: `stream-detection-java:rules2`
+- **Image**: `stream-detection-java:rules3`
 - **Upgrade Mode**: `stateless` (v1 MVP 범위에서 세이브포인트 자동화 제외)
 
 ### Resource Allocation
@@ -141,12 +155,12 @@ Avro `GenericRecord` 사용 시 `decimal` logicalType이 `ByteBuffer`로 역직�
 
 - **State Migration**: 향후 `stateless` 모드에서 `savepoint` 기반의 유상태 업그레이드로 전환 시점
 - **Scaling Strategy**: 병렬도 확장 시 KeyGroup 할당 및 워터마크 정체 해소 방안
-- **Pattern Detection**: `stock-patterns` (RSI, MACD 등) 구현 일정 및 별도 Job 분리 여부
+- **State Migration**: 패턴 룰의 rolling state를 포함한 유상태 업그레이드를 savepoint/PVC 기반으로 전환할 시점
 
 ## v1 implementation scope
 
-- **Current**: 3종 핵심 룰(Price, VI, Halt) 감지, UUID5 멱등 키, Java 기반 안정적 파이프라인
-- **Next Scoped**: `stock-patterns` 추가, PVC 기반 유상태 체크포인트, 병렬도 확장
+- **Current**: 3종 알림 룰(Price, VI, Halt) + 3종 패턴 룰(Cross, RSI, MACD), UUID5 멱등 키, Java 기반 안정적 파이프라인
+- **Next Scoped**: PVC 기반 유상태 체크포인트, 병렬도 확장
 - **Out of Scope**: 런타임 동적 규칙 변경, 미국 시장 데이터 처리
 
 ## Related Notes

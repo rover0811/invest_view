@@ -226,3 +226,7 @@ services/stream_detection/jars/
 
 # Git worktrees
 .worktrees/
+# AI/browser session artifacts
+.playwright-mcp/
+/*.png
+*.screenshot.png

@@ -13,6 +13,12 @@
 3. [이벤트 기반 파이프라인 설계 근거](design/event-driven-stock-pipeline.md)
    - 왜 Kafka, Flink, PostgreSQL, custom consumer 구조를 택했는지 설명하는 설계 근거 문서
 
+4. [Alert Serving 설계](design/14-alert-serving-design.md)
+   - alert-service 범위, REST/WebSocket API, DB 스키마, 신뢰성 설계
+
+5. [Stream Detection 설계](design/16-stream-detection-design.md)
+   - Flink 파이프라인, 알림 룰 3종, 패턴 룰 3종, UUID5 멱등성, 배포/운영
+
 ## 다이어그램
 
 - [D2 소스](diagrams/d2-sources/)

@@ -192,6 +192,9 @@ sequenceDiagram
 | `DELETE` | `/api/watchlist/{symbol}` | 관심 종목 삭제 |
 | `PATCH` | `/api/watchlist/{symbol}` | 알림 설정 수정 (`{"notifications_enabled": bool}`) |
 | `GET` | `/api/notifications` | 알림 이력 조회 (`since`, `limit` 필터) |
+| `GET` | `/api/candles/{symbol}` | 5분봉 OHLC 조회 (`limit` 필터, `silver.symbol_5m_metrics` 기반) |
+| `GET` | `/api/snapshot/{symbol}` | 종목 현재 상태 스냅샷 조회 (`serving.symbol_snapshot` 기반) |
+| `GET` | `/api/timeline/{symbol}` | 알림+패턴 통합 타임라인 조회 (`limit` 필터, `serving.symbol_signal_timeline` 기반) |
 | `GET` | `/health` | 헬스체크 (DB 연결 확인 포함) |
 
 ### 6-2. WebSocket protocol
@@ -446,7 +449,7 @@ erDiagram
 
 ## 13. v1 implementation scope
 
-- **Current**: `stock-alerts` 소비, DB 저장, WebSocket 푸시, Watchlist/Notification REST API, JWT 검증
+- **Current**: `stock-alerts` 소비, DB 저장, WebSocket 푸시, Watchlist/Notification REST API, JWT 검증; 가격 서빙 read API(`/api/candles`, `/api/snapshot`, `/api/timeline`) — silver/serving/gold 기반 read-only
 - **Next Scoped**: `enrichment-events` 연동, 알림 읽음 처리, 다중 인스턴스 확장
 - **Out of Scope**: JWT 발급, 관리자 UI, 상세 메트릭 대시보드
 
