@@ -22,7 +22,7 @@ created: 2026-04-29 02:37:46
 ## Detailed Spec Map
 
 - [[12-kis-realtime-ingress-design]] — KIS 인증, WebSocket, subscription pool, raw payload parsing, `stock-ticks` handoff
-- `13-stream-detection-design.md` — Flink window / alert / pattern scope (planned)
+- `16-stream-detection-design.md` — Flink window / alert / pattern scope
 - [[14-alert-serving-design.md]] — alert-service / notification / WebSocket scope (stock-alerts only)
 - `15-batch-enrichment-design.md` — Airflow / outbox / Debezium scope (planned)
 

@@ -48,11 +48,11 @@ Alert Serving의 책임은 **Flink가 생성한 `stock-alerts`를 안정적으�
 ## 1. Why separate this file
 
 - `alert_service`는 실시간 사용자 접점(WebSocket)과 REST API를 동시에 제공하는 **User-facing Realtime Layer**다.
-- 13번(Flink Stream)은 데이터 가공에 집중하고, 15번(Batch Enrichment)은 비실시간 데이터 결합에 집중하므로, **사용자 세션 관리와 알림 전달 상태(Delivery Status)를 책임지는 서빙 레이어**를 별도 설계로 분리한다.
+- 16번(Flink Stream)은 데이터 가공에 집중하고, 15번(Batch Enrichment)은 비실시간 데이터 결합에 집중하므로, **사용자 세션 관리와 알림 전달 상태(Delivery Status)를 책임지는 서빙 레이어**를 별도 설계로 분리한다.
 
 ## 2. External constraints
 
-- **Kafka stock-alerts contract**: 13번(Flink)이 발행하는 `stock-alerts` 토픽의 스키마를 준수해야 한다.
+- **Kafka stock-alerts contract**: 16번(Flink)이 발행하는 `stock-alerts` 토픽의 스키마를 준수해야 한다.
 - **Single PostgreSQL**: 모든 영속 데이터는 단일 PostgreSQL의 `alert_service` 스키마에 저장한다.
 - **Single Instance v1**: 다중 인스턴스 환경에서의 WebSocket 세션 공유(Redis 등)를 고려하지 않는다.
 - **MSA SRP**: Enrichment 데이터와의 결합은 이벤트를 통한 느슨한 결합을 지향하며, 서빙 레이어는 전달(Delivery)에 집중한다.

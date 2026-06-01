@@ -723,7 +723,7 @@ invest_view/                           # monorepo root
 
 KIS 문서 다음으로는 아래 순서로 분리하는 것이 자연스럽다.
 
-1. `13-stream-detection-design.md` — Flink window / alert / pattern scope
+1. `16-stream-detection-design.md` — Flink window / alert / pattern scope
 2. `14-alert-serving-design.md` — alert-service / notification / WebSocket scope
 3. `15-batch-enrichment-design.md` — Airflow / outbox / Debezium scope
 
