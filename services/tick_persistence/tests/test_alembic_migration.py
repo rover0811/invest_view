@@ -47,7 +47,8 @@ async def _fetch_migration_state(url: str) -> _MigrationState:
         table_rows = await conn.execute(
             text(
                 """SELECT table_schema, table_name FROM information_schema.tables
-                WHERE table_schema IN ('bronze','silver','serving')"""
+                WHERE table_schema IN ('bronze','silver','serving')
+                AND table_type = 'BASE TABLE'"""
             )
         )
         tables = {(row[0], row[1]) for row in table_rows}
@@ -91,6 +92,39 @@ async def _fetch_schemas(url: str) -> set[str]:
     return schemas
 
 
+async def _check_intraday_view(url: str) -> None:
+    engine = create_async_engine(url)
+    async with engine.begin() as conn:
+        regclass = await conn.scalar(text("SELECT to_regclass('serving.symbol_intraday_5m')"))
+        assert regclass == "serving.symbol_intraday_5m"
+
+        await conn.execute(
+            text(
+                """INSERT INTO silver.symbol_5m_metrics
+                (symbol, bucket_start, bucket_end, open, high, low, close, volume, vwap, tick_count, is_final)
+                VALUES ('005930', '2026-06-01 00:00:00+00', '2026-06-01 00:05:00+00',
+                        70000, 70500, 69800, 70100, 1500, 70123.45, 4, true)"""
+            )
+        )
+        row = (
+            await conn.execute(
+                text(
+                    """SELECT symbol, ts, open, high, low, close, volume, vwap, tick_count, interval_seconds
+                    FROM serving.symbol_intraday_5m WHERE symbol = '005930'"""
+                )
+            )
+        ).one()
+    await engine.dispose()
+
+    assert row.interval_seconds == 300
+    assert row.open == 70000
+    assert row.high == 70500
+    assert row.low == 69800
+    assert row.close == 70100
+    assert row.volume == 1500
+    assert row.tick_count == 4
+
+
 def test_alembic_upgrade_and_downgrade_create_expected_objects(monkeypatch: pytest.MonkeyPatch):
     service_dir = Path(__file__).resolve().parents[1]
     cfg = _alembic_config(service_dir)
@@ -111,6 +145,8 @@ def test_alembic_upgrade_and_downgrade_create_expected_objects(monkeypatch: pyte
         assert "is_final" in state["silver_columns"]
         assert "tick_history_dedupe_key_uq" in state["constraints"]
         assert "symbol_5m_metrics_symbol_bucket_uq" in state["constraints"]
+
+        asyncio.run(_check_intraday_view(url))
 
         command.downgrade(cfg, "base")
         assert asyncio.run(_fetch_schemas(url)) == set()
