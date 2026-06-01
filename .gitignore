@@ -223,3 +223,6 @@ __marimo__/
 
 # Java / Flink build & dependency artifacts
 services/stream_detection/jars/
+
+# Git worktrees
+.worktrees/
