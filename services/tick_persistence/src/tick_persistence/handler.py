@@ -62,6 +62,7 @@ class TickHandler:
                     finalized_start + BUCKET_SIZE,
                     finalized_bar,
                 )
+            self._forget_hydrated_before(symbol, bucket_start)
 
     async def _hydrate_once(self, session: AsyncSession, symbol: str, bucket_start: datetime) -> None:
         key = (symbol, bucket_start)
@@ -73,6 +74,11 @@ class TickHandler:
         existing = await self._metrics_repo.load_bar_state(session, symbol, bucket_start)
         if existing is not None:
             self._aggregator.hydrate(symbol, bucket_start, existing)
+
+    def _forget_hydrated_before(self, symbol: str, bucket_start: datetime) -> None:
+        self._hydrated_keys = {
+            key for key in self._hydrated_keys if key[0] != symbol or key[1] >= bucket_start
+        }
 
 
 def make_tick_handler(

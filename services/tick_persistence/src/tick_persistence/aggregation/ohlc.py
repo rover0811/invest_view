@@ -136,6 +136,9 @@ class FiveMinuteAggregator:
     def pop_finalized_bars(self) -> list[tuple[str, datetime, BarState]]:
         finalized = list(self._newly_finalized)
         self._newly_finalized.clear()
+        for symbol, bucket, bar in finalized:
+            if bar.is_final and self._bars.get((symbol, bucket)) is bar:
+                del self._bars[(symbol, bucket)]
         return finalized
 
     def finalized_bars(self, now: datetime) -> list[tuple[str, datetime, BarState]]:

@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import pytest
 import sqlalchemy as sa
 
-from tick_persistence.aggregation.ohlc import FiveMinuteAggregator
+from tick_persistence.aggregation.ohlc import FiveMinuteAggregator, KST
 from tick_persistence.db.models import Symbol5mMetrics, SymbolSnapshot, TickHistory
 from tick_persistence.handler import TickHandler
 from tick_persistence.kafka.consumer import TickMessage
@@ -176,3 +177,31 @@ async def test_handler_restart_then_duplicate_replay_does_not_hydrate_and_double
     assert bar.volume == 60
     assert bar.close == 70200
     assert snapshot.last_price == 70200
+
+
+async def test_handler_bounds_aggregator_and_hydrated_keys_across_many_buckets(db_session_factory):
+    handler = _handler(db_session_factory)
+    trade_times = ["090000", "090500", "091000", "091500", "092000", "092500", "093000", "093500"]
+
+    for offset, trade_time in enumerate(trade_times, start=500):
+        await handler.handle(_message(_tick_value(price=70000 + offset, trade_time=trade_time), offset=offset))
+        assert len(handler._aggregator._bars) <= 1
+        assert len(handler._hydrated_keys) <= 1
+
+    async with db_session_factory() as session:
+        bars = (
+            (
+                await session.execute(
+                    sa.select(Symbol5mMetrics)
+                    .where(Symbol5mMetrics.symbol == "005930")
+                    .order_by(Symbol5mMetrics.bucket_start)
+                )
+            )
+            .scalars()
+            .all()
+        )
+
+    assert len(bars) == len(trade_times)
+    assert [bar.is_final for bar in bars] == [True, True, True, True, True, True, True, False]
+    assert [bar.open for bar in bars] == [70500, 70501, 70502, 70503, 70504, 70505, 70506, 70507]
+    assert handler._hydrated_keys == {("005930", datetime(2026, 6, 1, 9, 35, tzinfo=KST))}

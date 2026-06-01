@@ -139,3 +139,31 @@ def test_finalized_bars_closes_elapsed_current_bucket():
 
     assert finalized == [("005930", bucket, bar)]
     assert bar.is_final is True
+
+
+def test_pop_finalized_bars_evicts_returned_bars_and_bounds_memory():
+    agg = FiveMinuteAggregator()
+    flushed: list[tuple[str, datetime, BarState]] = []
+    trade_times = ["090000", "090500", "091000", "091500", "092000", "092500"]
+
+    for index, trade_time in enumerate(trade_times):
+        agg.add_tick(_tick(trade_time, 70000 + index, volume=index + 1))
+        flushed.extend(agg.pop_finalized_bars())
+        assert len(agg._bars) <= 1
+
+    assert [bucket for _, bucket, _ in flushed] == [
+        datetime(2026, 6, 1, 9, 0, tzinfo=KST),
+        datetime(2026, 6, 1, 9, 5, tzinfo=KST),
+        datetime(2026, 6, 1, 9, 10, tzinfo=KST),
+        datetime(2026, 6, 1, 9, 15, tzinfo=KST),
+        datetime(2026, 6, 1, 9, 20, tzinfo=KST),
+    ]
+    assert [_visible(bar) for _, _, bar in flushed] == [
+        (70000, 70000, 70000, 70000, 1, Decimal("70000"), 1, True),
+        (70001, 70001, 70001, 70001, 2, Decimal("70001"), 1, True),
+        (70002, 70002, 70002, 70002, 3, Decimal("70002"), 1, True),
+        (70003, 70003, 70003, 70003, 4, Decimal("70003"), 1, True),
+        (70004, 70004, 70004, 70004, 5, Decimal("70004"), 1, True),
+    ]
+    assert agg.pop_finalized_bars() == []
+    assert set(agg._bars) == {("005930", datetime(2026, 6, 1, 9, 25, tzinfo=KST))}
