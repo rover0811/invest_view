@@ -33,6 +33,41 @@ def _alembic_config(service_dir: Path) -> Config:
     return cfg
 
 
+async def _create_signal_timeline_deps(url: str) -> None:
+    engine = create_async_engine(url)
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS alert_service"))
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS alert_service.alert_events (
+                    alert_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    symbol TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    triggered_at TIMESTAMPTZ NOT NULL,
+                    trigger_values JSONB NOT NULL,
+                    severity TEXT NOT NULL
+                )
+                """
+            )
+        )
+        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS gold"))
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS gold.pattern_events (
+                    pattern_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    symbol TEXT NOT NULL,
+                    pattern_type TEXT NOT NULL,
+                    triggered_at TIMESTAMPTZ NOT NULL,
+                    trigger_values JSONB NOT NULL
+                )
+                """
+            )
+        )
+    await engine.dispose()
+
+
 async def _fetch_migration_state(url: str) -> _MigrationState:
     engine = create_async_engine(url)
     async with engine.connect() as conn:
@@ -132,6 +167,8 @@ def test_alembic_upgrade_and_downgrade_create_expected_objects(monkeypatch: pyte
     with PostgresContainer("postgres:16-alpine") as container:
         url = _asyncpg_url(container)
         monkeypatch.setenv("TICK_PERSISTENCE_DATABASE_URL", url)
+
+        asyncio.run(_create_signal_timeline_deps(url))
 
         command.upgrade(cfg, "head")
         state = asyncio.run(_fetch_migration_state(url))

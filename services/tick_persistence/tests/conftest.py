@@ -1,3 +1,4 @@
+import asyncio
 import os
 import sys
 from collections.abc import AsyncIterator, Iterator
@@ -5,7 +6,8 @@ from pathlib import Path
 
 import pytest
 import pytest_asyncio
-from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy import text
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SRC = _ROOT / "src"
@@ -17,6 +19,45 @@ def _async_url(raw: str) -> str:
     return raw.replace("postgresql+psycopg2://", "postgresql+asyncpg://").replace(
         "postgresql://", "postgresql+asyncpg://"
     )
+
+
+async def _create_signal_timeline_deps_async(url: str) -> None:
+    engine = create_async_engine(url)
+    async with engine.begin() as conn:
+        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS alert_service"))
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS alert_service.alert_events (
+                    alert_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    symbol TEXT NOT NULL,
+                    alert_type TEXT NOT NULL,
+                    triggered_at TIMESTAMPTZ NOT NULL,
+                    trigger_values JSONB NOT NULL,
+                    severity TEXT NOT NULL
+                )
+                """
+            )
+        )
+        await conn.execute(text("CREATE SCHEMA IF NOT EXISTS gold"))
+        await conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS gold.pattern_events (
+                    pattern_event_id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    symbol TEXT NOT NULL,
+                    pattern_type TEXT NOT NULL,
+                    triggered_at TIMESTAMPTZ NOT NULL,
+                    trigger_values JSONB NOT NULL
+                )
+                """
+            )
+        )
+    await engine.dispose()
+
+
+def _create_signal_timeline_deps(async_url: str) -> None:
+    asyncio.run(_create_signal_timeline_deps_async(async_url))
 
 
 @pytest.fixture(scope="session")
@@ -41,6 +82,7 @@ def migrated_url(postgres_container) -> Iterator[str]:
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
 
+    _create_signal_timeline_deps(url)
     command.upgrade(cfg, "head")
     try:
         yield url

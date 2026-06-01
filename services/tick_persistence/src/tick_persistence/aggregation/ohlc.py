@@ -124,6 +124,9 @@ class FiveMinuteAggregator:
         if not bar.is_final:
             self._latest_bucket_by_symbol[symbol] = max(bucket, self._latest_bucket_by_symbol.get(symbol, bucket))
 
+    def has_bar(self, symbol: str, bucket_start: datetime) -> bool:
+        return (symbol, _as_kst(bucket_start)) in self._bars
+
     def current_bar(self, symbol: str) -> BarState | None:
         bucket = self._latest_bucket_by_symbol.get(symbol)
         if bucket is None:
