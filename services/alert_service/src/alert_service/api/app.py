@@ -14,7 +14,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from alert_service.api.heartbeat import heartbeat_loop
-from alert_service.api.routes import health, notifications, watchlist, ws
+from alert_service.api.routes import candles, health, notifications, watchlist, ws
 
 
 logger = logging.getLogger(__name__)
@@ -50,6 +50,7 @@ def create_app(container: Any) -> FastAPI:
     app.state.notification_repo = container.notification_repo
     app.state.alert_consumer = container.alert_consumer
     app.state.engine = container.engine
+    app.state.session_factory = container.session_factory
 
     app.add_middleware(
         CORSMiddleware,
@@ -63,4 +64,5 @@ def create_app(container: Any) -> FastAPI:
     app.include_router(watchlist.router)
     app.include_router(notifications.router)
     app.include_router(ws.router)
+    app.include_router(candles.router)
     return app

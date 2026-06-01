@@ -36,6 +36,7 @@ class FakeContainer:
         self.alert_consumer.is_alive.return_value = True
         self.engine = MagicMock()
         self.engine.dispose = AsyncMock()
+        self.session_factory = MagicMock()
 
 
 def _token(user_id: uuid.UUID | None = None) -> str:
