@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: tick-persistence
+  labels:
+    app: tick-persistence
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: tick-persistence
+  template:
+    metadata:
+      labels:
+        app: tick-persistence
+    spec:
+      initContainers:
+        - name: wait-for-deps
+          image: postgres:16-alpine
+          imagePullPolicy: IfNotPresent
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until [ "$(psql -tAc "SELECT (to_regclass('gold.pattern_events') IS NOT NULL AND to_regclass('alert_service.alert_events') IS NOT NULL)" 2>/dev/null)" = "t" ]; do
+                echo "[wait-for-deps] waiting for gold.pattern_events + alert_service.alert_events ...";
+                sleep 3;
+              done
+              echo "[wait-for-deps] dependencies present"
+          env:
+            - name: PGHOST
+              value: postgres
+            - name: PGPORT
+              value: "5432"
+            - name: PGUSER
+              value: postgres
+            - name: PGPASSWORD
+              value: postgres
+            - name: PGDATABASE
+              value: invest_view
+        - name: alembic-migrate
+          image: tick_persistence:qa
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c", "cd /app/services/tick_persistence && alembic upgrade head"]
+          env:
+            - name: TICK_PERSISTENCE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: tick-persistence-secrets
+                  key: TICK_PERSISTENCE_DATABASE_URL
+      containers:
+        - name: tick-persistence
+          image: tick_persistence:qa
+          imagePullPolicy: Never
+          command: ["python", "-m", "tick_persistence"]
+          envFrom:
+            - configMapRef:
+                name: tick-persistence-config
+            - secretRef:
+                name: tick-persistence-secrets
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

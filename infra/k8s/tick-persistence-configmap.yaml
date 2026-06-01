@@ -1,0 +1,13 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: tick-persistence-config
+  labels:
+    app: tick-persistence
+data:
+  TICK_PERSISTENCE_KAFKA_BOOTSTRAP_SERVERS: "invest-kafka-kafka-bootstrap.kafka.svc:9092"
+  TICK_PERSISTENCE_SCHEMA_REGISTRY_URL: "http://schema-registry:8081"
+  TICK_PERSISTENCE_KAFKA_TOPIC: "stock-ticks"
+  TICK_PERSISTENCE_KAFKA_CONSUMER_GROUP: "tick-persistence-v1"
+  TICK_PERSISTENCE_AVRO_SCHEMA_PATH: "/app/schemas/stock-ticks.avsc"
+  TICK_PERSISTENCE_LOG_LEVEL: "INFO"

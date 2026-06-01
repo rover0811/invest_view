@@ -27,8 +27,8 @@ help:
 	@echo "  infra-up         Apply Kafka cluster, topics, Schema Registry, Postgres"
 	@echo "  topics           Apply KafkaTopic manifests"
 	@echo "  secrets          Create/refresh app Secrets from root .env (values never committed)"
-	@echo "  images           Build kis_ingestion:qa + alert_service:qa and kind-load them"
-	@echo "  apps             Apply alert-service + kis-ingestion workloads (depends on secrets)"
+	@echo "  images           Build kis_ingestion + alert_service + tick_persistence + event_pattern_persistence :qa images and kind-load them"
+	@echo "  apps             Apply alert-service + kis-ingestion + event-pattern-persistence + tick-persistence (LAST: signal_timeline dep); depends on secrets"
 	@echo "  flink            Apply the two FlinkDeployments (stream-detection, stream-detection-echo)"
 	@echo "  schemas          Register Avro subjects via a temporary schema-registry port-forward"
 	@echo ""
@@ -91,19 +91,33 @@ secrets:
 	kubectl create secret generic alert-service-secrets \
 		--from-literal=ALERT_SERVICE_DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/invest_view' \
 		--from-literal=ALERT_SERVICE_JWT_SECRET='dev-secret-change-me' \
+		--dry-run=client -o yaml | kubectl apply -f -; \
+	kubectl create secret generic tick-persistence-secrets \
+		--from-literal=TICK_PERSISTENCE_DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/invest_view' \
+		--dry-run=client -o yaml | kubectl apply -f -; \
+	kubectl create secret generic event-pattern-persistence-secrets \
+		--from-literal=EVENT_PATTERN_PERSISTENCE_DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/invest_view' \
 		--dry-run=client -o yaml | kubectl apply -f -
 
 images:
 	docker build -f services/kis_ingestion/Dockerfile -t kis_ingestion:qa .
 	docker build -f services/alert_service/Dockerfile -t alert_service:qa .
+	docker build -f services/tick_persistence/Dockerfile -t tick_persistence:qa .
+	docker build -f services/event_pattern_persistence/Dockerfile -t event_pattern_persistence:qa .
 	kind load docker-image kis_ingestion:qa --name $(CLUSTER)
 	kind load docker-image alert_service:qa --name $(CLUSTER)
+	kind load docker-image tick_persistence:qa --name $(CLUSTER)
+	kind load docker-image event_pattern_persistence:qa --name $(CLUSTER)
 
 apps: secrets
 	kubectl apply -f infra/k8s/alert-service-configmap.yaml
 	kubectl apply -f infra/k8s/alert-service-service.yaml
 	kubectl apply -f infra/k8s/alert-service-deployment.yaml
 	kubectl apply -f infra/k8s/kis-ingestion-deployment.yaml
+	kubectl apply -f infra/k8s/event-pattern-persistence-configmap.yaml
+	kubectl apply -f infra/k8s/event-pattern-persistence-deployment.yaml
+	kubectl apply -f infra/k8s/tick-persistence-configmap.yaml
+	kubectl apply -f infra/k8s/tick-persistence-deployment.yaml
 
 flink:
 	kubectl apply -f $(FLINK_DIR)/flinkdeployment.yaml
@@ -131,6 +145,8 @@ wait-postgres:
 wait-apps:
 	kubectl rollout status deploy/alert-service --timeout=300s
 	kubectl rollout status deploy/kis-ingestion --timeout=300s
+	kubectl rollout status deploy/event-pattern-persistence --timeout=300s
+	kubectl rollout status deploy/tick-persistence --timeout=300s
 
 wait-flink:
 	kubectl wait --for=jsonpath='{.status.jobStatus.state}'=RUNNING flinkdeployment/stream-detection flinkdeployment/stream-detection-echo --timeout=600s
@@ -175,6 +191,10 @@ inject-tick: inject-scripts
 	kubectl logs job/tick-injector
 
 down:
+	-kubectl delete -f infra/k8s/tick-persistence-deployment.yaml --ignore-not-found
+	-kubectl delete -f infra/k8s/tick-persistence-configmap.yaml --ignore-not-found
+	-kubectl delete -f infra/k8s/event-pattern-persistence-deployment.yaml --ignore-not-found
+	-kubectl delete -f infra/k8s/event-pattern-persistence-configmap.yaml --ignore-not-found
 	-kubectl delete -f infra/k8s/kis-ingestion-deployment.yaml --ignore-not-found
 	-kubectl delete -f infra/k8s/alert-service-deployment.yaml --ignore-not-found
 	-kubectl delete -f infra/k8s/alert-service-service.yaml --ignore-not-found
