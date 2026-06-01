@@ -26,7 +26,12 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata, include_schemas=True)
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        include_schemas=True,
+        version_table="event_pattern_persistence_alembic_version",
+    )
     with context.begin_transaction():
         context.run_migrations()
 
@@ -42,7 +47,14 @@ async def run_async_migrations() -> None:
 
 def run_migrations_offline() -> None:
     url = config.get_main_option("sqlalchemy.url")
-    context.configure(url=url, target_metadata=target_metadata, literal_binds=True, dialect_opts={"paramstyle": "named"}, include_schemas=True)
+    context.configure(
+        url=url,
+        target_metadata=target_metadata,
+        literal_binds=True,
+        dialect_opts={"paramstyle": "named"},
+        include_schemas=True,
+        version_table="event_pattern_persistence_alembic_version",
+    )
     with context.begin_transaction():
         context.run_migrations()
 
