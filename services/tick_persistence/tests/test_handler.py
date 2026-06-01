@@ -61,6 +61,13 @@ async def _counts(db_session_factory, symbol: str) -> tuple[int, int, int]:
     return int(bronze or 0), int(silver or 0), int(snapshot or 0)
 
 
+async def _bar_and_snapshot(db_session_factory, symbol: str) -> tuple[Symbol5mMetrics, SymbolSnapshot]:
+    async with db_session_factory() as session:
+        bar = (await session.execute(sa.select(Symbol5mMetrics).where(Symbol5mMetrics.symbol == symbol))).scalar_one()
+        snapshot = (await session.execute(sa.select(SymbolSnapshot).where(SymbolSnapshot.symbol == symbol))).scalar_one()
+    return bar, snapshot
+
+
 async def test_handler_persists_bronze_silver_and_snapshot_in_one_bucket(db_session_factory):
     handler = _handler(db_session_factory)
     prices = [70000, 70500, 69800, 70100, 70200]
@@ -122,3 +129,50 @@ async def test_handler_hydrates_live_bucket_after_restart(db_session_factory):
     assert bar.close == 69900
     assert bar.tick_count == 4
     assert bar.is_final is False
+
+
+async def test_handler_duplicate_kafka_message_does_not_double_count_silver(db_session_factory):
+    symbol = "035420"
+    handler = _handler(db_session_factory)
+    messages = [
+        _message(_tick_value(symbol=symbol, price=70000, trade_time="090000", volume=10), offset=0),
+        _message(_tick_value(symbol=symbol, price=70100, trade_time="090100", volume=20), offset=1),
+        _message(_tick_value(symbol=symbol, price=70200, trade_time="090200", volume=30), offset=2),
+    ]
+    for message in messages:
+        await handler.handle(message)
+
+    before_bar, before_snapshot = await _bar_and_snapshot(db_session_factory, symbol)
+    await handler.handle(messages[1])
+    after_bar, after_snapshot = await _bar_and_snapshot(db_session_factory, symbol)
+
+    assert await _counts(db_session_factory, symbol) == (3, 1, 1)
+    assert before_bar.tick_count == 3
+    assert before_bar.volume == 60
+    assert after_bar.tick_count == 3
+    assert after_bar.volume == 60
+    assert after_bar.close == 70200
+    assert before_snapshot.last_price == 70200
+    assert after_snapshot.last_price == 70200
+
+
+async def test_handler_restart_then_duplicate_replay_does_not_hydrate_and_double_count(db_session_factory):
+    symbol = "068270"
+    first_handler = _handler(db_session_factory)
+    messages = [
+        _message(_tick_value(symbol=symbol, price=70000, trade_time="090000", volume=10), offset=0),
+        _message(_tick_value(symbol=symbol, price=70100, trade_time="090100", volume=20), offset=1),
+        _message(_tick_value(symbol=symbol, price=70200, trade_time="090200", volume=30), offset=2),
+    ]
+    for message in messages:
+        await first_handler.handle(message)
+
+    restarted_handler = _handler(db_session_factory)
+    await restarted_handler.handle(messages[2])
+
+    bar, snapshot = await _bar_and_snapshot(db_session_factory, symbol)
+    assert await _counts(db_session_factory, symbol) == (3, 1, 1)
+    assert bar.tick_count == 3
+    assert bar.volume == 60
+    assert bar.close == 70200
+    assert snapshot.last_price == 70200

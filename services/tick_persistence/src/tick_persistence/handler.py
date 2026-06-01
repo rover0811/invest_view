@@ -46,6 +46,7 @@ class TickHandler:
                     message.partition,
                     message.offset,
                 )
+                return
 
             await self._snapshot_repo.upsert_snapshot(session, tick)
             await self._hydrate_once(session, symbol, bucket_start)
