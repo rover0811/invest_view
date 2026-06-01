@@ -116,6 +116,8 @@ apps: secrets
 	kubectl apply -f infra/k8s/kis-ingestion-deployment.yaml
 	kubectl apply -f infra/k8s/event-pattern-persistence-configmap.yaml
 	kubectl apply -f infra/k8s/event-pattern-persistence-deployment.yaml
+	kubectl rollout status deploy/alert-service --timeout=300s
+	kubectl rollout status deploy/event-pattern-persistence --timeout=300s
 	kubectl apply -f infra/k8s/tick-persistence-configmap.yaml
 	kubectl apply -f infra/k8s/tick-persistence-deployment.yaml
 
