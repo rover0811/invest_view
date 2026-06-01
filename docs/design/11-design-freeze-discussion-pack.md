@@ -387,7 +387,7 @@ erDiagram
 | KIS 41종목 한도 | 서비스 전체 구독 풀이 41종목에서 막힘 | v1 범위를 41종목으로 고정하고, watchlist와 realtime subscription pool을 분리한다. |
 | KIS 앱키당 1세션 | 다중 세션 확장이 즉시 어렵다 | 단일 appkey/세션 운영을 기본으로 하고, 확장은 차후 appkey 추가 전략으로 푼다. |
 | WebSocket approval key / access token 24시간 주기 | 키 갱신 실패 시 장중 수집 중단 위험 | 접속키/토큰 refresh runbook과 만료 전 갱신 로직을 우선순위 높은 운영 과제로 둔다. |
-| 인프라 비용 | Kafka + Connect + Flink 조합만으로도 학습 프로젝트치고 무겁다 | Schema Registry는 로컬 docker-compose로 운영하고, 토픽 수를 최소화하며 로컬/kind 중심으로 개발 후 필요한 시점에만 상시 배포한다. |
+| 인프라 비용 | Kafka + Connect + Flink 조합만으로도 학습 프로젝트치고 무겁다 | Schema Registry는 kind 클러스터 in-cluster(`schema-registry:8081`)로 운영하고, 토픽 수를 최소화하며 단일 kind 클러스터(`invest-flink`) 위에서 전 스택을 운영한다. |
 | 팀 역량 | CDC, Flink checkpoint, Kafka consumer 멱등 처리에 학습 비용이 크다 | 역할을 ingestion / stream / serving으로 분리하고, 각 영역의 done definition을 좁게 잡는다. |
 | 단일 PostgreSQL | 저장소 SPOF이며 hot path와 read path가 한 DB에 모인다 | v1에서는 단순성을 우선하고, 테이블/스키마 분리와 retention 정책으로 버틴다. |
 | 문서-설계 불일치 | 기존 C4 문서에는 BQ/ES/paper trading이 남아 있어 회의에서 혼선이 생길 수 있다 | 이 문서를 freeze note로 사용하고, 후속으로 01~10 문서를 현재 설계에 맞게 정리한다. |

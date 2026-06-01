@@ -15,7 +15,7 @@ created: 2026-04-29 02:53:52
 - access token과 WebSocket approval key는 **분리된 lifecycle**로 관리한다.
 - KIS scope의 책임은 **정규화된 `stock-ticks` 발행까지**이며, 이후 Flink/serving은 다른 scope다.
 - `stock-ticks` 계약은 **Confluent Schema Registry + `schemas/stock-ticks.avsc`**를 source of truth로 관리한다. 등록은 CI/script로 사전 수행한다.
-- Decimal 필드는 Avro `bytes` + `logicalType: decimal`로 인코딩하며, v1 기준 `precision=12`, `scale=8`을 사용한다.
+- 거래대금/잔량 등은 정수 오버플로 방지를 위해 일부 `long`, decimal은 가격 계열 `vwap`이 `precision=20`, 비율 계열 6개가 `precision=18`(scale=8)을 사용한다. (issue #20)
 
 ## 0. Scope Boundary
 
@@ -478,25 +478,25 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 | 2 | `price` | `STCK_PRPR` | `int` | 현재가 |
 | 3 | `change_sign` | `PRDY_VRSS_SIGN` | `string` | 전일대비부호 |
 | 4 | `change` | `PRDY_VRSS` | `int` | 전일대비 |
-| 5 | `change_rate` | `PRDY_CTRT` | `decimal(12,8)` | 전일대비율 |
-| 6 | `vwap` | `WGHN_AVRG_STCK_PRC` | `decimal(12,8)` | 가중평균가 |
+| 5 | `change_rate` | `PRDY_CTRT` | `decimal(18,8)` | 전일대비율 |
+| 6 | `vwap` | `WGHN_AVRG_STCK_PRC` | `decimal(20,8)` | 가중평균가 |
 | 7 | `open` | `STCK_OPRC` | `int` | 시가 |
 | 8 | `high` | `STCK_HGPR` | `int` | 고가 |
 | 9 | `low` | `STCK_LWPR` | `int` | 저가 |
 | 10 | `ask_price_1` | `ASKP1` | `int` | 매도호가1 |
 | 11 | `bid_price_1` | `BIDP1` | `int` | 매수호가1 |
-| 12 | `trade_volume` | `CNTG_VOL` | `int` | 체결거래량 |
-| 13 | `cumulative_volume` | `ACML_VOL` | `int` | 누적거래량 |
-| 14 | `cumulative_amount` | `ACML_TR_PBMN` | `int` | 누적거래대금 |
+| 12 | `trade_volume` | `CNTG_VOL` | `long` | 체결거래량 |
+| 13 | `cumulative_volume` | `ACML_VOL` | `long` | 누적거래량 |
+| 14 | `cumulative_amount` | `ACML_TR_PBMN` | `long` | 누적거래대금 |
 | 15 | `sell_count` | `SELN_CNTG_CSNU` | `int` | 매도체결건수 |
 | 16 | `buy_count` | `SHNU_CNTG_CSNU` | `int` | 매수체결건수 |
 | 17 | `net_buy_count` | `NTBY_CNTG_CSNU` | `int` | 순매수체결건수 |
-| 18 | `trade_strength` | `CTTR` | `decimal(12,8)` | 체결강도 |
-| 19 | `total_sell_volume` | `SELN_CNTG_SMTN` | `int` | 총매도수량 |
-| 20 | `total_buy_volume` | `SHNU_CNTG_SMTN` | `int` | 총매수수량 |
+| 18 | `trade_strength` | `CTTR` | `decimal(18,8)` | 체결강도 |
+| 19 | `total_sell_volume` | `SELN_CNTG_SMTN` | `long` | 총매도수량 |
+| 20 | `total_buy_volume` | `SHNU_CNTG_SMTN` | `long` | 총매수수량 |
 | 21 | `trade_type` | `CCLD_DVSN` (`CNTG_CLS_CODE` alias) | `string` | 체결구분 |
-| 22 | `buy_ratio` | `SHNU_RATE` | `decimal(12,8)` | 매수비율 |
-| 23 | `prev_day_volume_rate` | `PRDY_VOL_VRSS_ACML_VOL_RATE` | `decimal(12,8)` | 전일거래량대비등락율 |
+| 22 | `buy_ratio` | `SHNU_RATE` | `decimal(18,8)` | 매수비율 |
+| 23 | `prev_day_volume_rate` | `PRDY_VOL_VRSS_ACML_VOL_RATE` | `decimal(18,8)` | 전일거래량대비등락율 |
 | 24 | `open_time` | `OPRC_HOUR` | `string` | 시가시간 |
 | 25 | `open_vs_sign` | `OPRC_VRSS_PRPR_SIGN` | `string` | 시가대비구분 |
 | 26 | `open_vs_price` | `OPRC_VRSS_PRPR` | `int` | 시가대비 |
@@ -504,37 +504,39 @@ v1 `stock-ticks`는 KIS WebSocket 체결 모델의 46필드를 **snake_case name
 | 28 | `high_vs_sign` | `HGPR_VRSS_PRPR_SIGN` | `string` | 고가대비구분 |
 | 29 | `high_vs_price` | `HGPR_VRSS_PRPR` | `int` | 고가대비 |
 | 30 | `low_time` | `LWPR_HOUR` | `string` | 최저가시간 |
-| 31 | `low_vs_sign` | `LWPR_VRSS_PRPR_SIGN` | `string` | 저가대비구분 |
+| 31 | `low_vs_sign` | `LWPR_VRSS_PRPR_SIGN" | `string` | 저가대비구분 |
 | 32 | `low_vs_price` | `LWPR_VRSS_PRPR` | `int` | 저가대비 |
 | 33 | `business_date` | `BSOP_DATE` | `string` | 영업일자 YYYYMMDD |
 | 34 | `market_session_code` | `NEW_MKOP_CLS_CODE` | `string` | 신장운영구분코드 |
 | 35 | `trading_halted` | `TRHT_YN` | `string` | 거래정지여부 |
-| 36 | `ask_remain_1` | `ASKP_RSQN1` | `int` | 매도호가잔량1 |
-| 37 | `bid_remain_1` | `BIDP_RSQN1` | `int` | 매수호가잔량1 |
-| 38 | `total_ask_remain` | `TOTAL_ASKP_RSQN` | `int` | 총매도호가잔량 |
-| 39 | `total_bid_remain` | `TOTAL_BIDP_RSQN` | `int` | 총매수호가잔량 |
-| 40 | `volume_turnover` | `VOL_TNRT` | `decimal(12,8)` | 거래량회전율 |
-| 41 | `prev_same_hour_volume` | `PRDY_SMNS_HOUR_ACML_VOL` | `int` | 전일동시간누적거래량 |
-| 42 | `prev_same_hour_volume_rate` | `PRDY_SMNS_HOUR_ACML_VOL_RATE` | `decimal(12,8)` | 전일동시간누적거래량비율 |
+| 36 | `ask_remain_1` | `ASKP_RSQN1` | `long` | 매도호가잔량1 |
+| 37 | `bid_remain_1` | `BIDP_RSQN1" | `long` | 매수호가잔량1 |
+| 38 | `total_ask_remain` | `TOTAL_ASKP_RSQN` | `long` | 총매도호가잔량 |
+| 39 | `total_bid_remain` | `TOTAL_BIDP_RSQN` | `long` | 총매수호가잔량 |
+| 40 | `volume_turnover` | `VOL_TNRT` | `decimal(18,8)` | 거래량회전율 |
+| 41 | `prev_same_hour_volume` | `PRDY_SMNS_HOUR_ACML_VOL` | `long` | 전일동시간누적거래량 |
+| 42 | `prev_same_hour_volume_rate` | `PRDY_SMNS_HOUR_ACML_VOL_RATE` | `decimal(18,8)` | 전일동시간누적거래량비율 |
+
 | 43 | `hour_class_code` | `HOUR_CLS_CODE` | `string` | 시간구분코드 |
 | 44 | `market_termination_code` | `MRKT_TRTM_CLS_CODE` | `string` | 임의종료구분코드 |
 | 45 | `vi_trigger_price` | `VI_STND_PRC` | `int` | 정적VI발동기준가 |
 
 #### Avro encoding details
 
-- Decimal 필드 7개(`change_rate`, `vwap`, `trade_strength`, `buy_ratio`, `prev_day_volume_rate`, `volume_turnover`, `prev_same_hour_volume_rate`)는 모두 아래 형식으로 고정한다.
+- 실제 KIS 장중 데이터에서 누적거래대금(`cumulative_amount`)이 int32(약 21억)를 초과(최대 7조원대 관측)하고 `vwap`이 precision 12를 초과해, 거래량/대금/잔량은 `long`, decimal은 precision을 확대했다. (issue #20)
+- Decimal 필드는 가격 계열(vwap) precision=20, 비율 계열 precision=18, 공통 scale=8을 사용한다.
 
 ```json
 {
   "type": "bytes",
   "logicalType": "decimal",
-  "precision": 12,
+  "precision": 18,
   "scale": 8
 }
 ```
 
 - Python runtime에서는 `Decimal` 객체를 그대로 유지하고, `fastavro`가 decimal logical type으로 직렬화한다.
-- 이 선택은 Flink에서 `DECIMAL(12, 8)`로 자연스럽게 매핑되며, string 기반 재파싱을 피한다.
+- 이 선택은 Flink에서 `DECIMAL(18, 8)` 또는 `DECIMAL(20, 8)`로 자연스럽게 매핑되며, string 기반 재파싱을 피한다.
 - `schemas/stock-ticks.avsc`가 이 계약의 최종 source of truth다.
 
 ### Design implication
@@ -667,14 +669,14 @@ invest_view/                           # monorepo root
 | Q9 | reconnect gap 처리 | Kafka header(`session_id`+`sequence`). body clean. Flink가 gap 감지 |
 | Q10 | Kafka client | `confluent-kafka-python` sync producer를 사용. `produce()` + `poll(0)` 직접 호출 |
 | Q11 | Schema management | Confluent Schema Registry + repo-local `.avsc` 조합. CI/script로 사전 등록, compatibility BACKWARD |
-| Q12 | Decimal encoding | Avro `bytes` + `logicalType: decimal`, `precision=12`, `scale=8` |
+| Q12 | Decimal encoding | Avro `bytes` + `logicalType: decimal`, `precision=18/20`, `scale=8` (issue #20) |
 | Q13 | Tick delivery pattern | `KISConnectionManager`가 AsyncIterator로 동작하며, `IngestionService`가 이를 소비하여 producer에 전달하는 파이프라인 구조 채택 |
 
 ### Implementation confirmation
 - 현재 merged code는 pre-Kafka 단계 컴포넌트까지 구현 완료 상태다.
 - PR #14의 다음 scoped change는 `StockTickProducer` + producer wiring + schema decimal update다.
-- Kafka MVP는 Confluent Schema Registry를 사용하며, `schemas/stock-ticks.avsc`를 Registry에 사전 등록하여 사용한다.
-- Decimal 필드는 string이 아니라 Avro decimal logical type(`bytes`, `precision=12`, `scale=8`)으로 관리한다.
+- Decimal 필드는 string이 아니라 Avro decimal logical type(`bytes`, `precision=18/20`, `scale=8`)으로 관리한다.
+
 - DI container: `src/kis_ingestion/container.py` (plain factory)
 - Entrypoint: `src/kis_ingestion/__main__.py`
 - Config: `src/kis_ingestion/config.py` (pydantic-settings, bootstrap input only)
