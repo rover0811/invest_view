@@ -1,12 +1,17 @@
 package com.invest_view.stream_detection;
 
 import com.invest_view.events.StockAlert;
+import com.invest_view.events.StockPattern;
+import com.invest_view.stream_detection.rule.CrossDetector;
 import com.invest_view.stream_detection.rule.EmitPriceAlertWindow;
+import com.invest_view.stream_detection.rule.MacdDetector;
 import com.invest_view.stream_detection.rule.PriceAlertAggregator;
+import com.invest_view.stream_detection.rule.RsiDetector;
 import com.invest_view.stream_detection.rule.TradingHaltDetector;
 import com.invest_view.stream_detection.rule.VIImminentFlatMap;
 import com.invest_view.stream_detection.serde.AvroSchemaGuard;
 import com.invest_view.stream_detection.sink.AlertKafkaSink;
+import com.invest_view.stream_detection.sink.PatternKafkaSink;
 import com.invest_view.stream_detection.source.TickKafkaSource;
 import com.invest_view.stream_detection.watermark.TickWatermarkStrategy;
 import com.investview.ticks.StockTick;
@@ -37,7 +42,7 @@ public final class StreamDetectionJob {
 
         new AvroSchemaGuard(
                 config.schemaRegistryUrl(),
-                List.of("stock-ticks-value", "stock-alerts-value"))
+                List.of("stock-ticks-value", "stock-alerts-value", "stock-patterns-value"))
                 .verifyAll();
 
         StreamExecutionEnvironment env = StreamExecutionEnvironment.getExecutionEnvironment();
@@ -85,6 +90,28 @@ public final class StreamDetectionJob {
                 config.kafkaBootstrapServers(),
                 config.schemaRegistryUrl());
         allAlerts.sinkTo(sink).uid("stock-alerts-sink");
+
+        DataStream<StockPattern> crossPatterns = ticks
+                .keyBy(StockTick::getSymbol)
+                .process(new CrossDetector(config.maShortPeriod(), config.maLongPeriod()))
+                .uid("ma-cross-detector");
+
+        DataStream<StockPattern> rsiPatterns = ticks
+                .keyBy(StockTick::getSymbol)
+                .process(new RsiDetector(config.rsiPeriod(), config.rsiOversold(), config.rsiOverbought()))
+                .uid("rsi-detector");
+
+        DataStream<StockPattern> macdPatterns = ticks
+                .keyBy(StockTick::getSymbol)
+                .process(new MacdDetector(config.macdFastPeriod(), config.macdSlowPeriod(), config.macdSignalPeriod()))
+                .uid("macd-detector");
+
+        DataStream<StockPattern> patterns = crossPatterns.union(rsiPatterns, macdPatterns);
+
+        patterns.sinkTo(PatternKafkaSink.build(
+                config.kafkaBootstrapServers(),
+                config.schemaRegistryUrl()))
+                .uid("stock-patterns-sink");
 
         env.execute("StreamDetectionJob");
     }

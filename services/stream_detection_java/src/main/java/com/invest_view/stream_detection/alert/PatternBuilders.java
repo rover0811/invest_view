@@ -60,6 +60,22 @@ public final class PatternBuilders {
             int closePrice,
             double shortMa,
             double longMa) {
+        return buildMovingAverageCross(
+                symbol, market, patternType, windowStartMs, windowEndMs,
+                closePrice, shortMa, longMa, 5, 20);
+    }
+
+    public static StockPattern buildMovingAverageCross(
+            String symbol,
+            String market,
+            PatternType patternType,
+            long windowStartMs,
+            long windowEndMs,
+            int closePrice,
+            double shortMa,
+            double longMa,
+            int shortPeriod,
+            int longPeriod) {
         return buildPattern(
                 symbol,
                 market,
@@ -70,9 +86,9 @@ public final class PatternBuilders {
                         "close_price", String.valueOf(closePrice),
                         "ma_short", round6(shortMa),
                         "ma_long", round6(longMa),
-                        "short_period", "5",
-                        "long_period", "20"),
-                CROSS_STRATEGY);
+                        "short_period", String.valueOf(shortPeriod),
+                        "long_period", String.valueOf(longPeriod)),
+                "ma" + shortPeriod + "_ma" + longPeriod + "_cross");
     }
 
     public static StockPattern buildRsi(
@@ -83,6 +99,18 @@ public final class PatternBuilders {
             long windowEndMs,
             int closePrice,
             double rsi) {
+        return buildRsi(symbol, market, patternType, windowStartMs, windowEndMs, closePrice, rsi, 14);
+    }
+
+    public static StockPattern buildRsi(
+            String symbol,
+            String market,
+            PatternType patternType,
+            long windowStartMs,
+            long windowEndMs,
+            int closePrice,
+            double rsi,
+            int period) {
         return buildPattern(
                 symbol,
                 market,
@@ -92,8 +120,8 @@ public final class PatternBuilders {
                 Map.of(
                         "close_price", String.valueOf(closePrice),
                         "rsi", round6(rsi),
-                        "period", "14"),
-                RSI_STRATEGY);
+                        "period", String.valueOf(period)),
+                "rsi_" + period);
     }
 
     public static StockPattern buildMacd(
@@ -107,6 +135,25 @@ public final class PatternBuilders {
             double signal,
             double ema12,
             double ema26) {
+        return buildMacd(
+                symbol, market, patternType, windowStartMs, windowEndMs,
+                closePrice, macd, signal, ema12, ema26, 12, 26, 9);
+    }
+
+    public static StockPattern buildMacd(
+            String symbol,
+            String market,
+            PatternType patternType,
+            long windowStartMs,
+            long windowEndMs,
+            int closePrice,
+            double macd,
+            double signal,
+            double fastEma,
+            double slowEma,
+            int fastPeriod,
+            int slowPeriod,
+            int signalPeriod) {
         return buildPattern(
                 symbol,
                 market,
@@ -117,9 +164,14 @@ public final class PatternBuilders {
                         "close_price", String.valueOf(closePrice),
                         "macd", round6(macd),
                         "signal", round6(signal),
-                        "ema12", round6(ema12),
-                        "ema26", round6(ema26)),
-                MACD_STRATEGY);
+                        "ema12", round6(fastEma),
+                        "ema26", round6(slowEma),
+                        "ema_fast", round6(fastEma),
+                        "ema_slow", round6(slowEma),
+                        "fast_period", String.valueOf(fastPeriod),
+                        "slow_period", String.valueOf(slowPeriod),
+                        "signal_period", String.valueOf(signalPeriod)),
+                "macd_" + fastPeriod + "_" + slowPeriod + "_" + signalPeriod);
     }
 
     public static String round6(double value) {

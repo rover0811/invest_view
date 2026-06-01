@@ -5,7 +5,7 @@
 set -euo pipefail
 
 CLUSTER_NAME="invest-flink"
-IMAGE_TAG="rules1"
+IMAGE_TAG="rules3"
 IMAGE_NAME="stream-detection-java:${IMAGE_TAG}"
 DEPLOYMENT_NAME="stream-detection"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

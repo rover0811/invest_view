@@ -19,7 +19,25 @@ public class CrossDetector extends BarCloseKeyedProcessFunction {
     public static final int SHORT_PERIOD = 5;
     public static final int LONG_PERIOD = 20;
 
+    private final int shortPeriod;
+    private final int longPeriod;
+
     private transient ListState<Integer> closesState;
+
+    public CrossDetector() {
+        this(SHORT_PERIOD, LONG_PERIOD);
+    }
+
+    public CrossDetector(int shortPeriod, int longPeriod) {
+        if (shortPeriod <= 0 || longPeriod <= 0) {
+            throw new IllegalArgumentException("MA periods must be positive");
+        }
+        if (shortPeriod >= longPeriod) {
+            throw new IllegalArgumentException("short MA period must be less than long MA period");
+        }
+        this.shortPeriod = shortPeriod;
+        this.longPeriod = longPeriod;
+    }
 
     @Override
     public void open(Configuration parameters) throws Exception {
@@ -35,26 +53,28 @@ public class CrossDetector extends BarCloseKeyedProcessFunction {
         List<Integer> after = new ArrayList<>(before);
         after.add(closePrice);
 
-        if (before.size() >= LONG_PERIOD) {
-            double previousShort = Indicators.sma(before, SHORT_PERIOD);
-            double previousLong = Indicators.sma(before, LONG_PERIOD);
-            double currentShort = Indicators.sma(after, SHORT_PERIOD);
-            double currentLong = Indicators.sma(after, LONG_PERIOD);
+        if (before.size() >= longPeriod) {
+            double previousShort = Indicators.sma(before, shortPeriod);
+            double previousLong = Indicators.sma(before, longPeriod);
+            double currentShort = Indicators.sma(after, shortPeriod);
+            double currentLong = Indicators.sma(after, longPeriod);
             long windowEndMs = closingBucketEndMs();
-            long windowStartMs = windowEndMs - (LONG_PERIOD * FIVE_MINUTES_MS);
+            long windowStartMs = windowEndMs - (longPeriod * FIVE_MINUTES_MS);
 
             if (previousShort <= previousLong && currentShort > currentLong) {
                 out.collect(PatternBuilders.buildMovingAverageCross(
                         symbol, closingMarket(), PatternType.GOLDEN_CROSS,
-                        windowStartMs, windowEndMs, closePrice, currentShort, currentLong));
+                        windowStartMs, windowEndMs, closePrice, currentShort, currentLong,
+                        shortPeriod, longPeriod));
             } else if (previousShort >= previousLong && currentShort < currentLong) {
                 out.collect(PatternBuilders.buildMovingAverageCross(
                         symbol, closingMarket(), PatternType.DEAD_CROSS,
-                        windowStartMs, windowEndMs, closePrice, currentShort, currentLong));
+                        windowStartMs, windowEndMs, closePrice, currentShort, currentLong,
+                        shortPeriod, longPeriod));
             }
         }
 
-        trimAndStore(after, LONG_PERIOD + 1);
+        trimAndStore(after, longPeriod + 1);
     }
 
     private List<Integer> closes() throws Exception {

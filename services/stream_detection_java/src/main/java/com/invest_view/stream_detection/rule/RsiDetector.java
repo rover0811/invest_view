@@ -20,7 +20,27 @@ public class RsiDetector extends BarCloseKeyedProcessFunction {
     public static final double OVERSOLD = 30.0;
     public static final double OVERBOUGHT = 70.0;
 
+    private final int period;
+    private final double oversold;
+    private final double overbought;
+
     private transient ListState<Integer> closesState;
+
+    public RsiDetector() {
+        this(PERIOD, OVERSOLD, OVERBOUGHT);
+    }
+
+    public RsiDetector(int period, double oversold, double overbought) {
+        if (period <= 0) {
+            throw new IllegalArgumentException("RSI period must be positive");
+        }
+        if (oversold >= overbought) {
+            throw new IllegalArgumentException("RSI oversold threshold must be less than overbought threshold");
+        }
+        this.period = period;
+        this.oversold = oversold;
+        this.overbought = overbought;
+    }
 
     @Override
     public void open(Configuration parameters) throws Exception {
@@ -35,22 +55,22 @@ public class RsiDetector extends BarCloseKeyedProcessFunction {
         List<Integer> closes = closes();
         closes.add(closePrice);
 
-        if (closes.size() >= PERIOD + 1) {
-            double rsi = Indicators.rsi(closes, PERIOD);
+        if (closes.size() >= period + 1) {
+            double rsi = Indicators.rsi(closes, period);
             long windowEndMs = closingBucketEndMs();
-            long windowStartMs = windowEndMs - (PERIOD * FIVE_MINUTES_MS);
-            if (rsi < OVERSOLD) {
+            long windowStartMs = windowEndMs - (period * FIVE_MINUTES_MS);
+            if (rsi < oversold) {
                 out.collect(PatternBuilders.buildRsi(
                         symbol, closingMarket(), PatternType.RSI_OVERSOLD,
-                        windowStartMs, windowEndMs, closePrice, rsi));
-            } else if (rsi > OVERBOUGHT) {
+                        windowStartMs, windowEndMs, closePrice, rsi, period));
+            } else if (rsi > overbought) {
                 out.collect(PatternBuilders.buildRsi(
                         symbol, closingMarket(), PatternType.RSI_OVERBOUGHT,
-                        windowStartMs, windowEndMs, closePrice, rsi));
+                        windowStartMs, windowEndMs, closePrice, rsi, period));
             }
         }
 
-        trimAndStore(closes, PERIOD + 1);
+        trimAndStore(closes, period + 1);
     }
 
     private List<Integer> closes() throws Exception {

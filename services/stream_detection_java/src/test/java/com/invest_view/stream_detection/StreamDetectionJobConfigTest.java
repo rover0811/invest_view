@@ -43,6 +43,14 @@ class StreamDetectionJobConfigTest {
         assertEquals("http://sr:8081", config.schemaRegistryUrl());
         assertEquals(0.03, config.priceAlertThreshold(), 1e-9);
         assertEquals(0.01, config.viProximityThreshold(), 1e-9);
+        assertEquals(14, config.rsiPeriod());
+        assertEquals(30.0, config.rsiOversold(), 1e-9);
+        assertEquals(70.0, config.rsiOverbought(), 1e-9);
+        assertEquals(5, config.maShortPeriod());
+        assertEquals(20, config.maLongPeriod());
+        assertEquals(12, config.macdFastPeriod());
+        assertEquals(26, config.macdSlowPeriod());
+        assertEquals(9, config.macdSignalPeriod());
         assertEquals("file:///opt/flink/checkpoints", config.checkpointDir());
         assertEquals(1, config.parallelism());
     }
@@ -54,6 +62,14 @@ class StreamDetectionJobConfigTest {
         entries.put("SCHEMA_REGISTRY_URL", "http://sr:8081");
         entries.put("PRICE_ALERT_THRESHOLD", "0.05");
         entries.put("VI_PROXIMITY_THRESHOLD", "0.02");
+        entries.put("RSI_PERIOD", "10");
+        entries.put("RSI_OVERSOLD", "25.5");
+        entries.put("RSI_OVERBOUGHT", "75.5");
+        entries.put("MA_SHORT_PERIOD", "3");
+        entries.put("MA_LONG_PERIOD", "8");
+        entries.put("MACD_FAST_PERIOD", "6");
+        entries.put("MACD_SLOW_PERIOD", "13");
+        entries.put("MACD_SIGNAL_PERIOD", "5");
         entries.put("CHECKPOINT_DIR", "file:///tmp/cp");
         entries.put("PARALLELISM", "4");
 
@@ -61,6 +77,14 @@ class StreamDetectionJobConfigTest {
 
         assertEquals(0.05, config.priceAlertThreshold(), 1e-9);
         assertEquals(0.02, config.viProximityThreshold(), 1e-9);
+        assertEquals(10, config.rsiPeriod());
+        assertEquals(25.5, config.rsiOversold(), 1e-9);
+        assertEquals(75.5, config.rsiOverbought(), 1e-9);
+        assertEquals(3, config.maShortPeriod());
+        assertEquals(8, config.maLongPeriod());
+        assertEquals(6, config.macdFastPeriod());
+        assertEquals(13, config.macdSlowPeriod());
+        assertEquals(5, config.macdSignalPeriod());
         assertEquals("file:///tmp/cp", config.checkpointDir());
         assertEquals(4, config.parallelism());
     }
