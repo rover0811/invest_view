@@ -22,6 +22,7 @@ public class MacdDetector extends BarCloseKeyedProcessFunction {
     private final int fastPeriod;
     private final int slowPeriod;
     private final int signalPeriod;
+    private final int warmupClosedBars;
 
     private transient ValueState<MacdState> macdState;
 
@@ -39,6 +40,7 @@ public class MacdDetector extends BarCloseKeyedProcessFunction {
         this.fastPeriod = fastPeriod;
         this.slowPeriod = slowPeriod;
         this.signalPeriod = signalPeriod;
+        this.warmupClosedBars = slowPeriod + signalPeriod;
     }
 
     @Override
@@ -54,7 +56,7 @@ public class MacdDetector extends BarCloseKeyedProcessFunction {
         MacdState previous = macdState.value();
         MacdState current = nextState(previous, closePrice, fastPeriod, slowPeriod, signalPeriod);
 
-        if (previous != null) {
+        if (previous != null && current.closedBarCount >= warmupClosedBars) {
             long windowEndMs = closingBucketEndMs();
             long windowStartMs = windowEndMs - (slowPeriod * FIVE_MINUTES_MS);
             if (previous.macd <= previous.signal && current.macd > current.signal) {
@@ -81,13 +83,13 @@ public class MacdDetector extends BarCloseKeyedProcessFunction {
 
     static MacdState nextState(MacdState previous, int closePrice, int fastPeriod, int slowPeriod, int signalPeriod) {
         if (previous == null) {
-            return new MacdState(closePrice, closePrice, 0.0, 0.0);
+            return new MacdState(closePrice, closePrice, 0.0, 0.0, 1);
         }
         double fastEma = Indicators.ema(previous.fastEma, closePrice, fastPeriod);
         double slowEma = Indicators.ema(previous.slowEma, closePrice, slowPeriod);
         double macd = fastEma - slowEma;
         double signal = Indicators.ema(previous.signal, macd, signalPeriod);
-        return new MacdState(fastEma, slowEma, macd, signal);
+        return new MacdState(fastEma, slowEma, macd, signal, previous.closedBarCount + 1);
     }
 
     public static class MacdState implements Serializable {
@@ -98,15 +100,21 @@ public class MacdDetector extends BarCloseKeyedProcessFunction {
         public double slowEma;
         public double macd;
         public double signal;
+        public int closedBarCount;
 
         public MacdState() {
         }
 
         public MacdState(double fastEma, double slowEma, double macd, double signal) {
+            this(fastEma, slowEma, macd, signal, 0);
+        }
+
+        public MacdState(double fastEma, double slowEma, double macd, double signal, int closedBarCount) {
             this.fastEma = fastEma;
             this.slowEma = slowEma;
             this.macd = macd;
             this.signal = signal;
+            this.closedBarCount = closedBarCount;
         }
     }
 }
