@@ -30,7 +30,9 @@ public final class PatternKafkaSink {
                                         ConfluentRegistryAvroSerializationSchema.forSpecific(
                                                 StockPattern.class, SUBJECT, schemaRegistryUrl))
                                 .build())
-                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("stock-patterns-sink")
+                .setProperty("transaction.timeout.ms", "900000")
                 .build();
     }
 }

@@ -9,6 +9,9 @@ spec:
   flinkConfiguration:
     taskmanager.numberOfTaskSlots: "1"
     state.checkpoints.dir: file:///opt/flink/checkpoints
+    state.savepoints.dir: file:///opt/flink/checkpoints/savepoints
+    high-availability: org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory
+    high-availability.storageDir: file:///opt/flink/checkpoints/ha
     execution.checkpointing.interval: "60000"
     execution.checkpointing.mode: EXACTLY_ONCE
   serviceAccount: flink
@@ -24,7 +27,7 @@ spec:
     jarURI: local:///opt/flink/usrlib/stream-detection.jar
     entryClass: com.invest_view.stream_detection.StreamDetectionJob
     parallelism: 1
-    upgradeMode: stateless
+    upgradeMode: last-state
   podTemplate:
     spec:
       containers:
@@ -63,4 +66,5 @@ spec:
               mountPath: /opt/flink/checkpoints
       volumes:
         - name: checkpoint-storage
-          emptyDir: {}
+          persistentVolumeClaim:
+            claimName: flink-checkpoint-storage

@@ -33,7 +33,9 @@ public final class AlertKafkaSink {
                                         ConfluentRegistryAvroSerializationSchema.forSpecific(
                                                 StockAlert.class, SUBJECT, schemaRegistryUrl))
                                 .build())
-                .setDeliveryGuarantee(DeliveryGuarantee.AT_LEAST_ONCE)
+                .setDeliveryGuarantee(DeliveryGuarantee.EXACTLY_ONCE)
+                .setTransactionalIdPrefix("stock-alerts-sink")
+                .setProperty("transaction.timeout.ms", "900000")
                 .build();
     }
 }
