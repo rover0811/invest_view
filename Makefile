@@ -28,7 +28,7 @@ help:
 	@echo "  topics           Apply KafkaTopic manifests"
 	@echo "  secrets          Create/refresh app Secrets from root .env (values never committed)"
 	@echo "  images           Build kis_ingestion + alert_service + tick_persistence + event_pattern_persistence :qa images and kind-load them"
-	@echo "  apps             Apply alert-service + kis-ingestion + event-pattern-persistence + tick-persistence (LAST: signal_timeline dep); depends on secrets"
+	@echo "  apps             Ensure secrets+topics, apply all 4 workloads, then rollout-restart so freshly kind-loaded :qa images are picked up; depends on secrets+topics"
 	@echo "  flink            Apply the two FlinkDeployments (stream-detection, stream-detection-echo)"
 	@echo "  schemas          Register Avro subjects via a temporary schema-registry port-forward"
 	@echo ""
@@ -109,17 +109,21 @@ images:
 	kind load docker-image tick_persistence:qa --name $(CLUSTER)
 	kind load docker-image event_pattern_persistence:qa --name $(CLUSTER)
 
-apps: secrets
+apps: secrets topics
 	kubectl apply -f infra/k8s/alert-service-configmap.yaml
 	kubectl apply -f infra/k8s/alert-service-service.yaml
 	kubectl apply -f infra/k8s/alert-service-deployment.yaml
 	kubectl apply -f infra/k8s/kis-ingestion-deployment.yaml
 	kubectl apply -f infra/k8s/event-pattern-persistence-configmap.yaml
 	kubectl apply -f infra/k8s/event-pattern-persistence-deployment.yaml
-	kubectl rollout status deploy/alert-service --timeout=300s
-	kubectl rollout status deploy/event-pattern-persistence --timeout=300s
 	kubectl apply -f infra/k8s/tick-persistence-configmap.yaml
 	kubectl apply -f infra/k8s/tick-persistence-deployment.yaml
+	@echo "force-restart so freshly kind-loaded :qa images are picked up (imagePullPolicy: Never + same tag => apply is a no-op)"
+	kubectl rollout restart deploy/alert-service deploy/kis-ingestion deploy/event-pattern-persistence deploy/tick-persistence
+	kubectl rollout status deploy/alert-service --timeout=300s
+	kubectl rollout status deploy/event-pattern-persistence --timeout=300s
+	kubectl rollout status deploy/tick-persistence --timeout=300s
+	kubectl rollout status deploy/kis-ingestion --timeout=300s
 
 flink:
 	kubectl apply -f $(FLINK_DIR)/flinkdeployment.yaml
