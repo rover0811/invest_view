@@ -49,7 +49,7 @@ make infra-up   # Kafka 클러스터 / 토픽 / Schema Registry / Postgres
 make schemas    # Avro subject 등록 (stock-ticks-value, stock-alerts-value, stock-patterns-value)
 make images     # kis_ingestion:qa / alert_service:qa / tick_persistence:qa / event_pattern_persistence:qa 빌드 + kind load
 make apps       # alert_service / kis_ingestion / tick_persistence / event_pattern_persistence 배포
-make flink      # 두 개의 FlinkDeployment 적용
+make flink      # Flink checkpoint PVC + 두 개의 FlinkDeployment 적용
 make wait       # 전체 스택 Ready 대기 (infra + apps + flink)
 ```
 실행되는 파이프라인:
@@ -153,7 +153,7 @@ make teardown-cluster  # 위험: kind 클러스터 전체 삭제
      ```bash
      kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c "SELECT pattern_type, count(*) FROM gold.pattern_events WHERE triggered_at > now() - interval '1 hour' GROUP BY 1;"
      ```
-   *참고: Flink 재배포 직후에는 [패턴 웜업](#stateless-redeploy--pattern-warmup) 기간 동안 결과가 비어있을 수 있습니다.*
+   *참고: 일반 `last-state` 재배포는 패턴 상태를 보존합니다. 최초 배포 또는 명시적 state wipe 같은 cold start 직후에만 [패턴 웜업](#stateful-recovery--cold-start-pattern-warmup) 기간 동안 결과가 비어있을 수 있습니다.*
 
 6. **통합 타임라인 및 서빙 확인 (Serving)**
    알림(Alert)과 패턴(Pattern)이 통합된 타임라인 뷰와 API 응답을 확인합니다.
@@ -170,12 +170,11 @@ make teardown-cluster  # 위험: kind 클러스터 전체 삭제
      curl -s localhost:8000/api/timeline/<symbol>
      ```
 
-7. **Stateless redeploy & pattern warmup**
-   Flink 작업은 `stateless` 모드로 동작하므로, 재배포 시 모든 패턴 탐지 상태가 초기화됩니다. MA20, RSI, MACD 등 기술적 지표가 다시 계산되기까지 약 130분(5분봉 26개)의 장중 데이터 웜업이 필요합니다. 이 기간 동안 `gold.pattern_events`가 비어있는 것은 정상입니다.
+7. **Stateful recovery & cold-start pattern warmup**
+   Flink 작업은 `last-state` 모드와 PVC 기반 checkpoint/HA 저장소(`flink-checkpoint-storage`)를 사용하므로, 일반 재배포 시 패턴 탐지 상태가 보존됩니다. 다만 최초 배포 또는 명시적 state wipe 같은 cold start 후에는 MA20, RSI, MACD 등 기술적 지표가 다시 계산되기까지 약 130분(5분봉 26개)의 장중 데이터 웜업이 필요할 수 있습니다. 이 기간 동안 `gold.pattern_events`가 비어있는 것은 정상입니다.
 
 8. **성공 기준**
    - `bronze.tick_history` 카운트 증가.
    - `silver.symbol_5m_metrics` OHLC 불변식 통과.
    - `serving.symbol_signal_timeline`에서 alert와 pattern이 모두 조회됨.
    - API 호출 시 정상적인 JSON 데이터 반환.
-

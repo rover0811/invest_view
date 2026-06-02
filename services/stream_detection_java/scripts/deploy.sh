@@ -27,7 +27,10 @@ docker build -t "${IMAGE_NAME}" "${MODULE_ROOT}"
 log "loading ${IMAGE_NAME} into kind cluster ${CLUSTER_NAME}..."
 kind load docker-image "${IMAGE_NAME}" --name "${CLUSTER_NAME}"
 
-# 4. Apply FlinkDeployment (idempotent: kubectl apply replaces if exists)
+# 4. Apply durable checkpoint PVC, then FlinkDeployment (idempotent: kubectl apply replaces if exists)
+log "applying checkpoint PVC..."
+kubectl apply -f "${MODULE_ROOT}/k8s/flink-checkpoint-pvc.yaml"
+
 log "applying FlinkDeployment..."
 kubectl apply -f "${MODULE_ROOT}/k8s/flinkdeployment.yaml"
 

@@ -118,7 +118,7 @@ The deployment script:
 1. Rebuilds the JAR (skipping tests).
 2. Builds a Docker image tagged `stream-detection-java:rules3`.
 3. Loads the image into the kind cluster.
-4. Applies the `k8s/flinkdeployment.yaml` manifest.
+4. Applies the durable checkpoint PVC (`k8s/flink-checkpoint-pvc.yaml`) and `k8s/flinkdeployment.yaml` manifest.
 5. Waits for the job to reach the `RUNNING` state.
 6. Sets up a port-forward for the Flink Web UI.
 
@@ -126,7 +126,7 @@ Access the **Flink Web UI** at: http://localhost:8083
 
 ### Stateful recovery & pattern warmup
 
-The Flink job uses `upgradeMode: last-state` with checkpoints, Kubernetes HA, and savepoints stored on a durable 5Gi PVC (`flink-checkpoint-storage`). Kafka sinks use `EXACTLY_ONCE` transactions with unique transactional IDs. Keyed state, window state, and pattern-detector rolling state (MA5/MA20 history, RSI 14-period window, MACD EMA12/26/signal) now survive normal pod restarts and operator-driven redeploys. State only resets on a genuine cold start or an explicit stateless wipe.
+The Flink job uses `upgradeMode: last-state` with checkpoints, Kubernetes HA, and savepoints stored on a durable 5Gi PVC (`flink-checkpoint-storage`). Kafka sinks use `EXACTLY_ONCE` transactions with unique transactional IDs. Keyed state, window state, and pattern-detector rolling state (MA5/MA20 history, RSI 14-period window, MACD EMA12/26/signal) now survive normal pod restarts and operator-driven redeploys. State only resets on a genuine cold start or an explicit state wipe.
 
 On a cold start (first deploy or explicit state wipe — not a normal last-state redeploy), the pattern rules require a warmup period before they emit events:
 - **Golden/Dead cross**: Needs 20 closed 5m bars (MA_LONG).

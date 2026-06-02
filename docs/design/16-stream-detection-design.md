@@ -93,7 +93,7 @@ flowchart LR
 
 ### MACD Warmup Suppression
 
-`MacdDetector`는 `closedBarCount >= slowPeriod + signalPeriod` 조건을 만족하기 전까지 모든 MACD 신호를 억제한다. 기본값 기준으로 26 + 9 = **35개의 closed 5분봉**이 필요하다. 이는 EMA 초기화 구간의 스퓨리어스 crossover 신호를 방지하기 위한 guard이며, stateless 재배포 후 패턴 웜업 기간과 동일한 운영상 의미를 가진다.
+`MacdDetector`는 `closedBarCount >= slowPeriod + signalPeriod` 조건을 만족하기 전까지 모든 MACD 신호를 억제한다. 기본값 기준으로 26 + 9 = **35개의 closed 5분봉**이 필요하다. 이는 EMA 초기화 구간의 스퓨리어스 crossover 신호를 방지하기 위한 guard이며, cold start 또는 명시적 state wipe 후 패턴 웜업 기간과 동일한 운영상 의미를 가진다.
 
 ### Common Eligibility Filter
 - `trading_halted == "N"` (Trading Halt 룰 제외)

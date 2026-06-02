@@ -29,7 +29,7 @@ help:
 	@echo "  secrets          Create/refresh app Secrets from root .env (values never committed)"
 	@echo "  images           Build kis_ingestion + alert_service + tick_persistence + event_pattern_persistence :qa images and kind-load them"
 	@echo "  apps             Ensure secrets+topics, apply all 4 workloads, then rollout-restart so freshly kind-loaded :qa images are picked up; depends on secrets+topics"
-	@echo "  flink            Apply the two FlinkDeployments (stream-detection, stream-detection-echo)"
+	@echo "  flink            Apply Flink checkpoint PVC + FlinkDeployments (stream-detection, stream-detection-echo)"
 	@echo "  schemas          Register Avro subjects via a temporary schema-registry port-forward"
 	@echo ""
 	@echo "Waiters:"
@@ -126,6 +126,7 @@ apps: secrets topics
 	kubectl rollout status deploy/kis-ingestion --timeout=300s
 
 flink:
+	kubectl apply -f $(FLINK_DIR)/flink-checkpoint-pvc.yaml
 	kubectl apply -f $(FLINK_DIR)/flinkdeployment.yaml
 	kubectl apply -f $(FLINK_DIR)/flinkdeployment-echo.yaml
 
