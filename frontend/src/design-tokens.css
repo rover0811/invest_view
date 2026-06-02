@@ -1,0 +1,116 @@
+/* ============================================================================
+ * design-tokens.css — 두드림 디자인 시스템 (한국 금융 UI 컨벤션)
+ *
+ * 가드레일(GUARDRAIL): 모든 UI 패널은 여기 정의된 CSS 변수만 사용한다.
+ * 색/폰트/보더/radius/간격을 컴포넌트에 하드코딩하지 말 것.
+ * AI(Claude/v0)가 구조를 생성하더라도 이 토큰만 참조하게 하면,
+ * 패널을 따로 깎아도 통일감이 유지된다(= AI티 "visual averaging" 차단).
+ *
+ * ⚠️ 한국 컨벤션: 상승=RED, 하락=BLUE (미국과 정반대!)
+ * 깊이 표현: box-shadow 대신 "레이어드 surface alpha + 반투명 보더"
+ *           (= glass-on-metal 느낌. paper-on-table 금지)
+ * 폰트: Inter/Roboto/system 금지. Pretendard(한글) + Geist Mono(숫자)만.
+ * ==========================================================================*/
+
+/* Pretendard (한글+Latin 밸런스, 오픈소스) */
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard/dist/web/static/pretendard.css");
+/* Geist Mono: Google Fonts 또는 Vercel 배포본 사용.
+ * <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+ * 를 HTML <head>에 추가하거나 self-host. (CSS @import로는 가변폰트 일부 미지원) */
+
+:root {
+  /* ---- 색: 시맨틱 (한국 컨벤션) ------------------------------------------ */
+  --color-positive: #dc2e47;        /* 상승/매수/up — RED (한국) */
+  --color-negative: #3182f6;        /* 하락/매도/down — BLUE */
+  --color-flat:     #8a8f98;        /* 보합/변동없음 */
+
+  --brand: #3182f6;                 /* 토스 블루 — 버튼/CTA. negative와 같은 값,
+                                       맥락으로 구분(가격=손실, 버튼=액션) */
+  --text-on-brand: #ffffff;         /* 브랜드 버튼/버블 위 흰 텍스트 */
+
+  /* ---- 다크 표면: 3단 레이어 (그림자 대신 깊이) ------------------------- */
+  --surface-floor:   #101013;       /* 가장 깊은 바닥(앱 배경) */
+  --surface-body:    #17171c;       /* 본문 패널 */
+  --surface-overlay: #202025;       /* 떠있는 요소(드롭다운/모달/툴팁) */
+  --surface-raised:  #26262c;       /* hover/active 강조 표면 */
+
+  /* ---- 보더: 반투명 (유리-위-금속) ------------------------------------- */
+  --border-subtle: rgba(214, 224, 239, 0.09);   /* 패널 구분 1px */
+  --border-strong: rgba(214, 224, 239, 0.16);   /* 강조 구분 */
+
+  /* ---- Overlay / Scrim ------------------------------------------------- */
+  --overlay-scrim: rgba(0, 0, 0, 0.4);          /* 모달 backdrop dim */
+  --shadow-overlay: 0 10px 30px rgba(0, 0, 0, 0.5);  /* 떠있는 패널 그림자 */
+
+  /* ---- 텍스트: 그레이스케일 램프 (90%는 무채색, 색은 이상치에만) ------- */
+  --text-primary:   #e8eaed;        /* 본문/주요 수치 */
+  --text-secondary: #a0a4ad;        /* 보조 라벨 */
+  --text-tertiary:  #6b6f78;        /* 비활성/캡션 */
+
+  /* ---- 폰트 -------------------------------------------------------------- */
+  --font-sans: "Pretendard", -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo",
+               sans-serif;          /* 한글/본문. Inter 금지 */
+  --font-mono: "Geist Mono", "SF Mono", "JetBrains Mono", ui-monospace,
+               monospace;           /* 가격/숫자/티커 (터미널 느낌) */
+
+  /* ---- 간격: 8pt 그리드 -------------------------------------------------- */
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --space-6: 24px;
+  --space-8: 32px;
+
+  /* ---- Radius ------------------------------------------------------------ */
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+
+  /* ---- 모션: hover/인터랙션 (정적 → 살아있는 느낌, 토스 톤) ------------- */
+  --ease-out:   cubic-bezier(0.4, 0, 0.2, 1);   /* 부드러운 감속 (UI 표준) */
+  --lift-card:  -2px;                            /* hover 시 카드 살짝 떠오름(ghost lift) */
+  --dur-hover:  0.18s;                           /* hover 트랜지션 (차분하게) */
+  --dur-fill:   0.62s;                           /* 체결강도 막대 채움 애니메이션 */
+
+  /* ---- 차트 (Lightweight Charts v5 override 용) ------------------------- */
+  --chart-grid: rgba(42, 46, 57, 0.5);
+  --chart-text: var(--text-secondary);
+  --chart-crosshair: var(--brand);
+
+  /* 차트 시리즈 색, JS T와 동기화 */
+  --ma5: #e0a64e;
+  --ma20: #4ec9b0;
+  --ma60: #b58cf0;
+  --vwap: #8a8f98;
+}
+
+/* ============================================================================
+ * 유틸리티 클래스
+ * ==========================================================================*/
+
+/* 가격/숫자 컬럼: 등폭 숫자 — 실시간 갱신 시 자릿수 흔들림(jitter) 방지.
+ * 금융 UI 신뢰감의 핵심. 모든 가격/수치 표시에 적용할 것. */
+.tnum {
+  font-variant-numeric: tabular-nums;
+  font-family: var(--font-sans);
+  letter-spacing: -0.02em;
+}
+
+/* 시맨틱 색상 헬퍼 (raw 색 직접 사용 금지, 이것만 사용) */
+.price-up   { color: var(--color-positive); }   /* 상승 = RED */
+.price-down { color: var(--color-negative); }    /* 하락 = BLUE */
+.price-flat { color: var(--color-flat); }
+
+/* 패널 베이스: 그림자 없이 표면+보더로만 깊이 */
+.panel {
+  background: var(--surface-body);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+/* 앱 전역 베이스 */
+body {
+  background: var(--surface-floor);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
