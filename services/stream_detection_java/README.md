@@ -124,16 +124,16 @@ The deployment script:
 
 Access the **Flink Web UI** at: http://localhost:8083
 
-### Stateless redeploy & pattern warmup
+### Stateful recovery & pattern warmup
 
-The Flink job uses `upgradeMode: stateless` with `emptyDir` checkpoints. On every redeploy, all keyed state resets. This includes the rolling state for pattern detectors (MA5/MA20 history, RSI 14-period window, MACD EMA12/26/signal).
+The Flink job uses `upgradeMode: last-state` with checkpoints, Kubernetes HA, and savepoints stored on a durable 5Gi PVC (`flink-checkpoint-storage`). Kafka sinks use `EXACTLY_ONCE` transactions with unique transactional IDs. Keyed state, window state, and pattern-detector rolling state (MA5/MA20 history, RSI 14-period window, MACD EMA12/26/signal) now survive normal pod restarts and operator-driven redeploys. State only resets on a genuine cold start or an explicit stateless wipe.
 
-After a stateless redeploy, the pattern rules require a warmup period before they emit events again:
+On a cold start (first deploy or explicit state wipe — not a normal last-state redeploy), the pattern rules require a warmup period before they emit events:
 - **Golden/Dead cross**: Needs 20 closed 5m bars (MA_LONG).
 - **RSI**: Needs 15 closed 5m bars (RSI_PERIOD+1).
 - **MACD**: Needs ~35 closed 5m bars (MACD_SLOW + signal).
 
-**Operational Note**: Prefer redeploying out of market hours. Expect no pattern events for roughly 130 minutes of market data (~26 closed 5m bars) after a stateless redeploy. This is by design for v1; stateful upgrades via PVC/savepoints are deferred.
+**Operational Note**: With `last-state` upgrades and a durable PVC, normal redeploys preserve state and do not incur the warmup period. The ~130 minutes of market data (~26 closed 5m bars) warmup applies only on a cold start or state loss scenario. Prefer performing cold starts out of market hours. Durable checkpoint/HA storage is backed by a 5Gi PVC, and Kafka sinks provide end-to-end exactly-once guarantees.
 
 ## Verify
 
@@ -157,7 +157,7 @@ kubectl exec statefulset/postgres -- psql -U postgres -d invest_view -c \
   "SELECT pattern_type, count(*) FROM gold.pattern_events GROUP BY 1"
 ```
 
-Pattern events may be empty immediately after a stateless redeploy until the warmup window completes.
+Pattern events may be empty after a cold start (or explicit state wipe) until the warmup window completes; a normal last-state redeploy preserves pattern state and emits immediately.
 
 ## Troubleshooting
 

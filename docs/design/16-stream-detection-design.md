@@ -32,7 +32,7 @@ created: 2026-06-01
 
 ### Out of Scope
 
-- **Savepoint Management**: 자동화된 세이브포인트 관리 및 PVC 기반 체크포인트 (v1은 emptyDir/stateless)
+- **Savepoint Management**: 자동화된 세이브포인트 스케줄링/오케스트레이션 (v1은 last-state 업그레이드 + PVC 기반 체크포인트/HA로 수동 복구 지원)
 - **Dynamic Rule Injection**: 런타임 규칙 변경 (현재는 환경 변수 기반 정적 설정)
 - **Parallelism Scaling**: v1은 병렬도 1로 고정하여 운영 복잡도 최소화
 
@@ -80,6 +80,7 @@ flowchart LR
 - **Checkpointing**: 60s 주기, `EXACTLY_ONCE` 모드
 - **Fault Tolerance**: `minPauseBetweenCheckpoints(30s)`, `checkpointTimeout(600s)`, `maxConcurrentCheckpoints(1)`
 - **Cleanup**: `RETAIN_ON_CANCELLATION` (수동 삭제 전까지 체크포인트 유지)
+- **Durable State**: 체크포인트/HA 메타데이터/세이브포인트를 PVC(`flink-checkpoint-storage`, 5Gi, `standard`, RWO)에 저장하여 파드 재기동·재배포 간 상태 보존
 - **Parallelism**: 기본 1 (MVP 범위)
 
 ## 2. Detection Rules
@@ -108,7 +109,7 @@ Avro `GenericRecord` 사용 시 `decimal` logicalType이 `ByteBuffer`로 역직�
 
 ### Kafka Connectors
 - **Source**: `stock-ticks` 토픽, `stream-detection-java` 그룹 ID, `latest` 오프셋부터 시작. `ConfluentRegistryAvroDeserializationSchema` 사용.
-- **Sinks**: `stock-alerts` 및 `stock-patterns` 토픽, `AT_LEAST_ONCE` 보장. `auto.register.schemas=false` (사전 등록 필수).
+- **Sinks**: `stock-alerts` 및 `stock-patterns` 토픽, `EXACTLY_ONCE` 보장 (Kafka 트랜잭션, sink별 고유 `transactionalIdPrefix`, `transaction.timeout.ms=900000`). `auto.register.schemas=false` (사전 등록 필수).
 
 ## 4. Idempotent Deduplication
 
@@ -133,7 +134,7 @@ Avro `GenericRecord` 사용 시 `decimal` logicalType이 `ByteBuffer`로 역직�
 - **Flink Version**: 1.18.1
 - **Flink Operator**: 1.14.0
 - **Image**: `stream-detection-java:rules3`
-- **Upgrade Mode**: `stateless` (v1 MVP 범위에서 세이브포인트 자동화 제외)
+- **Upgrade Mode**: `last-state` (Kubernetes HA + PVC 기반 체크포인트로 상태 보존 복구; 세이브포인트 자동 스케줄링은 범위 외)
 
 ### Resource Allocation
 - **JobManager/TaskManager**: 각 1024m Memory, 1 CPU
@@ -147,20 +148,20 @@ Avro `GenericRecord` 사용 시 `decimal` logicalType이 `ByteBuffer`로 역직�
 | D2 | 이벤트 타임 기준 | `trade_time`은 날짜가 없어 부적합하므로 `received_at` 사용 |
 | D3 | 스키마 등록 방식 | `auto.register.schemas`를 금지하고 `make schemas`로 사전 등록 강제 |
 | D4 | 멱등성 보장 | UUID5 기반 `alert_event_id` 생성으로 DB 레벨 멱등성 확보 |
-| D5 | 체크포인트 저장소 | MVP 단순화를 위해 PVC 없이 `emptyDir` 사용 및 `stateless` 업그레이드 |
+| D5 | 체크포인트 저장소 | 운영 복구를 위해 PVC(`flink-checkpoint-storage`) 기반 체크포인트/HA/세이브포인트 + `last-state` 업그레이드 채택 (PR #19 리뷰 반영) |
 | D6 | 병렬도 설정 | 운영 복잡도 최소화를 위해 병렬도 1로 고정 |
 | D7 | 스키마 검증 | `AvroSchemaGuard`를 통해 기동 시 SR 등록 여부 즉시 검증 |
 
 ## Remaining open questions
 
-- **State Migration**: 향후 `stateless` 모드에서 `savepoint` 기반의 유상태 업그레이드로 전환 시점
+- **Savepoint Automation**: 현재 수동 세이브포인트/`last-state` 복구를 자동 스케줄링·오케스트레이션으로 확장할 시점
 - **Scaling Strategy**: 병렬도 확장 시 KeyGroup 할당 및 워터마크 정체 해소 방안
-- **State Migration**: 패턴 룰의 rolling state를 포함한 유상태 업그레이드를 savepoint/PVC 기반으로 전환할 시점
+- **Cross-node Storage**: 단일 노드 kind의 RWO PVC를 멀티노드/클라우드(S3 등 공유 스토리지) 환경으로 확장할 시점
 
 ## v1 implementation scope
 
 - **Current**: 3종 알림 룰(Price, VI, Halt) + 3종 패턴 룰(Cross, RSI, MACD), UUID5 멱등 키, Java 기반 안정적 파이프라인
-- **Next Scoped**: PVC 기반 유상태 체크포인트, 병렬도 확장
+- **Next Scoped**: 세이브포인트 자동 스케줄링, 공유 스토리지(S3) 기반 체크포인트, 병렬도 확장
 - **Out of Scope**: 런타임 동적 규칙 변경, 미국 시장 데이터 처리
 
 ## Related Notes
