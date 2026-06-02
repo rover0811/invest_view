@@ -12,7 +12,7 @@ _SRC = Path(__file__).resolve().parent.parent / "src"
 if str(_SRC) not in sys.path:
     sys.path.insert(0, str(_SRC))
 
-from alert_service.db.models import Base
+from alert_service.db.models import Base  # noqa: E402
 
 config = context.config
 # Override URL from env

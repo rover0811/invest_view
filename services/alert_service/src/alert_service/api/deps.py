@@ -7,7 +7,7 @@ from __future__ import annotations
 import uuid
 from typing import Annotated
 
-from fastapi import Depends, Header, HTTPException, Query, Request, status
+from fastapi import Header, HTTPException, Query, Request, status
 
 from alert_service.auth.jwt import JWTVerificationError, JWTVerifier
 
