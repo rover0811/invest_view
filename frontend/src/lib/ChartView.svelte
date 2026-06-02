@@ -9,12 +9,11 @@
 
 <div class="main-row">
   <div class="main-left">
-    <Chart candles={data.candles} timeline={data.timeline} snapshot={data.snapshot} />
+    <Chart candles={data.candles} timeline={data.timeline} snapshot={data.snapshot} symbol={data._meta.symbol} />
     <MetricsGrid
       tickDetail={data.tickDetail}
       indicators={data.indicators}
       consensus={data.consensus}
-      fundamentals={data.fundamentals}
       snapshot={data.snapshot}
     />
   </div>

@@ -6,7 +6,8 @@
     LineSeries,
     CrosshairMode,
     LineStyle,
-    ColorType
+    ColorType,
+    TickMarkType
   } from 'lightweight-charts';
   import type {
     CandlestickData,
@@ -18,12 +19,20 @@
     UTCTimestamp
   } from 'lightweight-charts';
   import { fmtPrice, fmtVol } from './format';
+  import { getCandles, type CandleInterval } from './api';
   import type { Candle, Snapshot, TimelineEvent } from './types';
 
-  let { candles, timeline, snapshot }: { candles: Candle[]; timeline: TimelineEvent[]; snapshot: Snapshot } = $props();
+  let { candles, timeline, snapshot, symbol }: { candles: Candle[]; timeline: TimelineEvent[]; snapshot: Snapshot; symbol: string } = $props();
 
   let container = $state<HTMLDivElement>();
-  let activeTimeframe = $state('1m');
+  let activeTimeframe = $state<CandleInterval>('5m');
+  let activeCandles = $state<Candle[]>([]);
+  let loadError = $state(false);
+
+  $effect(() => {
+    activeCandles = candles;
+    activeTimeframe = '5m';
+  });
   let legendItems = $state<LegendItem[]>([]);
   let eventTicks = $state<EventTick[]>([]);
   let tooltip = $state<TooltipState>({ visible: false, left: 0, top: 0, label: '', kindClass: '' });
@@ -93,15 +102,52 @@
     VI_IMMINENT: 'VI 임박'
   };
 
-  const timeframes = [
-    { value: '1m', label: '1분' },
+  const timeframes: { value: CandleInterval; label: string }[] = [
+    { value: '5m', label: '5분' },
     { value: '1d', label: '일' },
     { value: '1w', label: '주' },
-    { value: '1M', label: '월' },
-    { value: '1y', label: '년' }
+    { value: '1M', label: '월' }
   ];
 
   let fitChartContent = () => {};
+
+  // chart `time` is a UTC epoch second but the data is bucketed on the KST wall
+  // clock; shifting by +9h and reading UTC getters yields the KST calendar values.
+  function kstParts(time: Time): { date: string; time: string } {
+    const d = new Date((Number(time) + 9 * 3600) * 1000);
+    const p = (n: number) => String(n).padStart(2, '0');
+    return {
+      date: `${d.getUTCFullYear()}-${p(d.getUTCMonth() + 1)}-${p(d.getUTCDate())}`,
+      time: `${p(d.getUTCHours())}:${p(d.getUTCMinutes())}`
+    };
+  }
+
+  function kstDate(time: Time): Date {
+    return new Date((Number(time) + 9 * 3600) * 1000);
+  }
+
+  // Korean brokerage convention (Toss/미래에셋): axis ticks show only the boundary
+  // unit, not a full timestamp — year ticks show the year, month ticks the month,
+  // day ticks the day, intraday ticks the time. Lightweight Charts hands us the
+  // unit via tickMarkType, so each label stays compact instead of "YYYY-MM-DD HH:mm".
+  function formatAxisTick(time: Time, tickMarkType: TickMarkType): string {
+    const d = kstDate(time);
+    switch (tickMarkType) {
+      case TickMarkType.Year:
+        return `${d.getUTCFullYear()}`;
+      case TickMarkType.Month:
+        return `${d.getUTCMonth() + 1}월`;
+      case TickMarkType.DayOfMonth:
+        return `${d.getUTCDate()}일`;
+      default:
+        return kstParts(time).time;
+    }
+  }
+
+  function formatCrosshairTime(time: Time): string {
+    const { date, time: hm } = kstParts(time);
+    return hm === '00:00' ? date : `${date} ${hm}`;
+  }
 
   function asTime(time: number): UTCTimestamp {
     return time as UTCTimestamp;
@@ -210,13 +256,17 @@
     };
   }
 
-  function selectTimeframe(timeframe: string) {
+  async function selectTimeframe(timeframe: CandleInterval) {
+    if (timeframe === activeTimeframe) {
+      return;
+    }
     activeTimeframe = timeframe;
-    loadTimeframe(timeframe);
-  }
-
-  function loadTimeframe(_timeframe: string) {
-    fitChartContent();
+    loadError = false;
+    try {
+      activeCandles = await getCandles(symbol, timeframe);
+    } catch {
+      loadError = true;
+    }
   }
 
   $effect(() => {
@@ -228,7 +278,7 @@
     let measuring = false;
     let measureStart: { x: number } | undefined;
     let disposed = false;
-    const allCandles = candles;
+    const allCandles = activeCandles;
     const latestCandle = allCandles.at(-1);
     const volumeByTime = new Map<number, number>();
     const markerByTime = new Map<number, TimelineEvent>();
@@ -265,9 +315,13 @@
           labelBackgroundColor: T.surfaceRaised
         }
       },
+      localization: {
+        timeFormatter: formatCrosshairTime
+      },
       timeScale: {
         timeVisible: true,
-        secondsVisible: false
+        secondsVisible: false,
+        tickMarkFormatter: formatAxisTick
       },
       rightPriceScale: {
         borderColor: T.borderSubtle
@@ -579,6 +633,9 @@
         {timeframe.label}
       </button>
     {/each}
+    {#if loadError}
+      <span class="tf-error" data-testid="tf-error">불러오기 실패</span>
+    {/if}
   </div>
 
   <div bind:this={container} class="chart-container">
@@ -671,6 +728,13 @@
   .timeframe-btn.active {
     color: var(--text-primary);
     background-color: var(--surface-raised);
+  }
+
+  .tf-error {
+    align-self: center;
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--color-negative);
   }
 
   .chart-container {

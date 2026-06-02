@@ -1,5 +1,5 @@
 <script lang="ts">
-  import type { StockData } from './types';
+  import type { StockData, FinancialLine } from './types';
 
   let { data, section }: { data: StockData; section?: string } = $props();
 
@@ -19,20 +19,20 @@
     });
   });
 
-  function fmtMarketCap(n: number): string {
+  function fmtMarketCap(n: number | null): string {
     if (n == null) return '—';
     const jo = n / 1e12;
     return jo.toFixed(1) + '조';
   }
 
-  function fmtListingDate(s: string): string {
+  function fmtListingDate(s: string | null): string {
     if (!s) return '—';
     return s.replace(/-/g, '.');
   }
 
   let overview = $derived([
-    { label: '시가총액', value: fmtMarketCap(f?.market_cap) },
-    { label: '상장일', value: fmtListingDate(f?.listing_date) },
+    { label: '시가총액', value: fmtMarketCap(f?.market_cap ?? null) },
+    { label: '상장일', value: fmtListingDate(f?.listing_date ?? null) },
     { label: '대표이사', value: f?.ceo_name ?? '—' },
     { label: '업종', value: f?.industry_name ?? '—' }
   ]);
@@ -40,38 +40,37 @@
   let indList = $derived([
     { label: 'PER (이익 대비)', value: ind?.per, suffix: '배' },
     { label: 'PBR (자산 대비)', value: ind?.pbr, suffix: '배' },
-    { label: 'ROE (자본 효율)', value: ind?.roe, suffix: '%' },
-    { label: 'EPS (주당순이익)', value: ind?.eps, suffix: '원', whole: true },
-    { label: 'BPS (주당순자산)', value: ind?.bps, suffix: '원', whole: true },
-    { label: '배당수익률', value: ind?.dividend_yield, suffix: '%' }
+    { label: 'EPS (주당순이익)', value: ind?.eps, suffix: '원', whole: true }
   ]);
 
-  let finSummaries = $derived([
-    { t: '재무상태', x: f?.balance_sheet_summary },
-    { t: '손익', x: f?.income_statement_summary },
-    { t: '현금흐름', x: f?.cash_flow_summary }
-  ].filter(s => s.x));
-
-  // DUMMY: quarterly revenue (조원) — 수급/재무 시계열은 mock에 없음
-  const quarterlyRevenue: { q: string; v: number }[] = [
-    { q: '25 Q2', v: 67.4 },
-    { q: '25 Q3', v: 71.2 },
-    { q: '25 Q4', v: 75.8 },
-    { q: '26 Q1', v: 79.1 }
+  const FIN_TABS: { key: 'income' | 'balance' | 'cashflow'; label: string }[] = [
+    { key: 'income', label: '손익' },
+    { key: 'balance', label: '재무상태' },
+    { key: 'cashflow', label: '현금흐름' }
   ];
-  const revMax = Math.max(...quarterlyRevenue.map(r => r.v));
+  let activeFin = $state<'income' | 'balance' | 'cashflow'>('income');
 
-  // DUMMY: 수급 순매수 (억원) — 3 actors × 5 days. 한국 관례: 순매수(+)=빨강, 순매도(-)=파랑
-  const flowDays = ['5/26', '5/27', '5/28', '5/29', '5/30'];
-  const flows: { actor: string; values: number[] }[] = [
-    { actor: '외국인', values: [320, -150, 480, 210, -90] },
-    { actor: '기관', values: [-210, 340, -120, 80, 150] },
-    { actor: '개인', values: [-110, -190, -360, -290, -60] }
-  ];
-  const flowMax = Math.max(...flows.flatMap(a => a.values.map(v => Math.abs(v))));
+  // financials are long-format (item × period). Pivot to a table: distinct periods
+  // become columns (newest first), distinct items become rows, value indexed by both.
+  let finTable = $derived.by(() => {
+    const lines: FinancialLine[] = f?.financials?.[activeFin] ?? [];
+    const periods = [...new Set(lines.map(l => l.period))].sort((a, b) => b.localeCompare(a));
+    const items: string[] = [];
+    const byItemPeriod = new Map<string, FinancialLine>();
+    for (const l of lines) {
+      if (!items.includes(l.item)) items.push(l.item);
+      byItemPeriod.set(l.item + '\u0000' + l.period, l);
+    }
+    const rows = items.map(item => ({
+      item,
+      cells: periods.map(p => byItemPeriod.get(item + '\u0000' + p) ?? null)
+    }));
+    return { periods, rows };
+  });
 
-  function fmtFlow(v: number): string {
-    return (v >= 0 ? '+' : '') + v.toLocaleString('ko-KR');
+  function fmtFinValue(line: FinancialLine | null): string {
+    if (line == null || line.value == null) return '—';
+    return Math.round(line.value).toLocaleString('ko-KR');
   }
 </script>
 
@@ -108,59 +107,45 @@
 
   <section id="section-financials" class="info-card" class:flash={highlighted === 'section-financials'}>
     <div class="ic-head">
-      <span class="ic-title">재무</span>
-      <span class="ic-sub">분기 매출 (조원)</span>
+      <span class="ic-title">재무제표</span>
+      <div class="fin-tabs">
+        {#each FIN_TABS as t}
+          <button
+            type="button"
+            class="fin-tab"
+            class:active={activeFin === t.key}
+            onclick={() => activeFin = t.key}
+          >{t.label}</button>
+        {/each}
+      </div>
     </div>
-    <div class="rev-chart">
-      {#each quarterlyRevenue as r}
-        <div class="rev-col">
-          <span class="rev-val tnum">{r.v.toFixed(1)}</span>
-          <div class="rev-bar" style="height: {(r.v / revMax) * 100}%"></div>
-          <span class="rev-q">{r.q}</span>
-        </div>
-      {/each}
-    </div>
-    <div class="fin-summaries">
-      {#each finSummaries as s}
-        <div class="fin-section">
-          <div class="fin-section-title">{s.t}</div>
-          <div class="fin-section-text">{s.x}</div>
-        </div>
-      {/each}
-    </div>
-  </section>
-
-  <section id="section-flow" class="info-card" class:flash={highlighted === 'section-flow'}>
-    <div class="ic-head">
-      <span class="ic-title">수급</span>
-      <span class="ic-sub">최근 5일 순매수 (억원)</span>
-    </div>
-    <div class="flow-list">
-      {#each flows as a}
-        <div class="flow-actor">
-          <span class="flow-name">{a.actor}</span>
-          <div class="flow-bars">
-            {#each a.values as v, di}
-              <div class="flow-col">
-                <div class="flow-track">
-                  <div
-                    class="flow-bar {v >= 0 ? 'price-up' : 'price-down'}"
-                    class:pos={v >= 0}
-                    class:neg={v < 0}
-                    style="height: {(Math.abs(v) / flowMax) * 50}%"
-                  ></div>
-                </div>
-                <span class="flow-day">{flowDays[di]}</span>
-              </div>
+    {#if finTable.rows.length > 0}
+      <div class="fin-table-wrap">
+        <table class="fin-table">
+          <thead>
+            <tr>
+              <th class="ft-item">항목</th>
+              {#each finTable.periods as p}
+                <th class="ft-period tnum">{p}</th>
+              {/each}
+            </tr>
+          </thead>
+          <tbody>
+            {#each finTable.rows as row}
+              <tr>
+                <td class="ft-item">{row.item}</td>
+                {#each row.cells as cell}
+                  <td class="ft-value tnum">{fmtFinValue(cell)}</td>
+                {/each}
+              </tr>
             {/each}
-          </div>
-        </div>
-      {/each}
-    </div>
-    <div class="flow-legend">
-      <span class="leg-item"><span class="leg-dot up"></span>순매수</span>
-      <span class="leg-item"><span class="leg-dot down"></span>순매도</span>
-    </div>
+          </tbody>
+        </table>
+      </div>
+      <div class="fin-unit-note">단위: 백만원 (KRW)</div>
+    {:else}
+      <div class="fin-empty">재무제표 데이터가 아직 없습니다.</div>
+    {/if}
   </section>
 </div>
 
@@ -207,11 +192,6 @@
     color: var(--text-primary);
   }
 
-  .ic-sub {
-    font-size: 11px;
-    color: var(--text-tertiary);
-  }
-
   /* 기업개요 */
   .overview-grid {
     display: grid;
@@ -248,133 +228,80 @@
   .ind-value { font-size: 17px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.02em; }
   .ind-value small { font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-left: 1px; }
 
-  /* 재무 - 분기 매출 차트 */
-  .rev-chart {
+  /* 재무제표 표 */
+  .fin-tabs {
     display: flex;
-    align-items: flex-end;
-    justify-content: space-around;
-    gap: var(--space-3);
-    height: 120px;
-    margin-bottom: var(--space-4);
-    padding-top: var(--space-3);
-  }
-
-  .rev-col {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: flex-end;
-    height: 100%;
     gap: var(--space-1);
   }
-
-  .rev-val { font-size: 11px; font-weight: 600; color: var(--text-secondary); }
-  .rev-bar {
-    width: 60%;
-    max-width: 40px;
-    background: var(--brand);
-    border-radius: var(--radius-sm) var(--radius-sm) 0 0;
-    min-height: 4px;
-  }
-  .rev-q { font-size: 11px; color: var(--text-tertiary); }
-
-  .fin-summaries {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    background: var(--surface-overlay);
-    border-radius: var(--radius-sm);
-    padding: var(--space-3);
-  }
-  .fin-section-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
-  .fin-section-text { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
-
-  /* 수급 */
-  .flow-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-4);
-  }
-
-  .flow-actor {
-    display: flex;
-    align-items: center;
-    gap: var(--space-3);
-  }
-
-  .flow-name {
-    flex: 0 0 48px;
+  .fin-tab {
     font-size: 12px;
     font-weight: 600;
+    color: var(--text-tertiary);
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: var(--radius-sm);
+    padding: 3px 10px;
+    cursor: pointer;
+    font-family: inherit;
+    transition: color var(--dur-hover) var(--ease-out),
+                background var(--dur-hover) var(--ease-out);
+  }
+  .fin-tab:hover { color: var(--text-secondary); background: var(--surface-overlay); }
+  .fin-tab.active {
+    color: var(--text-primary);
+    background: var(--surface-overlay);
+    border-color: var(--border-subtle);
+  }
+
+  .fin-table-wrap {
+    width: 100%;
+    overflow-x: auto;
+  }
+  .fin-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 12px;
+  }
+  .fin-table th,
+  .fin-table td {
+    padding: var(--space-2) var(--space-3);
+    border-bottom: 1px solid var(--border-subtle);
+    white-space: nowrap;
+  }
+  .fin-table thead th {
+    font-weight: 600;
+    color: var(--text-tertiary);
+    text-align: right;
+    background: var(--surface-overlay);
+  }
+  .fin-table th.ft-item,
+  .fin-table td.ft-item {
+    text-align: left;
+    position: sticky;
+    left: 0;
+    background: var(--surface-body);
     color: var(--text-secondary);
   }
-
-  .flow-bars {
-    flex: 1;
-    display: flex;
-    justify-content: space-around;
-    gap: var(--space-2);
+  .fin-table thead th.ft-item {
+    background: var(--surface-overlay);
   }
-
-  .flow-col {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    gap: var(--space-1);
+  .fin-table td.ft-value {
+    text-align: right;
+    color: var(--text-primary);
+    font-weight: 500;
   }
+  .fin-table tbody tr:hover td { background: var(--surface-overlay); }
 
-  .flow-track {
-    position: relative;
-    width: 100%;
-    height: 56px;
-    display: flex;
-    flex-direction: column;
-    justify-content: center;
-  }
-
-  .flow-track::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    right: 0;
-    top: 50%;
-    height: 1px;
-    background: var(--border-subtle);
-  }
-
-  .flow-bar {
-    position: absolute;
-    left: 50%;
-    transform: translateX(-50%);
-    width: 60%;
-    max-width: 22px;
-    min-height: 3px;
-    border-radius: 2px;
-  }
-  .flow-bar.pos { bottom: 50%; }
-  .flow-bar.neg { top: 50%; }
-  .flow-bar.price-up { background: var(--color-positive); }
-  .flow-bar.price-down { background: var(--color-negative); }
-
-  .flow-day { font-size: 10px; color: var(--text-tertiary); }
-
-  .flow-legend {
-    display: flex;
-    gap: var(--space-4);
-    margin-top: var(--space-4);
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--border-subtle);
-  }
-  .leg-item {
-    display: flex;
-    align-items: center;
-    gap: var(--space-2);
+  .fin-unit-note {
     font-size: 11px;
     color: var(--text-tertiary);
+    margin-top: var(--space-2);
+    text-align: right;
   }
-  .leg-dot { width: 8px; height: 8px; border-radius: 2px; }
-  .leg-dot.up { background: var(--color-positive); }
-  .leg-dot.down { background: var(--color-negative); }
+  .fin-empty {
+    font-size: 12px;
+    color: var(--text-tertiary);
+    padding: var(--space-4) 0;
+    text-align: center;
+  }
 </style>
