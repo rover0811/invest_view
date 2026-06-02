@@ -1,0 +1,32 @@
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: stock-ticks
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: stock-alerts
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: stock-patterns
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1

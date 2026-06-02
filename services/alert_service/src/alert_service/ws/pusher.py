@@ -2,7 +2,7 @@
 
 Flow:
   1. Upsert alert_events (idempotent on alert_event_id).
-  2. If alert is a duplicate (already processed), early return.
+  2. If alert is a duplicate, resume notification fanout.
   3. Find watchlist users for this symbol with notifications enabled.
   4. Bulk-create PENDING notifications.
   5. For each notification:
@@ -29,6 +29,8 @@ from alert_service.ws.registry import ConnectionRegistry
 
 logger = logging.getLogger(__name__)
 
+_SENTINEL_ALERT_EVENT_ID = uuid.UUID("00000000-0000-0000-0000-000000000000")
+
 
 def _strip_tz(dt: Any) -> Any:
     if isinstance(dt, datetime) and dt.tzinfo is not None:
@@ -50,14 +52,19 @@ class AlertPusher:
         watchlist_repo: WatchlistRepository,
         notification_repo: NotificationRepository,
         registry: ConnectionRegistry,
+        fanout_fail_after_alert: bool = False,
     ) -> None:
         self._alerts = alert_repo
         self._watchlist = watchlist_repo
         self._notifications = notification_repo
         self._registry = registry
+        self._fanout_fail_after_alert = fanout_fail_after_alert
 
     async def handle(self, event: dict[str, Any]) -> None:
         alert_event_id = self._coerce_uuid(event["alert_event_id"])
+        # Decision D: reserved nil UUID is an always-on fatal replay seam.
+        if alert_event_id == _SENTINEL_ALERT_EVENT_ID:
+            raise RuntimeError("SENTINEL_FATAL: nil alert_event_id")
         symbol = event["symbol"]
 
         record = {
@@ -75,18 +82,19 @@ class AlertPusher:
         }
         inserted = await self._alerts.upsert(record)
         if not inserted:
-            logger.info("alert %s already processed; skipping fanout", alert_event_id)
-            return
+            logger.info("alert %s already exists; resuming fanout", alert_event_id)
+
+        if self._fanout_fail_after_alert:
+            raise RuntimeError("FANOUT_FAIL_AFTER_ALERT seam")
 
         user_ids = await self._watchlist.find_users_for_symbol(symbol)
         if not user_ids:
             logger.info("alert %s has no watchers for symbol=%s", alert_event_id, symbol)
             return
 
-        notification_ids = await self._notifications.bulk_create_pending(
+        pairs = await self._notifications.bulk_create_pending(
             user_ids, alert_event_id, symbol
         )
-        pairs = list(zip(user_ids[: len(notification_ids)], notification_ids))
 
         payload_base = {
             "type": "alert",

@@ -5,7 +5,8 @@ Usage:
     uv run --project services/kis_ingestion python scripts/fake_tick_generator.py \
         --symbols 005930,000660 --rate 10 --duration 30
 
-Requires: docker-compose.dev.yml Kafka running on localhost:9092
+In-cluster QA: `make inject-tick` runs this as a Job against the Strimzi bootstrap.
+For host-local runs, port-forward Kafka/SR and pass --broker/--schema-registry.
 """
 
 import argparse
@@ -54,7 +55,10 @@ def make_tick(symbol: str, base_price: int, seq: int) -> ParsedTick:
         change_sign="2" if change >= 0 else "5",
         change=abs(change),
         change_rate=change_rate,
-        vwap=Decimal(str(price - random.randint(0, 100))),
+        # stock-ticks.avsc caps vwap at decimal(precision=12, scale=8) => integer part
+        # <= 4 digits; a raw KRW price (5-6 digits) overflows Avro and fails the Flink
+        # decoder, so scale it into range. quantize pins scale at 8.
+        vwap=(Decimal(price - random.randint(0, 100)) / Decimal(100)).quantize(Decimal("0.00000001")),
         open=base_price,
         high=base_price + random.randint(0, 1000),
         low=base_price - random.randint(0, 1000),
@@ -62,7 +66,7 @@ def make_tick(symbol: str, base_price: int, seq: int) -> ParsedTick:
         bid_price_1=price - random.randint(50, 200),
         trade_volume=random.randint(1, 5000),
         cumulative_volume=random.randint(100000, 5000000),
-        cumulative_amount=random.randint(1000000000, 50000000000),
+        cumulative_amount=random.randint(10_000_000_000, 5_000_000_000_000),
         sell_count=random.randint(1000, 50000),
         buy_count=random.randint(1000, 50000),
         net_buy_count=random.randint(-10000, 10000),
@@ -103,6 +107,7 @@ def main() -> None:
     parser.add_argument("--rate", type=float, default=10, help="Ticks per second (across all symbols)")
     parser.add_argument("--duration", type=int, default=30, help="Seconds to run (0=infinite)")
     parser.add_argument("--broker", default="localhost:9092", help="Kafka bootstrap servers")
+    parser.add_argument("--schema-registry", default="http://localhost:8081", help="Schema Registry URL")
     parser.add_argument("--topic", default="stock-ticks", help="Kafka topic")
     args = parser.parse_args()
 
@@ -110,12 +115,13 @@ def main() -> None:
     interval = 1.0 / args.rate if args.rate > 0 else 0.1
 
     logger.info("Starting fake tick generator: symbols=%s rate=%.1f/s duration=%ss", symbols, args.rate, args.duration)
-    logger.info("Kafka: broker=%s topic=%s", args.broker, args.topic)
+    logger.info("Kafka: broker=%s topic=%s schema_registry=%s", args.broker, args.topic, args.schema_registry)
 
     producer = StockTickProducer(
         bootstrap_servers=args.broker,
         topic=args.topic,
         schema_path=SCHEMA_PATH,
+        schema_registry_url=args.schema_registry,
     )
 
     session_id = str(uuid4())

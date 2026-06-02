@@ -1,0 +1,50 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kis-ingestion
+  labels:
+    app: kis-ingestion
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kis-ingestion
+  template:
+    metadata:
+      labels:
+        app: kis-ingestion
+    spec:
+      containers:
+        - name: kis-ingestion
+          image: kis_ingestion:qa
+          imagePullPolicy: Never
+          env:
+            - name: KIS_KAFKA_ENABLED
+              value: "true"
+            - name: KIS_KAFKA_BOOTSTRAP_SERVERS
+              value: "invest-kafka-kafka-bootstrap.kafka.svc:9092"
+            - name: KIS_SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
+            - name: KIS_SUBSCRIPTION_CAP
+              value: "40"
+            - name: KIS_KAFKA_TOPIC
+              value: "stock-ticks"
+            - name: KIS_WATCH_SYMBOLS
+              value: '["005930","000660","005380","035420","035720","051910","006400","068270","105560","055550","000270","012330","005490","028260","066570","015760","032830","003550","017670","096770","034730","018260","009150","011200","086790","033780","010130","259960","316140","024110","138040","030200","090430","010950","011170","047050","002790","161390","078930","071050"]'
+            - name: KIS_APP_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: kis-credentials
+                  key: KIS_APP_KEY
+            - name: KIS_APP_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: kis-credentials
+                  key: KIS_APP_SECRET
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

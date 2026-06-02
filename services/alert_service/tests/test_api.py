@@ -33,8 +33,10 @@ class FakeContainer:
         self.alert_consumer = MagicMock()
         self.alert_consumer.start = AsyncMock()
         self.alert_consumer.stop = MagicMock()
+        self.alert_consumer.is_alive.return_value = True
         self.engine = MagicMock()
         self.engine.dispose = AsyncMock()
+        self.session_factory = MagicMock()
 
 
 def _token(user_id: uuid.UUID | None = None) -> str:
@@ -57,6 +59,15 @@ def test_health_returns_200(client):
     r = client.get("/health")
     assert r.status_code == 200
     assert r.json() == {"status": "ok"}
+
+
+def test_health_returns_503_when_consumer_is_dead(client, container):
+    container.alert_consumer.is_alive.return_value = False
+
+    r = client.get("/health")
+
+    assert r.status_code == 503
+    assert r.json() == {"status": "unavailable"}
 
 
 def test_watchlist_get_requires_auth(client):

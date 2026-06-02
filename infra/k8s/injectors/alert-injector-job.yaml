@@ -1,0 +1,46 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: alert-injector
+  namespace: default
+  labels:
+    app: alert-injector
+    role: qa-synthetic-injector
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: alert-injector
+        role: qa-synthetic-injector
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: alert-injector
+          image: alert_service:qa
+          imagePullPolicy: Never
+          # __ALERT_ID__ is substituted by `make inject-alert`; applying this file raw injects a literal id.
+          command:
+            - python
+            - /app/scripts/fake_alert_generator.py
+            - --broker
+            - invest-kafka-kafka-bootstrap.kafka.svc:9092
+            - --schema-registry
+            - http://schema-registry:8081
+            - --alert-event-id
+            - __ALERT_ID__
+            - --symbol
+            - "005930"
+            - --rule-name
+            - qa-synthetic
+          volumeMounts:
+            # subPath mounts the script as a regular file (no ConfigMap symlink),
+            # so Path(__file__).resolve().parent.parent stays /app and the avsc resolves.
+            - name: injector-scripts
+              mountPath: /app/scripts/fake_alert_generator.py
+              subPath: fake_alert_generator.py
+      volumes:
+        - name: injector-scripts
+          configMap:
+            name: qa-injector-scripts

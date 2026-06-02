@@ -21,11 +21,12 @@ class NotificationRepository:
         user_ids: list[uuid.UUID],
         alert_event_id: uuid.UUID,
         symbol: str,
-    ) -> list[uuid.UUID]:
+    ) -> list[tuple[uuid.UUID, uuid.UUID]]:
         """Insert one PENDING notification per user_id for the given alert.
 
         On (user_id, alert_event_id) conflict, the duplicate is skipped (idempotent
-        replay safety). Returns the notification_ids of the newly inserted rows.
+        replay safety). Returns all PENDING (user_id, notification_id) pairs for
+        the requested users, including pre-existing PENDING rows.
         """
         if not user_ids:
             return []
@@ -46,12 +47,17 @@ class NotificationRepository:
                 .on_conflict_do_nothing(
                     index_elements=["user_id", "alert_event_id"]
                 )
-                .returning(NotificationEvent.notification_id)
             )
-            result = await session.execute(stmt)
-            inserted = [row[0] for row in result.all()]
+            await session.execute(stmt)
             await session.commit()
-            return inserted
+            result = await session.execute(
+                select(NotificationEvent.user_id, NotificationEvent.notification_id)
+                .where(NotificationEvent.alert_event_id == alert_event_id)
+                .where(NotificationEvent.user_id.in_(user_ids))
+                .where(NotificationEvent.delivery_status == "PENDING")
+            )
+            by_user = {user_id: notification_id for user_id, notification_id in result.all()}
+            return [(user_id, by_user[user_id]) for user_id in user_ids if user_id in by_user]
 
     async def mark_sent(self, notification_id: uuid.UUID, delivered_at: datetime) -> None:
         async with self._sf() as session:

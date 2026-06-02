@@ -61,13 +61,43 @@ class AlertConsumer:
         self._poll_task: asyncio.Task[None] | None = None
         self._dispatch_task: asyncio.Task[None] | None = None
         self._loop: asyncio.AbstractEventLoop | None = None
+        self._fatal_error: BaseException | None = None
+        self._dead = asyncio.Event()
 
     async def start(self) -> None:
         self._consumer.subscribe([self._topic])
         self._loop = asyncio.get_running_loop()
         self._poll_task = asyncio.create_task(self._run_poll_loop(), name="alert-consumer-poll")
         self._dispatch_task = asyncio.create_task(self._run_dispatch_loop(), name="alert-consumer-dispatch")
+        self._poll_task.add_done_callback(self._on_task_done)
+        self._dispatch_task.add_done_callback(self._on_task_done)
         logger.info("alert consumer started topic=%s group=%s", self._topic, self._consumer.list_topics(timeout=2.0))
+
+    def _on_task_done(self, task: asyncio.Task[None]) -> None:
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is None:
+            return
+        self._fatal_error = error
+        logger.error("alert consumer task failed: %s", task.get_name(), exc_info=(type(error), error, error.__traceback__))
+        self._dead.set()
+
+    def is_alive(self) -> bool:
+        return (
+            self._fatal_error is None
+            and self._poll_task is not None
+            and self._dispatch_task is not None
+            and not self._poll_task.done()
+            and not self._dispatch_task.done()
+        )
+
+    async def wait_dead(self) -> None:
+        await self._dead.wait()
+
+    @property
+    def fatal_error(self) -> BaseException | None:
+        return self._fatal_error
 
     async def _run_poll_loop(self) -> None:
         assert self._loop is not None
@@ -132,6 +162,7 @@ class AlertConsumer:
                     msg.offset(),
                     exc,
                 )
+                raise
 
     def stop(self) -> None:
         self._stop_event.set()

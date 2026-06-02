@@ -43,6 +43,7 @@ class Container:
             watchlist_repo=self.watchlist_repo,
             notification_repo=self.notification_repo,
             registry=self.connection_registry,
+            fanout_fail_after_alert=config.fanout_fail_after_alert,
         )
 
         self.alert_consumer = AlertConsumer(

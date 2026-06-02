@@ -1,0 +1,60 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: alert-service
+  labels:
+    app: alert-service
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: alert-service
+  template:
+    metadata:
+      labels:
+        app: alert-service
+    spec:
+      initContainers:
+        - name: alembic-migrate
+          image: alert_service:qa
+          imagePullPolicy: Never
+          command: ["/bin/sh", "-c", "cd /app/services/alert_service && alembic upgrade head"]
+          env:
+            - name: ALERT_SERVICE_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: alert-service-secrets
+                  key: ALERT_SERVICE_DATABASE_URL
+      containers:
+        - name: alert-service
+          image: alert_service:qa
+          imagePullPolicy: Never
+          command: ["python", "-m", "alert_service"]
+          envFrom:
+            - configMapRef:
+                name: alert-service-config
+            - secretRef:
+                name: alert-service-secrets
+          ports:
+            - containerPort: 8000
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 3
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            requests:
+              cpu: "100m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"

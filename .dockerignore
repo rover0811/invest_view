@@ -1,0 +1,65 @@
+# .dockerignore for invest_view
+# Keep build context small and prevent secrets/artifacts from being baked into images.
+
+# Git
+.git/
+.gitignore
+
+# Python artifacts
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.pyd
+**/.pytest_cache/
+**/.ruff_cache/
+**/.mypy_cache/
+**/.ipynb_checkpoints/
+
+# Virtual environments
+**/.venv/
+env/
+venv/
+ENV/
+
+# Secrets and local config
+**/.env
+**/.envrc
+local_settings.py
+.pypirc
+.streamlit/secrets.toml
+
+# IDEs
+.idea/
+.vscode/
+
+# Build artifacts and temporary files
+**/target/
+services/stream_detection_java/target/
+build/
+dist/
+*.egg-info/
+.eggs/
+.cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+*.log
+
+# Project specific
+.sisyphus/
+docs/
+/site
+
+# Do NOT exclude:
+# uv.lock
+# pyproject.toml
+# schemas/
+# src/
+# AI/browser/worktree artifacts
+.playwright-mcp/
+.worktrees/
+.opencode/
+/*.png
+

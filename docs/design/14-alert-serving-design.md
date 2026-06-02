@@ -48,11 +48,11 @@ Alert Serving의 책임은 **Flink가 생성한 `stock-alerts`를 안정적으�
 ## 1. Why separate this file
 
 - `alert_service`는 실시간 사용자 접점(WebSocket)과 REST API를 동시에 제공하는 **User-facing Realtime Layer**다.
-- 13번(Flink Stream)은 데이터 가공에 집중하고, 15번(Batch Enrichment)은 비실시간 데이터 결합에 집중하므로, **사용자 세션 관리와 알림 전달 상태(Delivery Status)를 책임지는 서빙 레이어**를 별도 설계로 분리한다.
+- 16번(Flink Stream)은 데이터 가공에 집중하고, 15번(Batch Enrichment)은 비실시간 데이터 결합에 집중하므로, **사용자 세션 관리와 알림 전달 상태(Delivery Status)를 책임지는 서빙 레이어**를 별도 설계로 분리한다.
 
 ## 2. External constraints
 
-- **Kafka stock-alerts contract**: 13번(Flink)이 발행하는 `stock-alerts` 토픽의 스키마를 준수해야 한다.
+- **Kafka stock-alerts contract**: 16번(Flink)이 발행하는 `stock-alerts` 토픽의 스키마를 준수해야 한다.
 - **Single PostgreSQL**: 모든 영속 데이터는 단일 PostgreSQL의 `alert_service` 스키마에 저장한다.
 - **Single Instance v1**: 다중 인스턴스 환경에서의 WebSocket 세션 공유(Redis 등)를 고려하지 않는다.
 - **MSA SRP**: Enrichment 데이터와의 결합은 이벤트를 통한 느슨한 결합을 지향하며, 서빙 레이어는 전달(Delivery)에 집중한다.
@@ -192,6 +192,9 @@ sequenceDiagram
 | `DELETE` | `/api/watchlist/{symbol}` | 관심 종목 삭제 |
 | `PATCH` | `/api/watchlist/{symbol}` | 알림 설정 수정 (`{"notifications_enabled": bool}`) |
 | `GET` | `/api/notifications` | 알림 이력 조회 (`since`, `limit` 필터) |
+| `GET` | `/api/candles/{symbol}` | 5분봉 OHLC 조회 (`limit` 필터, `silver.symbol_5m_metrics` 기반) |
+| `GET` | `/api/snapshot/{symbol}` | 종목 현재 상태 스냅샷 조회 (`serving.symbol_snapshot` 기반) |
+| `GET` | `/api/timeline/{symbol}` | 알림+패턴 통합 타임라인 조회 (`limit` 필터, `serving.symbol_signal_timeline` 기반) |
 | `GET` | `/health` | 헬스체크 (DB 연결 확인 포함) |
 
 ### 6-2. WebSocket protocol
@@ -398,7 +401,17 @@ erDiagram
 *Unique: `(user_id, alert_event_id)`*
 *Indexes: `(user_id, created_at DESC)`, `(alert_event_id)`*
 
-## 9. Future Scaling
+## 9. 신뢰성 / 장애 복구
+
+- **Consumer supervision**: `AlertConsumer`가 `is_alive()`, `wait_dead()`, `fatal_error` API를 통해 백그라운드 컨슈머 태스크의 사망을 감지한다. (`kafka/consumer.py`)
+- **Fail-fast dispatch**: 메시지 핸들러(`on_message`) 실패 시 offset을 커밋하지 않고 예외를 re-raise하여, 메시지 유실을 방지하고 재시작 시 해당 지점부터 재처리를 보장한다. (`kafka/consumer.py`)
+- **Liveness 반영**: 컨슈머 태스크가 죽으면 `__main__.py`의 supervisor가 이를 감지해 uvicorn 서버를 종료(`should_exit=True`)하고 비정상(non-zero) exit 코드로 종료한다. 이는 k8s/docker의 재시작 정책을 트리거한다. 또한 `/health` 엔드포인트가 컨슈머 liveness 상태를 반영한다. (`__main__.py`, `api/routes/health.py`)
+- **Resumable fanout**: `bulk_create_pending`이 이미 존재하는 PENDING 상태의 행만 반환(SENT/FAILED 제외)함으로써, 중복 알림 수신 시 미완료된 fanout 작업만 안전하게 재개한다. (`repository/notifications.py`, `ws/pusher.py`)
+- **Poison-pill 주의 + 복구 절차**: nil UUID sentinel(`00000000-0000-0000-0000-000000000000`) 등 영구 실패 메시지는 offset 미커밋으로 인해 무한 재시작 루프를 유발할 수 있다. 복구 시에는 컨슈머를 일시 중지(scale=0)하고 `kafka-consumer-groups --reset-offsets --to-latest` 명령으로 오프셋을 강제 이동시킨 후 재기동한다. (운영 절차)
+
+(출처: Plan 21)
+
+## 10. Future Scaling
 
 | Option | Pros | Cons |
 | --- | --- | --- |
@@ -408,7 +421,7 @@ erDiagram
 
 *v1은 단일 인스턴스로 운영하며, 향후 트래픽 증가 시 위 옵션 중 하나를 선택하여 확장한다.*
 
-## 10. Resolved design decisions
+## 11. Resolved design decisions
 
 | # | 질문 | 결정 |
 | --- | --- | --- |
@@ -428,19 +441,19 @@ erDiagram
 | Q14 | 알림 중복 방지 | `(user_id, alert_event_id)` Unique 제약으로 멱등성 보장 |
 | Q15 | 하트비트 주기 | 25초 주기로 JSON Ping 전송 |
 
-## 11. Remaining open questions
+## 12. Remaining open questions
 
 - **Sticky Session Threshold**: 어느 정도의 동시 접속자 수에서 다중 인스턴스 전환이 필요한가?
 - **JWT Issuer Service**: 실제 운영 환경에서 토큰을 발급할 인증 서비스의 구체적 계획
 - **Agent Read API**: 에이전트가 알림 맥락을 읽기 위한 전용 API의 필요성 및 형태
 
-## 12. v1 implementation scope
+## 13. v1 implementation scope
 
-- **Current**: `stock-alerts` 소비, DB 저장, WebSocket 푸시, Watchlist/Notification REST API, JWT 검증
+- **Current**: `stock-alerts` 소비, DB 저장, WebSocket 푸시, Watchlist/Notification REST API, JWT 검증; 가격 서빙 read API(`/api/candles`, `/api/snapshot`, `/api/timeline`) — silver/serving/gold 기반 read-only
 - **Next Scoped**: `enrichment-events` 연동, 알림 읽음 처리, 다중 인스턴스 확장
 - **Out of Scope**: JWT 발급, 관리자 UI, 상세 메트릭 대시보드
 
-## 13. Immediate next split after Alert Serving
+## 14. Immediate next split after Alert Serving
 
 Alert Serving 다음으로는 아래 순서로 분리하는 것이 자연스럽다.
 

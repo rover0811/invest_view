@@ -1,0 +1,70 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: stream-detection
+spec:
+  image: stream-detection-java:rules3
+  imagePullPolicy: Never
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "1"
+    state.checkpoints.dir: file:///opt/flink/checkpoints
+    state.savepoints.dir: file:///opt/flink/checkpoints/savepoints
+    high-availability: org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory
+    high-availability.storageDir: file:///opt/flink/checkpoints/ha
+    execution.checkpointing.interval: "60000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  job:
+    jarURI: local:///opt/flink/usrlib/stream-detection.jar
+    entryClass: com.invest_view.stream_detection.StreamDetectionJob
+    parallelism: 1
+    upgradeMode: last-state
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "invest-kafka-kafka-bootstrap.kafka.svc:9092"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
+            - name: PRICE_ALERT_THRESHOLD
+              value: "0.03"
+            - name: VI_PROXIMITY_THRESHOLD
+              value: "0.01"
+            - name: WINDOW_SECONDS
+              value: "300"
+            - name: SLIDE_SECONDS
+              value: "60"
+            - name: RSI_PERIOD
+              value: "14"
+            - name: RSI_OVERSOLD
+              value: "30"
+            - name: RSI_OVERBOUGHT
+              value: "70"
+            - name: MA_SHORT_PERIOD
+              value: "5"
+            - name: MA_LONG_PERIOD
+              value: "20"
+            - name: MACD_FAST_PERIOD
+              value: "12"
+            - name: MACD_SLOW_PERIOD
+              value: "26"
+            - name: MACD_SIGNAL_PERIOD
+              value: "9"
+          volumeMounts:
+            - name: checkpoint-storage
+              mountPath: /opt/flink/checkpoints
+      volumes:
+        - name: checkpoint-storage
+          persistentVolumeClaim:
+            claimName: flink-checkpoint-storage

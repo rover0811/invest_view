@@ -109,3 +109,31 @@ async def test_service_run_handles_publish_error_gracefully():
         
         assert mock_producer.publish.call_count == 2
         mock_logger.exception.assert_called()
+
+
+@pytest.mark.asyncio
+async def test_service_run_propagates_fatal_error_after_shutdown():
+    fatal_error = RuntimeError("Failed to reconnect KIS WebSocket")
+    mock_cm = MockAsyncIterator([])
+    mock_cm.connect.side_effect = fatal_error
+    mock_producer = MagicMock()
+    mock_producer.flush = MagicMock(return_value=0)
+    mock_http = AsyncMock()
+    mock_http.aclose = AsyncMock()
+    config = make_mock_config()
+
+    service = IngestionService(
+        config=config,
+        connection_manager=mock_cm,
+        http_client=mock_http,
+        producer=mock_producer,
+    )
+
+    with patch("kis_ingestion.service.logger") as mock_logger:
+        with pytest.raises(RuntimeError, match="Failed to reconnect KIS WebSocket"):
+            await service.run()
+
+        mock_logger.exception.assert_called_once_with("KIS ingestion service failed")
+        mock_cm.stop.assert_awaited_once()
+        mock_producer.flush.assert_called_once_with(30.0)
+        mock_http.aclose.assert_awaited_once()

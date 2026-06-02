@@ -1,0 +1,45 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: tick-injector
+  namespace: default
+  labels:
+    app: tick-injector
+    role: qa-synthetic-injector
+spec:
+  backoffLimit: 0
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        app: tick-injector
+        role: qa-synthetic-injector
+    spec:
+      restartPolicy: Never
+      containers:
+        - name: tick-injector
+          image: kis_ingestion:qa
+          imagePullPolicy: Never
+          command:
+            - python
+            - /app/scripts/fake_tick_generator.py
+            - --broker
+            - invest-kafka-kafka-bootstrap.kafka.svc:9092
+            - --schema-registry
+            - http://schema-registry:8081
+            - --symbols
+            - "005930"
+            - --rate
+            - "5"
+            - --duration
+            - "1"
+          volumeMounts:
+            # subPath mounts the script as a regular file (no ConfigMap symlink),
+            # so Path(__file__).resolve().parent.parent stays /app and the avsc + src resolve.
+            - name: injector-scripts
+              mountPath: /app/scripts/fake_tick_generator.py
+              subPath: fake_tick_generator.py
+      volumes:
+        - name: injector-scripts
+          configMap:
+            name: qa-injector-scripts
