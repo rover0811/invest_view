@@ -1,0 +1,8 @@
+[
+  { "code": "005930", "name": "삼성전자", "price": 72000, "change_rate": 0.0271, "market": "KOSPI" },
+  { "code": "000660", "name": "SK하이닉스", "price": 185000, "change_rate": -0.012, "market": "KOSPI" },
+  { "code": "035420", "name": "NAVER", "price": 192000, "change_rate": 0.005, "market": "KOSPI" },
+  { "code": "035720", "name": "카카오", "price": 48000, "change_rate": -0.023, "market": "KOSPI" },
+  { "code": "005380", "name": "현대차", "price": 245000, "change_rate": 0.018, "market": "KOSPI" },
+  { "code": "373220", "name": "LG에너지솔루션", "price": 385000, "change_rate": -0.008, "market": "KOSPI" }
+]
