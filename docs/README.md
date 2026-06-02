@@ -16,7 +16,10 @@
 4. [Alert Serving 설계](design/14-alert-serving-design.md)
    - alert-service 범위, REST/WebSocket API, DB 스키마, 신뢰성 설계
 
-5. [Stream Detection 설계](design/16-stream-detection-design.md)
+5. [Batch Enrichment 설계](design/15-batch-enrichment-design.md)
+   - 배치 enrichment 경로, Outbox 패턴, Debezium CDC, enrichment-events 토픽, bridge consumer
+
+6. [Stream Detection 설계](design/16-stream-detection-design.md)
    - Flink 파이프라인, 알림 룰 3종, 패턴 룰 3종, UUID5 멱등성, 배포/운영
 
 ## 다이어그램
