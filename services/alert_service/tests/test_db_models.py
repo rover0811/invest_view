@@ -1,4 +1,4 @@
-from alert_service.db.models import Base, User, WatchlistItem, AlertEvent, NotificationEvent
+from alert_service.db.models import AlertEvent, Base, NotificationEvent, WatchlistItem
 
 
 def test_metadata_contains_all_tables():

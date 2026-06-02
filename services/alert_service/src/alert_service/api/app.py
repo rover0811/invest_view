@@ -14,7 +14,17 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from alert_service.api.heartbeat import heartbeat_loop
-from alert_service.api.routes import candles, health, notifications, watchlist, ws
+from alert_service.api.routes import (
+    candles,
+    consensus,
+    health,
+    notifications,
+    stock_info,
+    stocks,
+    tick_detail,
+    watchlist,
+    ws,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -65,4 +75,8 @@ def create_app(container: Any) -> FastAPI:
     app.include_router(notifications.router)
     app.include_router(ws.router)
     app.include_router(candles.router)
+    app.include_router(stock_info.router)
+    app.include_router(consensus.router)
+    app.include_router(tick_detail.router)
+    app.include_router(stocks.router)
     return app
