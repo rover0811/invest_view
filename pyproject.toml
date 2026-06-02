@@ -13,7 +13,6 @@ dependencies = [
 [tool.uv.workspace]
 members = ["services/*"]
 exclude = [
-    "services/batch_enrichment",
     "services/event_pattern_persistence",
     "services/stream_detection",
     "services/stream_detection_java",
