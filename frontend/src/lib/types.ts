@@ -43,26 +43,38 @@ export interface TickDetail {
   prev_day_volume_rate: number;
 }
 
+// Backend (/api/stock-info) provides only eps/per/pbr; psr/bps/roe/dividend_yield
+// are not computed. Any value is null when the source financial_metrics rows are missing.
 export interface Indicators {
-  per: number;
-  pbr: number;
-  psr: number;
-  eps: number;
-  bps: number;
-  roe: number;
-  dividend_yield: number;
+  eps: number | null;
+  per: number | null;
+  pbr: number | null;
 }
 
+export interface FinancialLine {
+  item: string;
+  period: string;
+  value: number | null;
+  unit: string | null;
+}
+
+export interface Financials {
+  income: FinancialLine[];
+  balance: FinancialLine[];
+  cashflow: FinancialLine[];
+}
+
+// /api/stock-info `meta` + `financials`. No summary-text fields (the mock's
+// *_summary fields do not exist in the backend).
 export interface Fundamentals {
   stock_name: string;
   market: string;
   industry_name: string;
-  market_cap: number;
-  ceo_name: string;
-  listing_date: string;
-  balance_sheet_summary: string;
-  income_statement_summary: string;
-  cash_flow_summary: string;
+  market_cap: number | null;
+  ceo_name: string | null;
+  listing_date: string | null;
+  financials: Financials;
+  coverage_note: string;
 }
 
 export interface Consensus {
@@ -71,7 +83,7 @@ export interface Consensus {
   title: string;
   target_price: number;
   investment_opinion: 'Buy' | 'Hold' | 'Sell';
-  summary: string;
+  author: string | null;
 }
 
 export interface StockData {
@@ -83,7 +95,7 @@ export interface StockData {
   candles: Candle[];
   snapshot: Snapshot;
   timeline: TimelineEvent[];
-  tickDetail: TickDetail;
+  tickDetail: TickDetail | null;
   fundamentals: Fundamentals;
   consensus: Consensus[];
   indicators: Indicators;
@@ -95,11 +107,4 @@ export interface StockListItem {
   price: number;
   change_rate: number;
   market: string;
-}
-
-export interface IndexItem {
-  name: string;
-  value: number;
-  change_rate: number;
-  sparkline: number[];
 }

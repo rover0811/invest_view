@@ -1,17 +1,8 @@
 <script lang="ts">
   import type { StockData } from './types';
+  import { mergeTimelineEvents, eventKey, type Category, type EventItem } from './events';
 
   let { data }: { data: StockData } = $props();
-
-  type Category = 'alert' | 'pattern' | 'disclosure' | 'earnings' | 'dividend';
-
-  interface EventItem {
-    time: number;
-    category: Category;
-    event_type: string;
-    triggered_at: string;
-    trigger_values: Record<string, string>;
-  }
 
   // chart-panel.html:669-678 EVENT_LABELS + 더미 라벨
   const EVENT_LABELS: Record<string, string> = {
@@ -69,20 +60,7 @@
     }
   ];
 
-  // 실시간 timeline(alert/pattern) + 더미(공시/실적/배당락) 병합 → 최신순 정렬
-  let events = $derived.by<EventItem[]>(() => {
-    const real: EventItem[] = (data?.timeline ?? []).map((e) => ({
-      time: e.time,
-      category: e.event_kind as Category,
-      event_type: e.event_type,
-      triggered_at: e.triggered_at,
-      trigger_values: e.trigger_values ?? {}
-    }));
-    // triggered_at(표시 시각) 기준 최신순 — mock의 time epoch과 라벨 연도가
-    // 어긋나 있어, 화면에 보이는 날짜와 정렬을 일치시키려 triggered_at으로 정렬
-    const key = (e: EventItem) => Date.parse(e.triggered_at) || e.time * 1000;
-    return [...real, ...DUMMY_EVENTS].sort((a, b) => key(b) - key(a));
-  });
+  let events = $derived(mergeTimelineEvents(data?.timeline ?? [], DUMMY_EVENTS));
 
   function labelOf(type: string): string {
     return EVENT_LABELS[type] ?? type;
@@ -106,7 +84,7 @@
   </div>
 
   <ol class="timeline" style="--rail: var(--border-strong)">
-    {#each events as ev (ev.time + ev.event_type)}
+    {#each events as ev, i (eventKey(ev, i))}
       {@const meta = CATEGORY_META[ev.category]}
       {@const dt = fmtDateTime(ev.triggered_at)}
       <li class="tl-item">

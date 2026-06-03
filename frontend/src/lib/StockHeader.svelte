@@ -5,7 +5,7 @@
   let { meta, snapshot, tickDetail }: { 
     meta: { symbol: string; stock_name: string }; 
     snapshot: Snapshot;
-    tickDetail: TickDetail;
+    tickDetail: TickDetail | null;
   } = $props();
 
   const up = $derived((snapshot.change ?? 0) >= 0);
@@ -13,7 +13,7 @@
   const sign = $derived(up ? '+' : '');
   
   const priceText = $derived(fmtPrice(snapshot.last_price ?? 0));
-  const changeText = $derived(`${sign}${fmtPrice(snapshot.change ?? 0)}  (${pct((snapshot.change_rate ?? 0) * 100)})`);
+  const changeText = $derived(`${sign}${fmtPrice(snapshot.change ?? 0)}  (${pct(snapshot.change_rate ?? 0)})`);
 </script>
 
 <div class="stock-header">

@@ -146,7 +146,9 @@
             <span class="ri-date tnum">{r.report_date}</span>
           </div>
           <h4 class="ri-title">{r.title}</h4>
-          <p class="ri-summary">{r.summary}</p>
+          {#if r.author}
+            <p class="ri-author">{r.author}</p>
+          {/if}
           <div class="ri-foot">
             <span class="ri-opinion {optClass(r.investment_opinion)}">
               {optLabel(r.investment_opinion)}
@@ -168,7 +170,10 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
-    margin-top: var(--space-3);
+    padding: var(--space-3) 0;
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
   }
 
   .rt-card {
@@ -331,10 +336,10 @@
     margin: 0 0 var(--space-2);
     line-height: 1.4;
   }
-  .ri-summary {
+  .ri-author {
     font-size: 12px;
     line-height: 1.6;
-    color: var(--text-secondary);
+    color: var(--text-tertiary);
     margin: 0 0 var(--space-3);
   }
   .ri-foot {

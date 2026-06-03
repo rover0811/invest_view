@@ -1,19 +1,17 @@
 <script lang="ts">
-  import type { TickDetail, Indicators, Consensus, Fundamentals, Snapshot } from './types';
-  import { fmtPrice, pct, changeClass } from './format';
+  import type { TickDetail, Indicators, Consensus, Snapshot } from './types';
+  import { fmtPrice } from './format';
   import { navigate, appState } from './stores.svelte';
 
   let {
     tickDetail,
     indicators,
     consensus,
-    fundamentals,
     snapshot
   }: {
-    tickDetail: TickDetail;
+    tickDetail: TickDetail | null;
     indicators: Indicators;
     consensus: Consensus[];
-    fundamentals: Fundamentals;
     snapshot: Snapshot;
   } = $props();
 
@@ -48,40 +46,10 @@
   // 매도 호는 매수 호가 끝나는 각도(-90° 기준 + 매수비율만큼 회전)에서 시작
   let sellRot = $derived(-90 + buyFrac * 360);
 
-  // ---- 투자지표 분기 추세 (DUMMY 시계열: 마지막 값 = 실제 indicators 값) ----
-  // 분기별 시계열은 mock-data.json에 없어 컴포넌트-로컬 더미로 구성 (StockInfo 컨벤션).
-  const trendQuarters = ['25Q2', '25Q3', '25Q4', '26Q1'];
-  const epsTrend = [4210, 4480, 4760, 5070];   // DUMMY 분기별 EPS, 마지막=indicators.eps(5070)
-  const roeTrend = [8.1, 8.9, 9.4, 9.84];        // DUMMY 분기별 ROE, 마지막=indicators.roe(9.84)
-  const perTrend = [16.8, 15.9, 14.9, 14.2];     // DUMMY 분기별 PER, 마지막=indicators.per(14.2)
-
-  // 0~100/0~28 viewBox 좌표로 정규화한 스파크라인 polyline points (Home.svelte 패턴)
-  function sparkPoints(vals: number[]): string {
-    if (!vals || vals.length < 2) return '';
-    const min = Math.min(...vals);
-    const max = Math.max(...vals);
-    const span = max - min || 1;
-    const step = 100 / (vals.length - 1);
-    return vals
-      .map((v, i) => `${(i * step).toFixed(1)},${(28 - ((v - min) / span) * 24 - 2).toFixed(1)}`)
-      .join(' ');
-  }
-  // 직전 분기 대비 증감률 (한국 관례: 증가=빨강, 감소=파랑)
-  function trendDelta(vals: number[]): number {
-    const last = vals[vals.length - 1];
-    const prev = vals[vals.length - 2];
-    return prev ? ((last - prev) / prev) * 100 : 0;
-  }
-
-  let trendList = $derived([
-    { label: 'PER (이익 대비)', value: indicators?.per, suffix: '배', whole: false, series: perTrend },
-    { label: 'EPS (주당순이익)', value: indicators?.eps, suffix: '원', whole: true, series: epsTrend },
-    { label: 'ROE (자본 효율)', value: indicators?.roe, suffix: '%', whole: false, series: roeTrend }
-  ]);
-  let restList = $derived([
-    { label: 'PBR (자산 대비)', value: indicators?.pbr, suffix: '배', whole: false },
-    { label: 'BPS (주당순자산)', value: indicators?.bps, suffix: '원', whole: true },
-    { label: '배당수익률', value: indicators?.dividend_yield, suffix: '%', whole: false }
+  let indList = $derived([
+    { label: 'PER (이익 대비)', value: indicators?.per, suffix: '배', whole: false },
+    { label: 'EPS (주당순이익)', value: indicators?.eps, suffix: '원', whole: true },
+    { label: 'PBR (자산 대비)', value: indicators?.pbr, suffix: '배', whole: false }
   ]);
 
   let hasConsensus = $derived(consensus && consensus.length > 0);
@@ -98,22 +66,6 @@
   let buyCount = $derived(hasConsensus ? consensus.filter(c => c.investment_opinion === 'Buy').length : 0);
   let holdCount = $derived(hasConsensus ? consensus.filter(c => c.investment_opinion === 'Hold').length : 0);
   let isBuy = $derived(buyCount >= holdCount);
-
-  let aiCollapsed = $state(true);
-  let chips = $derived.by(() => {
-    const c = [];
-    if (fundamentals?.market) c.push(fundamentals.market);
-    if (fundamentals?.industry_name) c.push(fundamentals.industry_name);
-    if (fundamentals?.market_cap) c.push('시총 ' + Math.round(fundamentals.market_cap / 1e12) + '조');
-    return c;
-  });
-  let aiSections = $derived.by(() => {
-    return [
-      { t: '재무상태', x: fundamentals?.balance_sheet_summary },
-      { t: '손익', x: fundamentals?.income_statement_summary },
-      { t: '현금흐름', x: fundamentals?.cash_flow_summary }
-    ].filter(s => s.x);
-  });
 </script>
 
 <div class="metrics-grid">
@@ -172,39 +124,8 @@
       <span class="mc-title">투자지표</span>
       <span class="nav-hint">종목정보<span class="mc-arrow">›</span></span>
     </div>
-    <div class="trend-list">
-      {#each trendList as t}
-        {@const d = trendDelta(t.series)}
-        <div class="trend-row">
-          <div class="tr-info">
-            <span class="tr-label">{t.label}</span>
-            <span class="tr-value tnum">
-              {#if t.value == null}
-                —
-              {:else}
-                {t.whole ? Math.round(t.value).toLocaleString('ko-KR') : t.value.toFixed(2)}<small>{t.suffix}</small>
-              {/if}
-            </span>
-            <span class="tr-delta tnum {changeClass(d)}">
-              {d >= 0 ? '▲' : '▼'} {pct(Math.abs(d), false)}
-            </span>
-          </div>
-          <svg class="tr-spark" viewBox="0 0 100 28" preserveAspectRatio="none" aria-hidden="true">
-            <polyline
-              points={sparkPoints(t.series)}
-              fill="none"
-              stroke="var({d >= 0 ? '--color-positive' : '--color-negative'})"
-              stroke-width="1.5"
-              vector-effect="non-scaling-stroke"
-              stroke-linejoin="round"
-              stroke-linecap="round"
-            />
-          </svg>
-        </div>
-      {/each}
-    </div>
-    <div class="rest-grid">
-      {#each restList as ind}
+    <div class="ind-grid">
+      {#each indList as ind}
         <div class="ind-cell">
           <span class="ind-label">{ind.label}</span>
           <span class="ind-value tnum">
@@ -267,27 +188,6 @@
     {/if}
   </div>
 
-  <!-- svelte-ignore a11y_click_events_have_key_events -->
-  <!-- svelte-ignore a11y_no_static_element_interactions -->
-  <div class="metric-card mc-ai">
-    <div class="mc-head ai-head" class:open={!aiCollapsed} onclick={() => aiCollapsed = !aiCollapsed}>
-      <span class="mc-title">✨ AI 재무 요약</span>
-      <span class="ai-chevron">▾</span>
-    </div>
-    <div class="ai-chips">
-      {#each chips as chip}
-        <span class="ai-chip">{chip}</span>
-      {/each}
-    </div>
-    <div class="ai-body" class:collapsed={aiCollapsed}>
-      {#each aiSections as s}
-        <div class="ai-section">
-          <div class="ai-section-title">{s.t}</div>
-          <div class="ai-section-text">{s.x}</div>
-        </div>
-      {/each}
-    </div>
-  </div>
 </div>
 
 <style>
@@ -415,42 +315,11 @@
   .sm-label { font-size: 11px; color: var(--text-tertiary); }
   .sm-val { font-size: 13px; font-weight: 500; color: var(--text-primary); }
 
-  .trend-list {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-    margin-bottom: var(--space-4);
-  }
-  .trend-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: var(--space-3);
-  }
-  .tr-info {
-    display: flex;
-    align-items: baseline;
-    gap: var(--space-2);
-    flex-wrap: wrap;
-    min-width: 0;
-  }
-  .tr-label { font-size: 11px; color: var(--text-tertiary); flex-shrink: 0; }
-  .tr-value { font-size: 17px; font-weight: 700; color: var(--text-primary); letter-spacing: -0.02em; }
-  .tr-value small { font-size: 12px; font-weight: 500; color: var(--text-secondary); margin-left: 1px; }
-  .tr-delta { font-size: 11px; font-weight: 600; }
-  .tr-spark {
-    width: 64px;
-    height: 28px;
-    flex-shrink: 0;
-  }
-
-  .rest-grid {
+  .ind-grid {
     display: grid;
     grid-template-columns: repeat(3, 1fr);
     gap: var(--space-3);
     margin-top: auto;
-    padding-top: var(--space-3);
-    border-top: 1px solid var(--border-subtle);
   }
 
   .ind-cell { display: flex; flex-direction: column; gap: 4px; }
@@ -543,31 +412,4 @@
   .rr-target { color: var(--text-primary); font-weight: 600; }
   .rr-opinion { font-size: 11px; color: var(--text-tertiary); }
   .rr-opinion.buy { color: var(--color-positive); }
-
-  .mc-ai { grid-column: 1 / -1; }
-  .ai-head { cursor: pointer; margin-bottom: var(--space-3); }
-  .ai-chevron { color: var(--text-tertiary); font-size: 12px; transition: transform 0.2s; }
-  .ai-head.open .ai-chevron { transform: rotate(180deg); }
-
-  .ai-chips { display: flex; flex-wrap: wrap; gap: var(--space-2); margin-bottom: var(--space-3); }
-  .ai-chip {
-    font-size: 11px;
-    color: var(--text-secondary);
-    background: var(--surface-overlay);
-    border: 1px solid var(--border-subtle);
-    border-radius: 999px;
-    padding: 3px 10px;
-  }
-
-  .ai-body {
-    background: var(--surface-overlay);
-    border-radius: var(--radius-sm);
-    padding: var(--space-3);
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-3);
-  }
-  .ai-body.collapsed { max-height: 76px; overflow: hidden; }
-  .ai-section-title { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
-  .ai-section-text { font-size: 12px; line-height: 1.6; color: var(--text-secondary); }
 </style>

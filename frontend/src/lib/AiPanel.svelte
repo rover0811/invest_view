@@ -51,23 +51,23 @@
 
   function answer(q: string): { thinking: string | null; html: string } {
     const t = q.toLowerCase();
-    const s = data.snapshot || {};
-    const td = data.tickDetail || {};
-    const ind = data.indicators || {};
+    const s = data.snapshot;
+    const td = data.tickDetail;
+    const ind = data.indicators;
     const cons = data.consensus || [];
     const name = data._meta.stock_name;
 
     if (t.includes('올라') || t.includes('왜') || t.includes('상승')) {
-      const rate = ((s.change_rate ?? 0) * 100).toFixed(2);
+      const rate = (s.change_rate ?? 0).toFixed(2);
       return {
         thinking: '체결강도·수급 데이터 조회',
-        html: `${name}는 현재 <b class="price-up">+${rate}%</b> 상승 중입니다. 체결강도가 <b>${(td.trade_strength ?? 0).toFixed(0)}%</b>로 매수세가 우위(매수 비중 ${((td.buy_ratio ?? 0) * 100).toFixed(0)}%)이고, 순매수 <b class="price-up">+${(td.net_buy_count ?? 0).toLocaleString('ko-KR')}</b>가 유입되고 있어요.<div class="ai-minichart"></div><div style="font-size:11px;color:var(--text-tertiary);margin-top:4px">↑ 최근 체결강도 추이</div>`
+        html: `${name}는 현재 <b class="price-up">+${rate}%</b> 상승 중입니다. 체결강도가 <b>${(td?.trade_strength ?? 0).toFixed(0)}%</b>로 매수세가 우위(매수 비중 ${((td?.buy_ratio ?? 0) * 100).toFixed(0)}%)이고, 순매수 <b class="price-up">+${(td?.net_buy_count ?? 0).toLocaleString('ko-KR')}</b>가 유입되고 있어요.<div class="ai-minichart"></div><div style="font-size:11px;color:var(--text-tertiary);margin-top:4px">↑ 최근 체결강도 추이</div>`
       };
     }
     if (t.includes('체결') || t.includes('수급') || t.includes('매수')) {
       return {
         thinking: 'tick 데이터 분석',
-        html: `체결강도는 <b>${(td.trade_strength ?? 0).toFixed(1)}%</b>로 100을 넘어 매수 우위 상태예요. 매수 ${(td.buy_count ?? 0).toLocaleString('ko-KR')} vs 매도 ${(td.sell_count ?? 0).toLocaleString('ko-KR')}건으로 순매수가 이어지고 있습니다.`
+        html: `체결강도는 <b>${(td?.trade_strength ?? 0).toFixed(1)}%</b>로 100을 넘어 매수 우위 상태예요. 매수 ${(td?.buy_count ?? 0).toLocaleString('ko-KR')} vs 매도 ${(td?.sell_count ?? 0).toLocaleString('ko-KR')}건으로 순매수가 이어지고 있습니다.`
       };
     }
     if (t.includes('목표') || t.includes('컨센') || t.includes('전망')) {
@@ -79,9 +79,10 @@
       };
     }
     if (t.includes('per') || t.includes('지표') || t.includes('밸류') || t.includes('싸')) {
+      const fmt = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(2));
       return {
         thinking: '밸류에이션 지표 조회',
-        html: `PER <b>${ind.per}배</b>, PBR <b>${ind.pbr}배</b>, ROE <b>${ind.roe}%</b> 수준이에요. 업종 평균 대비 밸류에이션 부담은 크지 않은 편입니다.`
+        html: `PER <b>${fmt(ind.per)}배</b>, PBR <b>${fmt(ind.pbr)}배</b>, EPS <b>${ind.eps == null ? '—' : Math.round(ind.eps).toLocaleString('ko-KR') + '원'}</b> 수준이에요.`
       };
     }
     return {
