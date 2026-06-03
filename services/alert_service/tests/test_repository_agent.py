@@ -28,6 +28,7 @@ from alert_service.agent.repository import (
     _REPORT_BODY_SQL,
     _RECENT_REPORTS_SQL,
     _SEARCH_REPORTS_SQL,
+    _SEARCH_FINANCIAL_ITEMS_SQL,
     _SNAPSHOT_SQL,
     escape_like,
     fetch_consensus,
@@ -35,13 +36,43 @@ from alert_service.agent.repository import (
     fetch_report_body,
     fetch_recent_reports,
     fetch_snapshot,
+    search_financial_items,
     search_reports_ilike,
 )
+
+
+class _FakeMappings:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows: list[dict[str, object]] = rows
+
+    def all(self) -> list[dict[str, object]]:
+        return self._rows
+
+
+class _FakeResult:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows: list[dict[str, object]] = rows
+
+    def mappings(self) -> _FakeMappings:
+        return _FakeMappings(self._rows)
+
+
+class _FakeSession:
+    def __init__(self, rows: list[dict[str, object]]) -> None:
+        self._rows: list[dict[str, object]] = rows
+        self.statement: str | None = None
+        self.params: dict[str, object] | None = None
+
+    async def execute(self, statement: object, params: dict[str, object]) -> _FakeResult:
+        self.statement = str(statement)
+        self.params = params
+        return _FakeResult(self._rows)
 
 
 def test_repository_sql_templates_pass_guard() -> None:
     for sql in [
         _FINANCIALS_SQL,
+        _SEARCH_FINANCIAL_ITEMS_SQL,
         _RECENT_REPORTS_SQL,
         _REPORT_BODY_SQL,
         _CONSENSUS_SQL,
@@ -53,6 +84,86 @@ def test_repository_sql_templates_pass_guard() -> None:
 
 def test_escape_like_escapes_wildcards_and_escape_character() -> None:
     assert escape_like(r"100%_\done") == r"100\%\_\\done"
+
+
+async def test_fetch_snapshot_maps_trade_strength_and_last_trade_time() -> None:
+    session = _FakeSession(
+        [
+            {
+                "symbol": "005930",
+                "last_price": 70000,
+                "change": 1200,
+                "change_rate": "1.74",
+                "change_sign": "RISE",
+                "cumulative_volume": 1234567,
+                "trade_strength": "112.34",
+                "vi_trigger_price": None,
+                "trading_halted": "N",
+                "last_trade_time": "142530",
+                "updated_at": "2026-06-03T14:25:30+09:00",
+            }
+        ]
+    )
+
+    rows = await fetch_snapshot(session, ["005930"])  # type: ignore[arg-type]
+
+    assert session.params == {"tickers": ["005930"]}
+    assert session.statement is not None
+    assert "trade_strength" in session.statement
+    assert "last_trade_time" in session.statement
+    assert rows == [
+        {
+            "symbol": "005930",
+            "last_price": 70000.0,
+            "change": 1200.0,
+            "change_rate": 1.74,
+            "change_sign": "RISE",
+            "cumulative_volume": 1234567.0,
+            "trade_strength": 112.34,
+            "vi_trigger_price": None,
+            "trading_halted": "N",
+            "last_trade_time": "142530",
+            "updated_at": "2026-06-03T14:25:30+09:00",
+        }
+    ]
+
+
+async def test_search_financial_items_maps_rows_and_escapes_keyword() -> None:
+    session = _FakeSession(
+        [
+            {
+                "stmt_type": "INC",
+                "item_name": "*주당순이익",
+                "unit": "원/주",
+                "periods": 10,
+                "latest_period": "2025-12",
+            }
+        ]
+    )
+
+    rows = await search_financial_items(  # type: ignore[arg-type]
+        session, ["005930"], stmt_type="inc", keyword=r"주당_%", limit=500
+    )
+
+    assert session.params == {
+        "tickers": ["005930"],
+        "stmt_type": "INC",
+        "keyword": r"주당_%",
+        "pattern": r"%주당\_\%%",
+        "limit": 100,
+    }
+    assert session.statement is not None
+    assert "reference.financial_metrics" in session.statement
+    assert "ILIKE" in session.statement
+    assert rows == [
+        {
+            "stmt_type": "INC",
+            "item_name": "*주당순이익",
+            "unit": "원/주",
+            "periods": 10,
+            "latest_period": "2025-12",
+        }
+    ]
 
 
 @pytest.fixture(scope="function")
@@ -85,6 +196,18 @@ async def test_fetch_financials_filters_items_and_coerces_values(
     assert all(row["item"] == "영업이익" for row in rows)
     assert all(isinstance(row["value"], float) for row in rows)
     assert all(re.fullmatch(r"\d{4}-\d{2}", row["period"]) for row in rows)
+
+
+@pytest.mark.qa
+async def test_search_financial_items_live_finds_real_item_names(
+    live_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    async with live_session_factory() as session:
+        rows = await search_financial_items(session, ["005930"], "INC", "주당순이익", 5)
+
+    assert rows
+    assert any(row["item_name"] == "*주당순이익" for row in rows)
+    assert all(row["stmt_type"] == "INC" for row in rows)
 
 
 @pytest.mark.qa
@@ -173,3 +296,5 @@ async def test_fetch_snapshot_returns_serving_snapshot(
 
     assert isinstance(rows, list)
     assert all(row["symbol"] == "005930" for row in rows)
+    assert all("trade_strength" in row for row in rows)
+    assert all("last_trade_time" in row for row in rows)

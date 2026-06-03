@@ -1,8 +1,16 @@
 from __future__ import annotations
 
+# pyright: reportMissingImports=false, reportUnknownVariableType=false, reportUnknownMemberType=false, reportUnknownArgumentType=false, reportImplicitStringConcatenation=false
+
 import os
+import sys
+from pathlib import Path
 
 import pytest
+
+_SRC = Path(__file__).resolve().parents[1] / "src"
+if str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
 
 from alert_service.agent.financial_items import (
     CASH_FROM_OPERATIONS,
@@ -19,6 +27,7 @@ from alert_service.agent.financial_items import (
     TOTAL_EQUITY,
     TOTAL_LIABILITIES,
     UNIT,
+    resolve_item_names,
 )
 
 
@@ -76,6 +85,33 @@ def test_period_type_default():
 
 def test_unit():
     assert UNIT == "천원"
+
+
+def test_resolve_item_names_maps_friendly_inc_names_to_canonical_db_names():
+    assert resolve_item_names("INC", ["주당순이익", "EPS", "eps", "매출액", "영업이익"]) == [
+        EPS,
+        REVENUE,
+        OPERATING_PROFIT,
+    ]
+
+
+def test_resolve_item_names_maps_balance_and_cash_flow_aliases():
+    assert resolve_item_names("BAL", ["자산", "부채총계", "자본"]) == [
+        TOTAL_ASSETS,
+        TOTAL_LIABILITIES,
+        TOTAL_EQUITY,
+    ]
+    assert resolve_item_names("CAS", ["영업현금흐름", "영업활동현금흐름"]) == [
+        CASH_FROM_OPERATIONS
+    ]
+
+
+def test_resolve_item_names_preserves_none_unknown_and_specific_eps_variants():
+    assert resolve_item_names("INC", None) is None
+    assert resolve_item_names("INC", ["  ", "알수없는항목"]) == ["알수없는항목"]
+    assert resolve_item_names("INC", ["*(지배주주지분)주당순이익"]) == [
+        "*(지배주주지분)주당순이익"
+    ]
 
 
 @pytest.mark.qa

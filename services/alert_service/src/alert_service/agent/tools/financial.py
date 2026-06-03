@@ -9,7 +9,8 @@ from typing import Protocol, cast
 from strands import ToolContext, tool
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from alert_service.agent.repository import fetch_financials
+from alert_service.agent.financial_items import resolve_item_names
+from alert_service.agent.repository import fetch_financials, search_financial_items
 
 
 _SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -32,22 +33,39 @@ async def _get_financials_impl(
     item_names: list[str] | None = None,
     start_period: str | None = None,
     end_period: str | None = None,
-) -> list[dict[str, object]]:
+) -> list[dict[str, object]] | dict[str, object]:
     ticker = tool_context.invocation_state.get("current_ticker")
     if not isinstance(ticker, str) or not ticker:
         raise ValueError("current_ticker is required in invocation_state")
 
     session_factory = _require_session_factory(tool_context)
+    resolved_item_names = resolve_item_names(stmt_type, item_names)
     async with session_factory() as session:
-        return await fetch_financials(
+        rows = await fetch_financials(
             session,
             [ticker],
             stmt_type,
-            item_names,
+            resolved_item_names,
             "Y",
             start_period,
             end_period,
         )
+        if rows:
+            return rows
+
+        keyword = item_names[0] if item_names else None
+        matches = await search_financial_items(
+            session, [ticker], stmt_type=stmt_type, keyword=keyword, limit=15
+        )
+        if not matches and keyword:
+            matches = await search_financial_items(
+                session, [ticker], stmt_type=stmt_type, keyword=None, limit=15
+            )
+        return {
+            "status": "no_data",
+            "requested": resolved_item_names or [],
+            "available_matches": [row["item_name"] for row in matches],
+        }
 
 
 async def _compare_financials_impl(
@@ -59,12 +77,13 @@ async def _compare_financials_impl(
     end_period: str | None = None,
 ) -> list[dict[str, object]]:
     session_factory = _require_session_factory(tool_context)
+    resolved_item_names = resolve_item_names(stmt_type, item_names)
     async with session_factory() as session:
         return await fetch_financials(
             session,
             tickers,
             stmt_type,
-            item_names,
+            resolved_item_names,
             "Y",
             start_period,
             end_period,
@@ -78,8 +97,8 @@ async def get_financials(
     item_names: list[str] | None = None,
     start_period: str | None = None,
     end_period: str | None = None,
-) -> list[dict[str, object]]:
-    """현재 종목 재무제표 수치 추출. stmt_type BAL/INC/CAS, item_names는 한국어 항목명. 연간(Y) 데이터만 제공."""
+) -> list[dict[str, object]] | dict[str, object]:
+    """현재 종목 재무제표 수치 추출. stmt_type BAL/INC/CAS, item_names는 한국어 항목명. 연간(Y) 데이터만 제공. 결과가 비면 available_matches로 실제 항목명 후보를 반환."""
     return await _get_financials_impl(
         tool_context,
         stmt_type,

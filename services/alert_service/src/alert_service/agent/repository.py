@@ -26,6 +26,19 @@ WHERE ticker = ANY(CAST(:tickers AS text[]))
 ORDER BY ticker, period DESC
 """
 
+_SEARCH_FINANCIAL_ITEMS_SQL = r"""
+SELECT stmt_type, item_name, unit,
+       count(DISTINCT period) AS periods, max(period) AS latest_period
+FROM reference.financial_metrics
+WHERE ticker = ANY(CAST(:tickers AS text[]))
+  AND period_type = 'Y'
+  AND (CAST(:stmt_type AS text) IS NULL OR stmt_type = :stmt_type)
+  AND (CAST(:keyword AS text) IS NULL OR item_name ILIKE :pattern ESCAPE '\')
+GROUP BY stmt_type, item_name, unit
+ORDER BY periods DESC, item_name
+LIMIT :limit
+"""
+
 _RECENT_REPORTS_SQL = """
 SELECT report_idx, report_date, ticker, title, target_price, investment_opinion, author, provider,
        char_length(full_text) AS full_text_chars
@@ -65,7 +78,7 @@ LIMIT :limit
 
 _SNAPSHOT_SQL = """
 SELECT symbol, last_price, change, change_rate, change_sign, cumulative_volume,
-       vi_trigger_price, trading_halted, updated_at
+       trade_strength, vi_trigger_price, trading_halted, last_trade_time, updated_at
 FROM serving.symbol_snapshot
 WHERE symbol = ANY(CAST(:tickers AS text[]))
 """
@@ -124,6 +137,38 @@ async def fetch_financials(
             "item": row["item"],
             "value": _to_float(row["value"]),
             "unit": row["unit"],
+        }
+        for row in rows
+    ]
+
+
+async def search_financial_items(
+    session: AsyncSession,
+    tickers: list[str],
+    stmt_type: str | None = None,
+    keyword: str | None = None,
+    limit: int = 30,
+) -> list[dict[str, object]]:
+    normalized_stmt_type = stmt_type.strip().upper() if stmt_type and stmt_type.strip() else None
+    normalized_keyword = keyword.strip() if keyword and keyword.strip() else None
+    result = await session.execute(
+        text(guard(_SEARCH_FINANCIAL_ITEMS_SQL)),
+        {
+            "tickers": tickers,
+            "stmt_type": normalized_stmt_type,
+            "keyword": normalized_keyword,
+            "pattern": f"%{escape_like(normalized_keyword)}%" if normalized_keyword else None,
+            "limit": max(1, min(100, limit)),
+        },
+    )
+    rows = _mappings(result)
+    return [
+        {
+            "stmt_type": row["stmt_type"],
+            "item_name": row["item_name"],
+            "unit": row["unit"],
+            "periods": row["periods"],
+            "latest_period": _to_isoformat(row["latest_period"]),
         }
         for row in rows
     ]
@@ -240,8 +285,10 @@ async def fetch_snapshot(session: AsyncSession, tickers: list[str]) -> list[dict
             "change_rate": _to_float(row["change_rate"]),
             "change_sign": row["change_sign"],
             "cumulative_volume": _to_float(row["cumulative_volume"]),
+            "trade_strength": _to_float(row["trade_strength"]),
             "vi_trigger_price": _to_float(row["vi_trigger_price"]),
             "trading_halted": row["trading_halted"],
+            "last_trade_time": row["last_trade_time"],
             "updated_at": _to_isoformat(row["updated_at"]),
         }
         for row in rows

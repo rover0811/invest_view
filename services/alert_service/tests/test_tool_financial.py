@@ -25,6 +25,33 @@ class FakeToolContext:
     invocation_state: dict[str, Any]
 
 
+class FakeSession:
+    pass
+
+
+class FakeSessionContextManager:
+    session: FakeSession
+
+    def __init__(self, session: FakeSession) -> None:
+        self.session = session
+
+    async def __aenter__(self) -> FakeSession:
+        return self.session
+
+    async def __aexit__(self, exc_type: object, exc: object, traceback: object) -> None:
+        return None
+
+
+class FakeSessionFactory:
+    session: FakeSession
+
+    def __init__(self) -> None:
+        self.session = FakeSession()
+
+    def __call__(self) -> FakeSessionContextManager:
+        return FakeSessionContextManager(self.session)
+
+
 def test_financial_tools_are_importable_strands_tools_with_expected_signatures() -> None:
     assert hasattr(get_financials, "tool_spec")
     assert hasattr(compare_financials, "tool_spec")
@@ -38,6 +65,76 @@ def test_financial_tools_are_importable_strands_tools_with_expected_signatures()
     assert "tickers" not in get_financials.tool_spec["inputSchema"]["json"]["properties"]
     assert "tickers" in compare_params
     assert "tickers" in compare_financials.tool_spec["inputSchema"]["json"]["properties"]
+
+
+async def test_financial_tools_resolve_friendly_item_names_before_fetch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = FakeSessionFactory()
+    context = FakeToolContext(
+        invocation_state={"current_ticker": "005930", "session_factory": session_factory}
+    )
+    calls: list[tuple[object, list[str], str, list[str] | None, str, str | None, str | None]] = []
+
+    async def fake_fetch_financials(
+        session: object,
+        tickers: list[str],
+        stmt_type: str,
+        item_names: list[str] | None = None,
+        period_type: str = "Y",
+        start_period: str | None = None,
+        end_period: str | None = None,
+    ) -> list[dict[str, object]]:
+        calls.append((session, tickers, stmt_type, item_names, period_type, start_period, end_period))
+        return [{"ticker": tickers[0], "period": "2024-12", "item": (item_names or [""])[0], "value": 1.0, "unit": "천원"}]
+
+    monkeypatch.setattr("alert_service.agent.tools.financial.fetch_financials", fake_fetch_financials)
+
+    await _get_financials_impl(context, "INC", ["주당순이익", "매출액"])
+    await _compare_financials_impl(context, ["005930", "000660"], "INC", ["eps"])
+
+    assert calls == [
+        (session_factory.session, ["005930"], "INC", ["*주당순이익", "매출액(수익)"], "Y", None, None),
+        (session_factory.session, ["005930", "000660"], "INC", ["*주당순이익"], "Y", None, None),
+    ]
+
+
+async def test_get_financials_empty_result_returns_available_matches(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_factory = FakeSessionFactory()
+    context = FakeToolContext(
+        invocation_state={"current_ticker": "005930", "session_factory": session_factory}
+    )
+    search_calls: list[tuple[object, list[str], str | None, str | None, int]] = []
+
+    async def fake_fetch_financials(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return []
+
+    async def fake_search_financial_items(
+        session: object,
+        tickers: list[str],
+        stmt_type: str | None = None,
+        keyword: str | None = None,
+        limit: int = 30,
+    ) -> list[dict[str, object]]:
+        search_calls.append((session, tickers, stmt_type, keyword, limit))
+        return [
+            {"stmt_type": "INC", "item_name": "판매비와관리비", "unit": "천원", "periods": 10, "latest_period": "2025-12"},
+            {"stmt_type": "INC", "item_name": "기타판매비와관리비", "unit": "천원", "periods": 8, "latest_period": "2025-12"},
+        ]
+
+    monkeypatch.setattr("alert_service.agent.tools.financial.fetch_financials", fake_fetch_financials)
+    monkeypatch.setattr("alert_service.agent.tools.financial.search_financial_items", fake_search_financial_items)
+
+    result = await _get_financials_impl(context, "INC", ["판매관리비"])
+
+    assert search_calls == [(session_factory.session, ["005930"], "INC", "판매관리비", 15)]
+    assert result == {
+        "status": "no_data",
+        "requested": ["판매관리비"],
+        "available_matches": ["판매비와관리비", "기타판매비와관리비"],
+    }
 
 
 @pytest.fixture(scope="function")
