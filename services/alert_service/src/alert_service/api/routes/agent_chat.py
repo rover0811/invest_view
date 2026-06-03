@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import json
 import uuid
+from collections.abc import AsyncIterator
 from datetime import datetime
 from typing import Annotated
 
@@ -86,6 +87,15 @@ def _not_found() -> HTTPException:
     return HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="chat session not found")
 
 
+async def _drain_charts(chart_sink: asyncio.Queue[dict[str, object]]) -> AsyncIterator[str]:
+    while True:
+        try:
+            spec = chart_sink.get_nowait()
+        except asyncio.QueueEmpty:
+            return
+        yield f"event: chart\ndata: {json.dumps({'spec': spec}, ensure_ascii=False)}\n\n"
+
+
 @router.post("/sessions", status_code=status.HTTP_201_CREATED, response_model=ChatSessionCreatedOut)
 async def create_chat_session(
     payload: CreateSessionIn,
@@ -164,16 +174,20 @@ async def stream_chat_session(
         stream_status = "complete"
         err: dict[str, str] | None = None
         cancelled = False
+        chart_sink: asyncio.Queue[dict[str, object]] = asyncio.Queue()
         try:
             agent = build_market_analyst_agent(
                 config,
                 messages=history,
                 conversation_manager=build_conversation_manager(),
             )
+            invocation_state = {"current_ticker": ticker, "session_factory": session_factory, "chart_sink": chart_sink}
             async for event in agent.stream_async(
                 body.text,
-                invocation_state={"current_ticker": ticker, "session_factory": session_factory},
+                invocation_state=invocation_state,
             ):
+                async for sse in _drain_charts(chart_sink):
+                    yield sse
                 if await request.is_disconnected():
                     stream_status = "interrupted"
                     break
@@ -181,6 +195,8 @@ async def stream_chat_session(
                     token = event["data"]
                     accumulated.append(token)
                     yield f"event: token\ndata: {json.dumps({'text': token})}\n\n"
+            async for sse in _drain_charts(chart_sink):
+                yield sse
         except asyncio.CancelledError:
             stream_status = "interrupted"
             cancelled = True
@@ -255,16 +271,20 @@ async def regenerate_chat_message(
         stream_status = "complete"
         err: dict[str, str] | None = None
         cancelled = False
+        chart_sink: asyncio.Queue[dict[str, object]] = asyncio.Queue()
         try:
             agent = build_market_analyst_agent(
                 config,
                 messages=history,
                 conversation_manager=build_conversation_manager(),
             )
+            invocation_state = {"current_ticker": ticker, "session_factory": session_factory, "chart_sink": chart_sink}
             async for event in agent.stream_async(
                 prompt,
-                invocation_state={"current_ticker": ticker, "session_factory": session_factory},
+                invocation_state=invocation_state,
             ):
+                async for sse in _drain_charts(chart_sink):
+                    yield sse
                 if await request.is_disconnected():
                     stream_status = "interrupted"
                     break
@@ -272,6 +292,8 @@ async def regenerate_chat_message(
                     token = event["data"]
                     accumulated.append(token)
                     yield f"event: token\ndata: {json.dumps({'text': token})}\n\n"
+            async for sse in _drain_charts(chart_sink):
+                yield sse
         except asyncio.CancelledError:
             stream_status = "interrupted"
             cancelled = True

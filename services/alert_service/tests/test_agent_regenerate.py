@@ -24,6 +24,23 @@ pytestmark = pytest.mark.qa
 
 SECRET = "test-secret-32chars-min-for-hs256"
 
+CHART_SPEC = {
+    "chart_type": "line",
+    "title": "005930 재무 추이",
+    "x_label": "기간",
+    "y_label": "천원",
+    "unit": "천원",
+    "series": [{"name": "매출액(수익)", "points": [{"x": "2024-12", "y": 57000000.0}]}],
+}
+END_CHART_SPEC = {
+    "chart_type": "bar",
+    "title": "005930 영업이익 추이",
+    "x_label": "기간",
+    "y_label": "천원",
+    "unit": "천원",
+    "series": [{"name": "영업이익", "points": [{"x": "2024-12", "y": 12000000.0}]}],
+}
+
 
 def _token(user_id: uuid.UUID) -> str:
     return jwt.encode({"sub": str(user_id)}, SECRET, algorithm="HS256")
@@ -119,8 +136,11 @@ class FakeAgent:
         assert invocation_state is not None
         assert invocation_state["current_ticker"] == "005930"
         assert invocation_state["session_factory"] is not None
+        assert invocation_state["chart_sink"] is not None
+        invocation_state["chart_sink"].put_nowait(CHART_SPEC)
         yield {"data": "X"}
         yield {"data": "Y"}
+        invocation_state["chart_sink"].put_nowait(END_CHART_SPEC)
 
 
 async def test_regenerate_creates_sibling_and_active_path_uses_new_leaf(chat_env, monkeypatch):
@@ -145,6 +165,21 @@ async def test_regenerate_creates_sibling_and_active_path_uses_new_leaf(chat_env
     )
 
     assert regenerated.status_code == 200
+    chunks = regenerated.text.split("\n\n")
+    chart_chunks = [chunk for chunk in chunks if chunk.startswith("event: chart\ndata: ")]
+    assert [json.loads(chunk.removeprefix("event: chart\ndata: ")) for chunk in chart_chunks] == [
+        {"spec": CHART_SPEC},
+        {"spec": END_CHART_SPEC},
+    ]
+    assert chunks.index(f"event: chart\ndata: {json.dumps({'spec': CHART_SPEC}, ensure_ascii=False)}") < chunks.index(
+        'event: token\ndata: {"text": "X"}'
+    )
+    assert chunks.index('event: token\ndata: {"text": "Y"}') < chunks.index(
+        f"event: chart\ndata: {json.dumps({'spec': END_CHART_SPEC}, ensure_ascii=False)}"
+    )
+    assert chunks.index(f"event: chart\ndata: {json.dumps({'spec': END_CHART_SPEC}, ensure_ascii=False)}") < next(
+        index for index, chunk in enumerate(chunks) if chunk.startswith("event: done\ndata: ")
+    )
     assert 'event: token\ndata: {"text": "X"}' in regenerated.text
     assert 'event: token\ndata: {"text": "Y"}' in regenerated.text
     a2_id = _done_message_id(regenerated.text)

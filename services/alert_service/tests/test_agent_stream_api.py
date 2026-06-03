@@ -3,6 +3,7 @@ from __future__ import annotations
 # pyright: reportMissingImports=false
 
 import uuid
+import json
 from unittest.mock import MagicMock
 
 import httpx
@@ -21,6 +22,23 @@ from alert_service.db.session import create_engine, create_session_factory
 pytestmark = pytest.mark.qa
 
 SECRET = "test-secret-32chars-min-for-hs256"
+
+CHART_SPEC = {
+    "chart_type": "line",
+    "title": "005930 재무 추이",
+    "x_label": "기간",
+    "y_label": "천원",
+    "unit": "천원",
+    "series": [{"name": "매출액(수익)", "points": [{"x": "2024-12", "y": 57000000.0}]}],
+}
+END_CHART_SPEC = {
+    "chart_type": "bar",
+    "title": "005930 영업이익 추이",
+    "x_label": "기간",
+    "y_label": "천원",
+    "unit": "천원",
+    "series": [{"name": "영업이익", "points": [{"x": "2024-12", "y": 12000000.0}]}],
+}
 
 
 def _token(user_id: uuid.UUID) -> str:
@@ -102,8 +120,11 @@ class FakeAgent:
         assert invocation_state is not None
         assert invocation_state["current_ticker"] == "005930"
         assert invocation_state["session_factory"] is not None
+        assert invocation_state["chart_sink"] is not None
+        invocation_state["chart_sink"].put_nowait(CHART_SPEC)
         yield {"data": "A"}
         yield {"data": "B"}
+        invocation_state["chart_sink"].put_nowait(END_CHART_SPEC)
 
 
 class ErrorAgent:
@@ -126,6 +147,21 @@ async def test_stream_success(chat_env, monkeypatch):
 
     assert response.status_code == 200
     assert response.headers["content-type"].startswith("text/event-stream")
+    chunks = response.text.split("\n\n")
+    chart_chunks = [chunk for chunk in chunks if chunk.startswith("event: chart\ndata: ")]
+    assert [json.loads(chunk.removeprefix("event: chart\ndata: ")) for chunk in chart_chunks] == [
+        {"spec": CHART_SPEC},
+        {"spec": END_CHART_SPEC},
+    ]
+    assert chunks.index(f"event: chart\ndata: {json.dumps({'spec': CHART_SPEC}, ensure_ascii=False)}") < chunks.index(
+        'event: token\ndata: {"text": "A"}'
+    )
+    assert chunks.index('event: token\ndata: {"text": "B"}') < chunks.index(
+        f"event: chart\ndata: {json.dumps({'spec': END_CHART_SPEC}, ensure_ascii=False)}"
+    )
+    assert chunks.index(f"event: chart\ndata: {json.dumps({'spec': END_CHART_SPEC}, ensure_ascii=False)}") < next(
+        index for index, chunk in enumerate(chunks) if chunk.startswith("event: done\ndata: ")
+    )
     assert 'event: token\ndata: {"text": "A"}' in response.text
     assert 'event: token\ndata: {"text": "B"}' in response.text
     assert 'event: done\ndata: {' in response.text
