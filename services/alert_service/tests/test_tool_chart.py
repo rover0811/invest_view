@@ -10,7 +10,7 @@ from typing import Any
 import pytest
 
 from alert_service.agent import market_analyst
-from alert_service.agent.tools.chart import _render_chart_impl, render_chart
+from alert_service.agent.tools.chart import _apply_transform, _render_chart_impl, render_chart
 
 
 @dataclass(frozen=True)
@@ -73,6 +73,7 @@ def test_render_chart_is_strands_tool_with_expected_schema() -> None:
         "stmt_type",
         "start_period",
         "end_period",
+        "transform",
     }
 
 
@@ -175,6 +176,112 @@ async def test_render_chart_bar_type_and_decorated_tool_func(monkeypatch: pytest
     assert spec["chart_type"] == "bar"
 
 
+async def test_render_chart_applies_yoy_growth_transform_in_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chart_sink: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    async def fake_fetch_financials(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return [
+            {"ticker": "005930", "period": "2024-12", "item": "*주당순이익", "value": 121.0, "unit": "원/주"},
+            {"ticker": "005930", "period": "2023-12", "item": "*주당순이익", "value": 110.0, "unit": "원/주"},
+            {"ticker": "005930", "period": "2022-12", "item": "*주당순이익", "value": 100.0, "unit": "원/주"},
+        ]
+
+    monkeypatch.setattr("alert_service.agent.tools.chart.fetch_financials", fake_fetch_financials)
+
+    result = await _render_chart_impl(
+        _context(chart_sink=chart_sink), ["주당순이익"], transform="yoy_growth"
+    )
+
+    spec = chart_sink.get_nowait()
+    assert result == {
+        "status": "success",
+        "chart_type": "line",
+        "items": ["*주당순이익 증가율(%)"],
+        "periods": 2,
+    }
+    assert spec["title"] == "005930 재무 추이 증가율(%)"
+    assert spec["unit"] == "%"
+    assert spec["y_label"] == "%"
+    series = spec["series"]
+    assert isinstance(series, list)
+    assert series[0]["points"] == [
+        {"x": "2023-12", "y": 10.0},
+        {"x": "2024-12", "y": 10.0},
+    ]
+
+
+async def test_render_chart_infers_growth_transform_from_derived_item_suffix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chart_sink: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    calls: list[list[str] | None] = []
+
+    async def fake_fetch_financials(
+        _session: object,
+        _tickers: list[str],
+        _stmt_type: str,
+        item_names: list[str] | None = None,
+        _period_type: str = "Y",
+        _start_period: str | None = None,
+        _end_period: str | None = None,
+    ) -> list[dict[str, object]]:
+        calls.append(item_names)
+        return [
+            {"ticker": "005930", "period": "2024-12", "item": "*주당순이익", "value": 121.0, "unit": "원/주"},
+            {"ticker": "005930", "period": "2023-12", "item": "*주당순이익", "value": 110.0, "unit": "원/주"},
+            {"ticker": "005930", "period": "2022-12", "item": "*주당순이익", "value": 100.0, "unit": "원/주"},
+        ]
+
+    monkeypatch.setattr("alert_service.agent.tools.chart.fetch_financials", fake_fetch_financials)
+
+    result = await _render_chart_impl(_context(chart_sink=chart_sink), ["주당순이익 증가율"])
+
+    assert calls == [["*주당순이익"]]
+    assert result["items"] == ["*주당순이익 증가율(%)"]
+    spec = chart_sink.get_nowait()
+    assert spec["unit"] == "%"
+    series = spec["series"]
+    assert isinstance(series, list)
+    assert series[0]["points"] == [
+        {"x": "2023-12", "y": 10.0},
+        {"x": "2024-12", "y": 10.0},
+    ]
+
+
+def test_apply_transform_skips_uncomputable_growth_bases_and_indexes_positive_base() -> None:
+    points = [
+        {"x": "2020-12", "y": -10.0},
+        {"x": "2021-12", "y": 0.0},
+        {"x": "2022-12", "y": 100.0},
+        {"x": "2023-12", "y": 125.0},
+    ]
+
+    pct_points, pct_unit, pct_suffix = _apply_transform(points, "pct_change")
+    assert pct_unit == "%"
+    assert pct_suffix == "증가율(%)"
+    assert pct_points == [{"x": "2023-12", "y": 25.0}]
+
+    indexed_points, indexed_unit, indexed_suffix = _apply_transform(points, "indexed_to_100")
+    assert indexed_unit == "지수(기준100)"
+    assert indexed_suffix == "지수(기준100)"
+    assert indexed_points == [
+        {"x": "2022-12", "y": 100.0},
+        {"x": "2023-12", "y": 125.0},
+    ]
+
+    cumulative_points, cumulative_unit, cumulative_suffix = _apply_transform(
+        points, "cumulative_pct_change"
+    )
+    assert cumulative_unit == "%"
+    assert cumulative_suffix == "누적증감률(%)"
+    assert cumulative_points == [
+        {"x": "2022-12", "y": 0.0},
+        {"x": "2023-12", "y": 25.0},
+    ]
+
+
 async def test_render_chart_empty_data_returns_no_data_and_does_not_push(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -262,6 +369,7 @@ def test_render_chart_registered_in_market_analyst_tools() -> None:
         "get_financials",
         "compare_financials",
         "search_financial_items",
+        "get_investment_indicators",
         "render_chart",
         "get_recent_reports",
         "get_report_body",
