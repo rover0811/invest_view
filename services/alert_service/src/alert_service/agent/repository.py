@@ -12,6 +12,14 @@ from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alert_service.agent.db_guard import guard
+from alert_service.agent.financial_items import (
+    CONTROLLING_EQUITY,
+    EPS,
+    NET_INCOME,
+    SHARES_OUTSTANDING,
+    TOTAL_EQUITY,
+    TOTAL_LIABILITIES,
+)
 
 
 _FINANCIALS_SQL = """
@@ -81,6 +89,18 @@ SELECT symbol, last_price, change, change_rate, change_sign, cumulative_volume,
        trade_strength, vi_trigger_price, trading_halted, last_trade_time, updated_at
 FROM serving.symbol_snapshot
 WHERE symbol = ANY(CAST(:tickers AS text[]))
+"""
+
+_INDICATOR_FINANCIALS_SQL = """
+SELECT ticker, stmt_type, period, item_name AS item, value, unit
+FROM reference.financial_metrics
+WHERE ticker = ANY(CAST(:tickers AS text[]))
+  AND period_type = :period_type
+  AND (
+    (stmt_type = 'INC' AND item_name = ANY(CAST(:income_items AS text[])))
+    OR (stmt_type = 'BAL' AND item_name = ANY(CAST(:balance_items AS text[])))
+  )
+ORDER BY ticker, period DESC, stmt_type, item_name
 """
 
 
@@ -293,3 +313,38 @@ async def fetch_snapshot(session: AsyncSession, tickers: list[str]) -> list[dict
         }
         for row in rows
     ]
+
+
+async def fetch_indicator_inputs(
+    session: AsyncSession,
+    tickers: list[str],
+    period_type: str = "Y",
+) -> dict[str, list[dict[str, object]]]:
+    financials_result = await session.execute(
+        text(guard(_INDICATOR_FINANCIALS_SQL)),
+        {
+            "tickers": tickers,
+            "period_type": period_type,
+            "income_items": [EPS, NET_INCOME],
+            "balance_items": [
+                CONTROLLING_EQUITY,
+                SHARES_OUTSTANDING,
+                TOTAL_EQUITY,
+                TOTAL_LIABILITIES,
+            ],
+        },
+    )
+    financial_rows = _mappings(financials_result)
+    financials = [
+        {
+            "ticker": row["ticker"],
+            "stmt_type": row["stmt_type"],
+            "period": row["period"],
+            "item": row["item"],
+            "value": _to_float(row["value"]),
+            "unit": row["unit"],
+        }
+        for row in financial_rows
+    ]
+    snapshots = await fetch_snapshot(session, tickers)
+    return {"financials": financials, "snapshots": snapshots}

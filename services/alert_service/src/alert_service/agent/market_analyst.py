@@ -11,6 +11,7 @@ from alert_service.agent.prompts import SYSTEM_PROMPT
 from alert_service.agent.tools.chart import render_chart
 from alert_service.agent.tools.discovery import search_financial_items
 from alert_service.agent.tools.financial import compare_financials, get_financials
+from alert_service.agent.tools.indicators import get_investment_indicators
 from alert_service.agent.tools.market import get_symbol_snapshot
 from alert_service.agent.tools.reports import get_consensus, get_recent_reports, get_report_body
 from alert_service.agent.tools.search import search_reports
@@ -21,6 +22,7 @@ AGENT_TOOLS: list[Any] = [
     get_financials,
     compare_financials,
     search_financial_items,
+    get_investment_indicators,
     render_chart,
     get_recent_reports,
     get_report_body,

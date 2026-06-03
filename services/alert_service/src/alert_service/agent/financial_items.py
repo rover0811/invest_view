@@ -18,6 +18,8 @@ EPS = "*주당순이익"
 TOTAL_ASSETS = "자산총계"
 TOTAL_LIABILITIES = "부채총계"
 TOTAL_EQUITY = "자본총계"
+CONTROLLING_EQUITY = "지배주주지분"
+SHARES_OUTSTANDING = "발행주식수"
 
 CASH_FROM_OPERATIONS = "*영업에서창출된현금흐름"
 
@@ -32,6 +34,19 @@ UNIT = "천원"
 
 _SUFFIX_PARENS_RE = re.compile(r"\([^()]*\)$")
 _SPACES_RE = re.compile(r"\s+")
+DERIVED_METRIC_SUFFIXES = (
+    "누적증감률",
+    "누적증가율",
+    "증가율",
+    "성장률",
+    "증감률",
+    "변화율",
+    "변동률",
+    "변동",
+    "변화",
+    "추이",
+    "지수화",
+)
 
 EXPLICIT_ITEM_ALIASES_BY_STMT: dict[str, dict[str, str]] = {
     "INC": {
@@ -89,6 +104,20 @@ def _alias_map_for_stmt(stmt_type: str) -> dict[str, str]:
     return aliases
 
 
+def _strip_derived_suffix_words(name: str) -> str | None:
+    stripped = name.strip()
+    changed = False
+    while stripped:
+        for suffix in DERIVED_METRIC_SUFFIXES:
+            if stripped.endswith(suffix):
+                stripped = stripped[: -len(suffix)].strip()
+                changed = True
+                break
+        else:
+            break
+    return stripped if changed and stripped else None
+
+
 def resolve_item_names(stmt_type: str, item_names: list[str] | None) -> list[str] | None:
     if item_names is None:
         return None
@@ -99,7 +128,13 @@ def resolve_item_names(stmt_type: str, item_names: list[str] | None) -> list[str
         name = raw.strip()
         if not name:
             continue
-        canonical = aliases.get(_item_key(name), name)
+        canonical = aliases.get(_item_key(name))
+        if canonical is None:
+            stripped_name = _strip_derived_suffix_words(name)
+            if stripped_name is not None:
+                canonical = aliases.get(_item_key(stripped_name))
+        if canonical is None:
+            canonical = name
         if canonical not in resolved:
             resolved.append(canonical)
     return resolved

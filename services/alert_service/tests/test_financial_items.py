@@ -114,6 +114,16 @@ def test_resolve_item_names_preserves_none_unknown_and_specific_eps_variants():
     ]
 
 
+def test_resolve_item_names_strips_derived_suffix_only_when_base_is_known_alias():
+    assert resolve_item_names("INC", ["주당순이익 증가율"]) == [EPS]
+    assert resolve_item_names("INC", ["매출액 추이"]) == [REVENUE]
+
+
+def test_resolve_item_names_does_not_strip_bare_rate_or_unknown_suffix_names():
+    assert resolve_item_names("INC", ["영업이익률"]) == ["영업이익률"]
+    assert resolve_item_names("INC", ["판매비와관리비변동"]) == ["판매비와관리비변동"]
+
+
 @pytest.mark.qa
 def test_constants_exist_in_live_db():
     import asyncio
