@@ -86,7 +86,6 @@
     ma5: '#e0a64e',
     ma20: '#4ec9b0',
     ma60: '#b58cf0',
-    vwap: '#8a8f98',
     positiveVolume: 'rgba(220, 46, 71, 0.5)',
     negativeVolume: 'rgba(49, 130, 246, 0.5)'
   } as const;
@@ -316,7 +315,8 @@
         }
       },
       localization: {
-        timeFormatter: formatCrosshairTime
+        timeFormatter: formatCrosshairTime,
+        priceFormatter: (price: number) => fmtPrice(price)
       },
       timeScale: {
         timeVisible: true,
@@ -375,21 +375,9 @@
       lastValueVisible: false
     });
 
-    const vwapSeries = chart.addSeries(LineSeries, {
-      color: T.vwap,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      title: 'VWAP'
-    });
-
     candleSeries.setData(allCandles.map(toChartCandle));
 
     const volumeData: ChartVolume[] = [];
-    const vwapData: ChartLine[] = [];
-    let cumulativeVolume = 0;
-    let cumulativeTypicalVolume = 0;
 
     allCandles.forEach((candle) => {
       const isUp = candle.close >= candle.open;
@@ -402,19 +390,9 @@
         value: synthVol,
         color: isUp ? T.positiveVolume : T.negativeVolume
       });
-
-      const typicalPrice = (candle.high + candle.low + candle.close) / 3;
-      cumulativeVolume += synthVol;
-      cumulativeTypicalVolume += typicalPrice * synthVol;
-
-      vwapData.push({
-        time: asTime(candle.time),
-        value: cumulativeTypicalVolume / cumulativeVolume
-      });
     });
 
     volumeSeries.setData(volumeData);
-    vwapSeries.setData(vwapData);
     ma5Series.setData(calculateMA(allCandles, 5));
     ma20Series.setData(calculateMA(allCandles, 20));
     ma60Series.setData(calculateMA(allCandles, 60));
@@ -422,17 +400,6 @@
     const panes = chart.panes();
     if (panes.length > 1) {
       panes[1].setStretchFactor(0.2);
-    }
-
-    if (snapshot.vi_trigger_price) {
-      candleSeries.createPriceLine({
-        price: snapshot.vi_trigger_price,
-        color: T.textTertiary,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: 'VI'
-      });
     }
 
     function buildEventLane() {
@@ -643,7 +610,6 @@
       <span class="ma-item ma5"><i></i>MA5</span>
       <span class="ma-item ma20"><i></i>MA20</span>
       <span class="ma-item ma60"><i></i>MA60</span>
-      <span class="ma-item vwap"><i></i>VWAP</span>
     </div>
     <div
       class="marker-tooltip"
@@ -825,7 +791,6 @@
   .ma-item.ma5 i { background: var(--ma5); }
   .ma-item.ma20 i { background: var(--ma20); }
   .ma-item.ma60 i { background: var(--ma60); }
-  .ma-item.vwap i { background: var(--vwap); }
 
   .event-lane {
     position: relative;

@@ -108,3 +108,26 @@ export interface StockListItem {
   change_rate: number;
   market: string;
 }
+
+export interface ChartPoint {
+  x: string;   // period e.g. "2024-12"
+  y: number;
+}
+
+export interface ChartSeries {
+  name: string;
+  points: ChartPoint[];
+}
+
+export interface ChartSpec {
+  chart_type: 'line' | 'bar';
+  title: string;
+  x_label: string;
+  y_label: string;
+  unit: string;
+  series: ChartSeries[];
+}
+
+export type MessagePart =
+  | { kind: 'text'; text: string }
+  | { kind: 'chart'; spec: ChartSpec };

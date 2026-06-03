@@ -9,6 +9,7 @@ import type {
   Indicators,
   Financials,
   Fundamentals,
+  ChartSpec,
 } from './types';
 
 const BASE = '/api';
@@ -139,6 +140,7 @@ export interface AgentStreamCallbacks {
   onToken(text: string): void;
   onDone(info: { message_id: string; status: string; sibling_count?: number }): void;
   onError(message: string): void;
+  onChart?(spec: ChartSpec): void;
 }
 
 function dispatchFrame(frame: string, callbacks: AgentStreamCallbacks): void {
@@ -175,7 +177,37 @@ function dispatchFrame(frame: string, callbacks: AgentStreamCallbacks): void {
     });
   } else if (event === 'error') {
     callbacks.onError(typeof p.message === 'string' ? p.message : '스트리밍 오류가 발생했습니다');
+  } else if (event === 'chart') {
+    if (isChartSpec(p.spec)) callbacks.onChart?.(p.spec);
   }
+}
+
+function isChartSpec(v: unknown): v is ChartSpec {
+  if (!v || typeof v !== 'object') return false;
+  const o = v as Record<string, unknown>;
+  if (o.chart_type !== 'line' && o.chart_type !== 'bar') return false;
+  if (
+    typeof o.title !== 'string' ||
+    typeof o.x_label !== 'string' ||
+    typeof o.y_label !== 'string' ||
+    typeof o.unit !== 'string'
+  ) {
+    return false;
+  }
+  if (!Array.isArray(o.series)) return false;
+  for (const s of o.series) {
+    if (!s || typeof s !== 'object') return false;
+    const series = s as Record<string, unknown>;
+    if (typeof series.name !== 'string' || !Array.isArray(series.points)) return false;
+    for (const point of series.points) {
+      if (!point || typeof point !== 'object') return false;
+      const pt = point as Record<string, unknown>;
+      if (typeof pt.x !== 'string' || typeof pt.y !== 'number' || !Number.isFinite(pt.y)) {
+        return false;
+      }
+    }
+  }
+  return true;
 }
 
 // A token frame can be split across network chunks, so frames are accumulated

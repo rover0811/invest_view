@@ -5,6 +5,7 @@ import {
   regenerateAgentChat,
   type AgentStreamCallbacks,
 } from './api';
+import type { ChartSpec } from './types';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -37,6 +38,7 @@ function streamResponse(chunks: string[], status = 200): Response {
 
 function collectingCallbacks() {
   const tokens: string[] = [];
+  const charts: ChartSpec[] = [];
   let done: { message_id: string; status: string; sibling_count?: number } | null = null;
   let error: string | null = null;
   const cbs: AgentStreamCallbacks = {
@@ -47,10 +49,12 @@ function collectingCallbacks() {
     onError: (m) => {
       error = m;
     },
+    onChart: (s) => charts.push(s),
   };
   return {
     cbs,
     tokens,
+    charts,
     get done() {
       return done;
     },
@@ -59,6 +63,23 @@ function collectingCallbacks() {
     },
   };
 }
+
+const SAMPLE_CHART: ChartSpec = {
+  chart_type: 'line',
+  title: '삼성전자 매출액 추이',
+  x_label: '기간',
+  y_label: '매출액',
+  unit: '천원',
+  series: [
+    {
+      name: '매출액(수익)',
+      points: [
+        { x: '2023-12', y: 50000000.0 },
+        { x: '2024-12', y: 57000000.0 },
+      ],
+    },
+  ],
+};
 
 beforeEach(() => {
   vi.restoreAllMocks();
@@ -149,6 +170,102 @@ describe('streamAgentChat SSE parsing', () => {
     expect(url).toBe('/api/agent/sessions/sess42/stream');
     expect(init.method).toBe('POST');
     expect(JSON.parse(init.body as string)).toEqual({ text: 'why up?', parent_id: 'p1' });
+  });
+});
+
+describe('streamAgentChat chart frames', () => {
+  it('dispatches an event: chart frame to onChart with the parsed spec', async () => {
+    const frame = `event: chart\ndata: ${JSON.stringify({ spec: SAMPLE_CHART })}\n\n`;
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse([frame])));
+
+    const c = collectingCallbacks();
+    await streamAgentChat('s1', 'show chart', c.cbs);
+
+    expect(c.charts).toHaveLength(1);
+    expect(c.charts[0]).toEqual(SAMPLE_CHART);
+    expect(c.error).toBeNull();
+  });
+
+  it('parses a chart frame split across chunk boundaries', async () => {
+    const frame = `event: chart\ndata: ${JSON.stringify({ spec: SAMPLE_CHART })}\n\n`;
+    const cut = Math.floor(frame.length / 2);
+    const chunks = [frame.slice(0, cut), frame.slice(cut)];
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse(chunks)));
+
+    const c = collectingCallbacks();
+    await streamAgentChat('s1', 'show chart', c.cbs);
+
+    expect(c.charts).toHaveLength(1);
+    expect(c.charts[0]).toEqual(SAMPLE_CHART);
+  });
+
+  it('interleaves token/chart/token/done in order', async () => {
+    const chunks = [
+      'event: token\ndata: {"text":"A"}\n\n',
+      `event: chart\ndata: ${JSON.stringify({ spec: SAMPLE_CHART })}\n\n`,
+      'event: token\ndata: {"text":"B"}\n\n',
+      'event: done\ndata: {"message_id":"m1","status":"complete"}\n\n',
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse(chunks)));
+
+    const c = collectingCallbacks();
+    await streamAgentChat('s1', 'hi', c.cbs);
+
+    expect(c.tokens).toEqual(['A', 'B']);
+    expect(c.charts).toHaveLength(1);
+    expect(c.charts[0]).toEqual(SAMPLE_CHART);
+    expect(c.done!.message_id).toBe('m1');
+    expect(c.error).toBeNull();
+  });
+
+  it('does not crash when onChart is undefined', async () => {
+    const frame = `event: chart\ndata: ${JSON.stringify({ spec: SAMPLE_CHART })}\n\n`;
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse([frame])));
+
+    const tokens: string[] = [];
+    const cbs: AgentStreamCallbacks = {
+      onToken: (t) => tokens.push(t),
+      onDone: () => {},
+      onError: () => {},
+    };
+
+    await expect(streamAgentChat('s1', 'hi', cbs)).resolves.toBeUndefined();
+  });
+
+  it('ignores a malformed chart frame without calling onChart or throwing', async () => {
+    const chunks = [
+      'event: chart\ndata: {"spec":"notanobject"}\n\n',
+      'event: chart\ndata: {not valid json}\n\n',
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse(chunks)));
+
+    const c = collectingCallbacks();
+    await streamAgentChat('s1', 'hi', c.cbs);
+
+    expect(c.charts).toEqual([]);
+    expect(c.error).toBeNull();
+  });
+
+  it('ignores an object spec with a non-array series without calling onChart', async () => {
+    const frame = 'event: chart\ndata: {"spec":{"chart_type":"line","title":"t","x_label":"x","y_label":"y","unit":"천원","series":{}}}\n\n';
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse([frame])));
+
+    const c = collectingCallbacks();
+    await expect(streamAgentChat('s1', 'hi', c.cbs)).resolves.toBeUndefined();
+
+    expect(c.charts).toEqual([]);
+    expect(c.error).toBeNull();
+  });
+
+  it('ignores a spec whose series is missing the points array', async () => {
+    const frame = 'event: chart\ndata: {"spec":{"chart_type":"bar","title":"t","x_label":"x","y_label":"y","unit":"천원","series":[{"name":"A"}]}}\n\n';
+    vi.stubGlobal('fetch', vi.fn(async () => streamResponse([frame])));
+
+    const c = collectingCallbacks();
+    await expect(streamAgentChat('s1', 'hi', c.cbs)).resolves.toBeUndefined();
+
+    expect(c.charts).toEqual([]);
+    expect(c.error).toBeNull();
   });
 });
 

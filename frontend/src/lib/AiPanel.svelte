@@ -1,5 +1,6 @@
 <script lang="ts">
-  import type { StockData } from './types';
+  import type { StockData, ChartSpec } from './types';
+  import InlineChatChart from './InlineChatChart.svelte';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
   import {
@@ -10,7 +11,13 @@
     type AgentStreamCallbacks,
   } from './api';
 
-  let { data }: { data: StockData } = $props();
+  let {
+    data,
+    onFullWidthChange,
+  }: {
+    data: StockData;
+    onFullWidthChange?: (v: boolean) => void;
+  } = $props();
 
   // Render agent markdown (bold/headings/lists) as sanitized HTML.
   // Bot messages ONLY — user input and error strings are rendered as plain text.
@@ -24,6 +31,7 @@
     streaming?: boolean;
     error?: boolean;
     messageId?: string;
+    charts?: ChartSpec[];
   }
 
   let messages = $state<Message[]>([]);
@@ -38,13 +46,20 @@
   let _sending = false;
 
   const STORAGE_KEY = 'aiPanelCollapsed';
+  const FULLWIDTH_KEY = 'aiPanelFullWidth';
 
   function initCollapsed(): boolean {
     if (typeof window === 'undefined') return false;
     return window.localStorage.getItem(STORAGE_KEY) === '1';
   }
 
+  function initFullWidth(): boolean {
+    if (typeof window === 'undefined') return false;
+    return window.localStorage.getItem(FULLWIDTH_KEY) === '1';
+  }
+
   let collapsed = $state(initCollapsed());
+  let fullWidth = $state(initFullWidth());
 
   function persistCollapsed() {
     if (typeof window !== 'undefined') {
@@ -56,6 +71,22 @@
     collapsed = !collapsed;
     persistCollapsed();
   }
+
+  function persistFullWidth() {
+    if (typeof window !== 'undefined') {
+      window.localStorage.setItem(FULLWIDTH_KEY, fullWidth ? '1' : '0');
+    }
+  }
+
+  function toggleFullWidth() {
+    fullWidth = !fullWidth;
+    persistFullWidth();
+  }
+
+  // Notify parent of the full-width state (covers initial restore + every toggle).
+  $effect(() => {
+    onFullWidthChange?.(fullWidth);
+  });
 
   // A session is bound to one ticker; switching symbols resets the conversation.
   $effect(() => {
@@ -69,7 +100,7 @@
       messages = [
         {
           role: 'bot',
-          text: `안녕하세요 👋 ${data._meta.stock_name}에 대해 궁금한 점을 물어보세요. 실시간 시세·수급·재무 데이터를 바탕으로 답변해 드려요.`,
+          text: `안녕하세요 👋 ${data._meta.stock_name} 분석을 도와드릴게요. 재무·실적 추이, 애널리스트 목표주가·리포트, 실시간 시세·체결강도를 바탕으로 답변해 드려요.`,
         },
       ];
     }
@@ -103,6 +134,10 @@
       onDone: (info) => {
         messages[botIndex].streaming = false;
         messages[botIndex].messageId = info.message_id;
+      },
+      onChart: (spec) => {
+        const m = messages[botIndex];
+        m.charts = [...(m.charts ?? []), spec];
       },
       onError: (m) => {
         messages[botIndex].streaming = false;
@@ -185,7 +220,7 @@
   }
 </script>
 
-<aside class="ai-panel" class:collapsed>
+<aside class="ai-panel" class:collapsed class:full-width={fullWidth && !collapsed}>
   {#if collapsed}
     <button
       class="ai-rail"
@@ -233,19 +268,31 @@
         </svg>
         AI 애널리스트
       </span>
+      <button
+        class="ai-collapse-btn ai-fullwidth-btn"
+        type="button"
+        onclick={toggleFullWidth}
+        aria-label={fullWidth ? '패널 좁히기' : '패널 넓히기'}
+        aria-pressed={fullWidth}
+      >
+        <span aria-hidden="true">{fullWidth ? '⤡' : '⤢'}</span>
+      </button>
     </div>
     <span class="ai-panel-sub">종목에 대해 무엇이든 물어보세요</span>
   </div>
   
   <div class="ai-messages" bind:this={messagesContainer}>
     {#each messages as msg, i}
-      <div class="ai-msg {msg.role}">
+      <div class="ai-msg {msg.role}" class:has-chart={(msg.charts?.length ?? 0) > 0}>
         <div
           class="ai-bubble"
           class:error={msg.error}
           class:streaming={msg.streaming}
           class:markdown={msg.role === 'bot' && !msg.error}
         >{#if msg.role === 'bot' && !msg.error}{@html renderMarkdown(msg.text)}{:else}{msg.text}{/if}{#if msg.streaming}<span class="ai-caret" aria-hidden="true"></span>{/if}</div>
+        {#each msg.charts ?? [] as spec}
+          <InlineChatChart {spec} />
+        {/each}
         {#if msg.role === 'bot' && msg.messageId && !streaming && i === messages.length - 1}
           <button class="ai-regen" type="button" onclick={regenerate}>다시 생성</button>
         {/if}
@@ -254,9 +301,10 @@
   </div>
   
   <div class="ai-suggestions">
-    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('왜 오르고 있어?')}>왜 오르고 있어?</button>
-    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('체결강도 어때?')}>체결강도 어때?</button>
-    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('목표주가는?')}>목표주가는?</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('영업이익 추이 차트로 보여줘')}>영업이익 추이 차트</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('목표주가 컨센서스 분석해줘')}>목표주가 컨센서스</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('최근 리포트 핵심만 요약해줘')}>최근 리포트 요약</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('지금 시세랑 체결강도 어때?')}>시세·체결강도</button>
   </div>
   
   <div class="ai-input-row">
@@ -281,7 +329,7 @@
     position: relative;
     flex-grow: 0;
     flex-shrink: 0;
-    flex-basis: var(--ai-expanded, 500px);
+    flex-basis: var(--ai-expanded, 640px);
     display: flex;
     flex-direction: column;
     background: var(--surface-body);
@@ -293,6 +341,9 @@
   }
   .ai-panel.collapsed {
     flex-basis: 48px;
+  }
+  .ai-panel.full-width {
+    flex-basis: 100%;
   }
 
   .ai-rail {
@@ -368,6 +419,10 @@
     background: var(--surface-raised);
     border-color: var(--border-strong);
   }
+  .ai-fullwidth-btn {
+    margin-left: auto;
+    font-size: 14px;
+  }
   .ai-title-icon { flex-shrink: 0; }
   .ai-panel-sub { font-size: 12px; color: var(--text-tertiary); }
 
@@ -384,6 +439,8 @@
   .ai-msg { display: flex; flex-direction: column; max-width: 86%; }
   .ai-msg.user { align-self: flex-end; align-items: flex-end; }
   .ai-msg.bot { align-self: flex-start; align-items: flex-start; }
+  .ai-msg.has-chart { max-width: 100%; width: 100%; }
+  .ai-msg.has-chart :global(.icc) { width: 100%; box-sizing: border-box; }
 
   .ai-bubble {
     font-size: 13px;
