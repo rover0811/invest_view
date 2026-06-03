@@ -15,6 +15,8 @@ dependencies = [
     "pydantic-settings",
     "PyJWT>=2.13.0",
     "anyio",
+    "strands-agents",
+    "google-genai",
 ]
 
 [tool.uv]
@@ -30,6 +32,7 @@ dev-dependencies = [
 asyncio_mode = "auto"
 markers = [
     "qa: tests requiring real external dependencies (PostgreSQL/Kafka/SR via docker-compose)",
+    "unit: fast unit tests with no external dependencies",
 ]
 testpaths = ["tests"]
 

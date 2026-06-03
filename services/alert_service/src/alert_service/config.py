@@ -32,6 +32,15 @@ class AlertServiceConfig(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_user_id_claim: str = "sub"
 
+    # Vertex AI / Gemini (agent layer)
+    # ADC is provided via the GOOGLE_APPLICATION_CREDENTIALS env var
+    # (google-genai auto-detects it; no API-key style auth is used).
+    gcp_project: str | None = None
+    gcp_location: str = "us-central1"
+    gemini_model_id: str = "gemini-2.5-flash"
+    gemini_temperature: float = 0.3
+    gemini_max_output_tokens: int = 8192
+
     # CORS
     allow_origins: list[str] = []
 
