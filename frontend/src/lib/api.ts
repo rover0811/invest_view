@@ -94,3 +94,188 @@ export async function getCandles(symbol: string, interval: CandleInterval = '5m'
 export async function getStockList(): Promise<StockListItem[]> {
   return getJson<StockListItem[]>('/stocks');
 }
+
+// Dev seam: VITE_DEV_JWT (build-time) takes precedence over a localStorage
+// token, since there is no login UI yet to populate localStorage.
+function getAuthToken(): string | null {
+  const fromEnv = import.meta.env.VITE_DEV_JWT;
+  if (fromEnv) return fromEnv;
+  if (typeof window !== 'undefined') {
+    return window.localStorage.getItem('authToken');
+  }
+  return null;
+}
+
+export function hasAuthToken(): boolean {
+  return getAuthToken() !== null;
+}
+
+function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
+  const token = getAuthToken();
+  const headers: Record<string, string> = { ...extra };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+  return headers;
+}
+
+export interface AgentSession {
+  session_id: string;
+  ticker: string;
+}
+
+export async function createAgentSession(ticker: string): Promise<AgentSession> {
+  const res = await fetch(`${BASE}/agent/sessions`, {
+    method: 'POST',
+    headers: authHeaders({ 'Content-Type': 'application/json' }),
+    body: JSON.stringify({ ticker }),
+  });
+  if (!res.ok) {
+    if (res.status === 401) throw new Error('인증이 필요합니다');
+    throw new Error(`POST /agent/sessions failed: ${res.status} ${res.statusText}`);
+  }
+  return res.json() as Promise<AgentSession>;
+}
+
+export interface AgentStreamCallbacks {
+  onToken(text: string): void;
+  onDone(info: { message_id: string; status: string; sibling_count?: number }): void;
+  onError(message: string): void;
+}
+
+function dispatchFrame(frame: string, callbacks: AgentStreamCallbacks): void {
+  let event = 'message';
+  const dataLines: string[] = [];
+  for (const rawLine of frame.split('\n')) {
+    const line = rawLine.replace(/\r$/, '');
+    if (line === '' || line.startsWith(':')) continue;
+    const colon = line.indexOf(':');
+    const field = colon === -1 ? line : line.slice(0, colon);
+    let value = colon === -1 ? '' : line.slice(colon + 1);
+    // SSE spec: a single leading space after the field colon is stripped.
+    if (value.startsWith(' ')) value = value.slice(1);
+    if (field === 'event') event = value;
+    else if (field === 'data') dataLines.push(value);
+  }
+  if (dataLines.length === 0) return;
+
+  const dataStr = dataLines.join('\n');
+  let payload: unknown;
+  try {
+    payload = JSON.parse(dataStr);
+  } catch {
+    return;
+  }
+  const p = payload as Record<string, unknown>;
+  if (event === 'token') {
+    if (typeof p.text === 'string') callbacks.onToken(p.text);
+  } else if (event === 'done') {
+    callbacks.onDone({
+      message_id: String(p.message_id ?? ''),
+      status: String(p.status ?? ''),
+      sibling_count: typeof p.sibling_count === 'number' ? p.sibling_count : undefined,
+    });
+  } else if (event === 'error') {
+    callbacks.onError(typeof p.message === 'string' ? p.message : '스트리밍 오류가 발생했습니다');
+  }
+}
+
+// A token frame can be split across network chunks, so frames are accumulated
+// in a buffer and only dispatched once terminated by a blank line ("\n\n").
+async function consumeSSE(
+  body: ReadableStream<Uint8Array>,
+  callbacks: AgentStreamCallbacks,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  const drainCompleteFrames = () => {
+    buffer = buffer.replace(/\r\n/g, '\n');
+    let sep: number;
+    while ((sep = buffer.indexOf('\n\n')) !== -1) {
+      const frame = buffer.slice(0, sep);
+      buffer = buffer.slice(sep + 2);
+      if (frame.trim() !== '') dispatchFrame(frame, callbacks);
+    }
+  };
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+    drainCompleteFrames();
+  }
+  buffer += decoder.decode();
+  drainCompleteFrames();
+  const tail = buffer.trim();
+  if (tail !== '') dispatchFrame(tail, callbacks);
+}
+
+async function openAgentStream(
+  path: string,
+  body: Record<string, unknown> | null,
+  callbacks: AgentStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}${path}`, {
+      method: 'POST',
+      headers: authHeaders({
+        'Content-Type': 'application/json',
+        Accept: 'text/event-stream',
+      }),
+      body: body ? JSON.stringify(body) : undefined,
+      signal,
+    });
+  } catch (err) {
+    // An abort is an intentional stop, not an error — partial text is kept.
+    if ((err as Error)?.name === 'AbortError') return;
+    callbacks.onError('네트워크 오류가 발생했습니다');
+    return;
+  }
+
+  if (!res.ok) {
+    if (res.status === 401) callbacks.onError('인증이 필요합니다');
+    else callbacks.onError(`요청 실패: ${res.status} ${res.statusText}`);
+    return;
+  }
+  if (!res.body) {
+    callbacks.onError('스트림 응답이 비어 있습니다');
+    return;
+  }
+
+  try {
+    await consumeSSE(res.body, callbacks);
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return;
+    callbacks.onError('스트림을 읽는 중 오류가 발생했습니다');
+  }
+}
+
+export async function streamAgentChat(
+  sessionId: string,
+  text: string,
+  callbacks: AgentStreamCallbacks,
+  opts?: { parentId?: string | null; signal?: AbortSignal },
+): Promise<void> {
+  return openAgentStream(
+    `/agent/sessions/${sessionId}/stream`,
+    { text, parent_id: opts?.parentId ?? null },
+    callbacks,
+    opts?.signal,
+  );
+}
+
+export async function regenerateAgentChat(
+  sessionId: string,
+  messageId: string,
+  callbacks: AgentStreamCallbacks,
+  opts?: { signal?: AbortSignal },
+): Promise<void> {
+  return openAgentStream(
+    `/agent/sessions/${sessionId}/messages/${messageId}/regenerate`,
+    null,
+    callbacks,
+    opts?.signal,
+  );
+}

@@ -1,17 +1,41 @@
 <script lang="ts">
   import type { StockData } from './types';
+  import { marked } from 'marked';
+  import DOMPurify from 'dompurify';
+  import {
+    createAgentSession,
+    streamAgentChat,
+    regenerateAgentChat,
+    hasAuthToken,
+    type AgentStreamCallbacks,
+  } from './api';
 
   let { data }: { data: StockData } = $props();
 
+  // Render agent markdown (bold/headings/lists) as sanitized HTML.
+  // Bot messages ONLY — user input and error strings are rendered as plain text.
+  function renderMarkdown(src: string): string {
+    return DOMPurify.sanitize(marked.parse(src, { async: false, breaks: true }) as string);
+  }
+
   interface Message {
     role: 'user' | 'bot';
-    html: string;
-    thinking?: string | null;
+    text: string;
+    streaming?: boolean;
+    error?: boolean;
+    messageId?: string;
   }
 
   let messages = $state<Message[]>([]);
   let inputValue = $state('');
   let messagesContainer = $state<HTMLElement | undefined>();
+  let sessionId = $state<string | null>(null);
+  let streaming = $state(false);
+  let activeSymbol = $state<string | null>(null);
+  let abortController: AbortController | null = null;
+  // Non-reactive synchronous lock to close the batched-$state race where a
+  // double Enter (or Enter + button) fires ask() twice before `streaming` flips.
+  let _sending = false;
 
   const STORAGE_KEY = 'aiPanelCollapsed';
 
@@ -33,77 +57,129 @@
     persistCollapsed();
   }
 
-  // Initialize welcome message
+  // A session is bound to one ticker; switching symbols resets the conversation.
   $effect(() => {
-    if (data && messages.length === 0) {
-      messages.push({
-        role: 'bot',
-        html: `안녕하세요 👋 ${data._meta.stock_name}에 대해 궁금한 점을 물어보세요. 실시간 시세·수급·재무 데이터를 바탕으로 답변해 드려요.`
-      });
+    const sym = data?._meta.symbol;
+    if (sym && sym !== activeSymbol) {
+      activeSymbol = sym;
+      sessionId = null;
+      abortController?.abort();
+      abortController = null;
+      streaming = false;
+      messages = [
+        {
+          role: 'bot',
+          text: `안녕하세요 👋 ${data._meta.stock_name}에 대해 궁금한 점을 물어보세요. 실시간 시세·수급·재무 데이터를 바탕으로 답변해 드려요.`,
+        },
+      ];
     }
   });
 
   $effect(() => {
-    if (messages.length > 0 && messagesContainer) {
+    messages.length;
+    messages[messages.length - 1]?.text;
+    if (messagesContainer) {
       messagesContainer.scrollTop = messagesContainer.scrollHeight;
     }
   });
 
-  function answer(q: string): { thinking: string | null; html: string } {
-    const t = q.toLowerCase();
-    const s = data.snapshot;
-    const td = data.tickDetail;
-    const ind = data.indicators;
-    const cons = data.consensus || [];
-    const name = data._meta.stock_name;
-
-    if (t.includes('올라') || t.includes('왜') || t.includes('상승')) {
-      const rate = (s.change_rate ?? 0).toFixed(2);
-      return {
-        thinking: '체결강도·수급 데이터 조회',
-        html: `${name}는 현재 <b class="price-up">+${rate}%</b> 상승 중입니다. 체결강도가 <b>${(td?.trade_strength ?? 0).toFixed(0)}%</b>로 매수세가 우위(매수 비중 ${((td?.buy_ratio ?? 0) * 100).toFixed(0)}%)이고, 순매수 <b class="price-up">+${(td?.net_buy_count ?? 0).toLocaleString('ko-KR')}</b>가 유입되고 있어요.<div class="ai-minichart"></div><div style="font-size:11px;color:var(--text-tertiary);margin-top:4px">↑ 최근 체결강도 추이</div>`
-      };
-    }
-    if (t.includes('체결') || t.includes('수급') || t.includes('매수')) {
-      return {
-        thinking: 'tick 데이터 분석',
-        html: `체결강도는 <b>${(td?.trade_strength ?? 0).toFixed(1)}%</b>로 100을 넘어 매수 우위 상태예요. 매수 ${(td?.buy_count ?? 0).toLocaleString('ko-KR')} vs 매도 ${(td?.sell_count ?? 0).toLocaleString('ko-KR')}건으로 순매수가 이어지고 있습니다.`
-      };
-    }
-    if (t.includes('목표') || t.includes('컨센') || t.includes('전망')) {
-      const avg = cons.length ? Math.round(cons.reduce((a, c) => a + c.target_price, 0) / cons.length) : 0;
-      const up = s.last_price ? (((avg - s.last_price) / s.last_price) * 100).toFixed(1) : '0';
-      return {
-        thinking: `증권사 리포트 ${cons.length}건 집계`,
-        html: `증권사 평균 목표주가는 <b>${avg.toLocaleString('ko-KR')}원</b>으로 현재가 대비 <b class="price-up">+${up}%</b> 상승 여력이 있어요. 매수 의견이 ${cons.filter(c => c.investment_opinion === 'Buy').length}곳으로 우세합니다.`
-      };
-    }
-    if (t.includes('per') || t.includes('지표') || t.includes('밸류') || t.includes('싸')) {
-      const fmt = (v: number | null | undefined) => (v == null ? '—' : v.toFixed(2));
-      return {
-        thinking: '밸류에이션 지표 조회',
-        html: `PER <b>${fmt(ind.per)}배</b>, PBR <b>${fmt(ind.pbr)}배</b>, EPS <b>${ind.eps == null ? '—' : Math.round(ind.eps).toLocaleString('ko-KR') + '원'}</b> 수준이에요.`
-      };
-    }
-    return {
-      thinking: null,
-      html: '죄송해요, 아직 목업 단계라 그 질문은 준비된 답변이 없어요. "왜 올라?", "체결강도 어때?", "목표주가는?" 같은 질문을 해보세요.'
-    };
+  async function ensureSession(): Promise<string> {
+    if (sessionId) return sessionId;
+    const s = await createAgentSession(data._meta.symbol);
+    sessionId = s.session_id;
+    return s.session_id;
   }
 
-  function ask(q: string) {
-    if (!q.trim()) return;
-    messages.push({ role: 'user', html: q });
+  function runStream(
+    invoke: (cbs: AgentStreamCallbacks, signal: AbortSignal) => Promise<void>,
+    botIndex: number,
+  ) {
+    abortController = new AbortController();
+    streaming = true;
+    const cbs: AgentStreamCallbacks = {
+      onToken: (t) => {
+        messages[botIndex].text += t;
+      },
+      onDone: (info) => {
+        messages[botIndex].streaming = false;
+        messages[botIndex].messageId = info.message_id;
+      },
+      onError: (m) => {
+        messages[botIndex].streaming = false;
+        messages[botIndex].error = true;
+        messages[botIndex].text = messages[botIndex].text
+          ? `${messages[botIndex].text}\n\n[오류] ${m}`
+          : m;
+      },
+    };
+    invoke(cbs, abortController.signal).finally(() => {
+      if (messages[botIndex]?.streaming) messages[botIndex].streaming = false;
+      streaming = false;
+      abortController = null;
+      _sending = false;
+    });
+  }
+
+  async function ask(q: string) {
+    const text = q.trim();
+    if (!text || streaming || _sending) return;
+    _sending = true;
     inputValue = '';
-    
-    const a = answer(q);
-    setTimeout(() => {
-      messages.push({ role: 'bot', html: a.html, thinking: a.thinking });
-    }, 350);
+
+    if (!hasAuthToken()) {
+      messages.push({ role: 'user', text });
+      messages.push({
+        role: 'bot',
+        text: '로그인이 필요합니다. (개발 환경에서는 VITE_DEV_JWT 환경변수를 설정하세요.)',
+        error: true,
+      });
+      _sending = false;
+      return;
+    }
+
+    messages.push({ role: 'user', text });
+
+    let sid: string;
+    try {
+      sid = await ensureSession();
+    } catch (e) {
+      messages.push({
+        role: 'bot',
+        text: e instanceof Error ? e.message : '세션을 생성하지 못했습니다.',
+        error: true,
+      });
+      _sending = false;
+      return;
+    }
+
+    messages.push({ role: 'bot', text: '', streaming: true });
+    const botIndex = messages.length - 1;
+    runStream((cbs, signal) => streamAgentChat(sid, text, cbs, { signal }), botIndex);
+  }
+
+  function regenerate() {
+    if (streaming || !sessionId) return;
+    let mid: string | undefined;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'bot' && messages[i].messageId) {
+        mid = messages[i].messageId;
+        break;
+      }
+    }
+    if (!mid) return;
+    const sid = sessionId;
+    messages.push({ role: 'bot', text: '', streaming: true });
+    const botIndex = messages.length - 1;
+    runStream((cbs, signal) => regenerateAgentChat(sid, mid!, cbs, { signal }), botIndex);
+  }
+
+  function stop() {
+    abortController?.abort();
   }
 
   function handleKeydown(e: KeyboardEvent) {
-    if (e.key === 'Enter') {
+    if (e.key === 'Enter' && !streaming) {
+      e.preventDefault();
       ask(inputValue);
     }
   }
@@ -162,26 +238,25 @@
   </div>
   
   <div class="ai-messages" bind:this={messagesContainer}>
-    {#each messages as msg}
+    {#each messages as msg, i}
       <div class="ai-msg {msg.role}">
-        {#if msg.thinking}
-          <div class="ai-thinking">
-            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
-              <circle cx="11" cy="11" r="6.5" />
-              <path d="M20 20l-4-4" />
-            </svg>
-            {msg.thinking}
-          </div>
+        <div
+          class="ai-bubble"
+          class:error={msg.error}
+          class:streaming={msg.streaming}
+          class:markdown={msg.role === 'bot' && !msg.error}
+        >{#if msg.role === 'bot' && !msg.error}{@html renderMarkdown(msg.text)}{:else}{msg.text}{/if}{#if msg.streaming}<span class="ai-caret" aria-hidden="true"></span>{/if}</div>
+        {#if msg.role === 'bot' && msg.messageId && !streaming && i === messages.length - 1}
+          <button class="ai-regen" type="button" onclick={regenerate}>다시 생성</button>
         {/if}
-        <div class="ai-bubble">{@html msg.html}</div>
       </div>
     {/each}
   </div>
   
   <div class="ai-suggestions">
-    <button class="ai-sug" type="button" onclick={() => ask('왜 오르고 있어?')}>왜 오르고 있어?</button>
-    <button class="ai-sug" type="button" onclick={() => ask('체결강도 어때?')}>체결강도 어때?</button>
-    <button class="ai-sug" type="button" onclick={() => ask('목표주가는?')}>목표주가는?</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('왜 오르고 있어?')}>왜 오르고 있어?</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('체결강도 어때?')}>체결강도 어때?</button>
+    <button class="ai-sug" type="button" disabled={streaming} onclick={() => ask('목표주가는?')}>목표주가는?</button>
   </div>
   
   <div class="ai-input-row">
@@ -192,7 +267,11 @@
       bind:value={inputValue}
       onkeydown={handleKeydown}
     />
-    <button class="ai-send" type="button" onclick={() => ask(inputValue)}>전송</button>
+    {#if streaming}
+      <button class="ai-send ai-stop" type="button" onclick={stop}>중지</button>
+    {:else}
+      <button class="ai-send" type="button" onclick={() => ask(inputValue)}>전송</button>
+    {/if}
   </div>
   {/if}
 </aside>
@@ -311,27 +390,90 @@
     line-height: 1.55;
     padding: 9px 12px;
     border-radius: var(--radius-md);
+    white-space: pre-wrap;
+    word-break: break-word;
   }
+  /* Rendered markdown manages its own block spacing; pre-wrap would add giant gaps. */
+  .ai-bubble.markdown { white-space: normal; }
   .ai-msg.user .ai-bubble { background: var(--brand); color: var(--text-on-brand); border-bottom-right-radius: 4px; }
   .ai-msg.bot .ai-bubble { background: var(--surface-overlay); color: var(--text-primary); border-bottom-left-radius: 4px; }
+  .ai-bubble.error { color: var(--price-down, #d64545); }
 
-  .ai-thinking {
-    font-size: 11px;
-    color: var(--text-tertiary);
-    margin-bottom: 4px;
-    display: flex;
-    align-items: center;
-    gap: 5px;
+  /* Compact markdown styling for the chat sidebar bubble. */
+  .ai-bubble.markdown :global(> *:first-child) { margin-top: 0; }
+  .ai-bubble.markdown :global(> *:last-child) { margin-bottom: 0; }
+  .ai-bubble.markdown :global(p) { margin: 0 0 8px; }
+  .ai-bubble.markdown :global(h1),
+  .ai-bubble.markdown :global(h2),
+  .ai-bubble.markdown :global(h3),
+  .ai-bubble.markdown :global(h4) {
+    margin: 10px 0 6px;
+    font-weight: 700;
+    line-height: 1.3;
   }
-
-  :global(.ai-minichart) {
-    margin-top: var(--space-2);
-    width: 100%;
-    height: 90px;
-    border-radius: var(--radius-sm);
+  .ai-bubble.markdown :global(h1) { font-size: 16px; }
+  .ai-bubble.markdown :global(h2) { font-size: 15px; }
+  .ai-bubble.markdown :global(h3),
+  .ai-bubble.markdown :global(h4) { font-size: 14px; }
+  .ai-bubble.markdown :global(ul),
+  .ai-bubble.markdown :global(ol) { margin: 0 0 8px; padding-left: 20px; }
+  .ai-bubble.markdown :global(li) { margin: 2px 0; }
+  .ai-bubble.markdown :global(li > p) { margin: 0; }
+  .ai-bubble.markdown :global(strong) { font-weight: 700; }
+  .ai-bubble.markdown :global(em) { font-style: italic; }
+  .ai-bubble.markdown :global(a) { color: var(--brand); text-decoration: underline; }
+  .ai-bubble.markdown :global(code) {
+    font-family: var(--font-mono, ui-monospace, monospace);
+    font-size: 0.92em;
     background: var(--surface-floor);
-    border: 1px solid var(--border-subtle);
+    padding: 1px 4px;
+    border-radius: var(--radius-sm, 4px);
   }
+  .ai-bubble.markdown :global(pre) {
+    margin: 0 0 8px;
+    padding: 8px 10px;
+    background: var(--surface-floor);
+    border-radius: var(--radius-sm, 4px);
+    overflow-x: auto;
+  }
+  .ai-bubble.markdown :global(pre code) { background: none; padding: 0; }
+  .ai-bubble.markdown :global(blockquote) {
+    margin: 0 0 8px;
+    padding-left: 10px;
+    border-left: 2px solid var(--border-strong, var(--border-subtle));
+    color: var(--text-secondary);
+  }
+  .ai-bubble.streaming:empty::before {
+    content: '생각 중';
+    color: var(--text-tertiary);
+  }
+
+  .ai-caret {
+    display: inline-block;
+    width: 7px;
+    height: 1em;
+    margin-left: 2px;
+    vertical-align: text-bottom;
+    background: currentColor;
+    opacity: 0.7;
+    animation: ai-blink 1s step-start infinite;
+  }
+  @keyframes ai-blink {
+    50% { opacity: 0; }
+  }
+
+  .ai-regen {
+    margin-top: 6px;
+    font-size: 11px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border-subtle);
+    border-radius: 999px;
+    padding: 3px 10px;
+    cursor: pointer;
+    transition: color var(--dur-hover) var(--ease-out), background var(--dur-hover) var(--ease-out);
+  }
+  .ai-regen:hover { color: var(--text-primary); background: var(--surface-overlay); }
 
   .ai-suggestions {
     display: flex;
@@ -350,6 +492,7 @@
     transition: all 0.15s;
   }
   .ai-sug:hover { color: var(--text-primary); background: var(--surface-raised); }
+  .ai-sug:disabled { opacity: 0.5; cursor: not-allowed; }
 
   .ai-input-row {
     display: flex;
@@ -381,5 +524,10 @@
     font-size: 13px;
     font-weight: 600;
     cursor: pointer;
+  }
+  .ai-stop {
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    border: 1px solid var(--border-strong);
   }
 </style>
