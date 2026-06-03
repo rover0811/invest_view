@@ -82,7 +82,7 @@ def _latest_bps(rows: list[Any]) -> tuple[float | None, str | None]:
         if equity is not None and shares is not None:
             if shares == 0:
                 return None, "PBR: 발행주식수 0"
-            return (equity * 1000) / shares, None
+            return equity / shares, None
         if equity is None:
             missing_reason = "PBR: 지배주주지분 누락"
         if shares is None:

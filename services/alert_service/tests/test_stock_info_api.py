@@ -4,6 +4,7 @@ import json
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -175,12 +176,12 @@ async def _seed_base_financials(session_factory, eps: int | None = 3200):
         await _seed_metric(session_factory, "INC", period, "*EBITDA", ebitda, "백만원")
         if period_eps is not None:
             await _seed_metric(session_factory, "INC", period, "*주당순이익", period_eps, "원")
-    await _seed_metric(session_factory, "BAL", "2024Q2", "지배주주지분", 360_000_000, "백만원")
-    await _seed_metric(session_factory, "BAL", "2024Q2", "발행주식수", 5_969_782_550, "주")
+    await _seed_metric(session_factory, "BAL", "2024Q2", "지배주주지분", 424_313_255_000, "천원")
+    await _seed_metric(session_factory, "BAL", "2024Q2", "발행주식수", 6_735_613, "천주")
     await _seed_metric(session_factory, "CAS", "2024Q2", "영업활동현금흐름", 9_000_000, "백만원")
 
 
-def _write_evidence(filename: str, body: dict):
+def _write_evidence(filename: str, body: dict[str, Any]):
     evidence_dir = Path(__file__).resolve().parents[3] / ".sisyphus" / "evidence"
     evidence_dir.mkdir(parents=True, exist_ok=True)
     (evidence_dir / filename).write_text(
@@ -192,7 +193,7 @@ async def test_stock_info_happy_path(stock_info_env):
     client, sf = stock_info_env
     await _seed_market_ticker(sf)
     await _seed_overview(sf)
-    await _seed_snapshot(sf, last_price=72_000)
+    await _seed_snapshot(sf, last_price=347_750)
     await _seed_base_financials(sf, eps=3200)
 
     resp = await client.get("/api/stock-info/005930?period_type=Q")
@@ -205,9 +206,13 @@ async def test_stock_info_happy_path(stock_info_env):
     revenue_periods = [row["period"] for row in income if row["item"] == "매출액(수익)"]
     assert revenue_periods == ["2024Q2", "2024Q1"]
     assert body["indicators"]["eps"] == 3200
-    assert body["indicators"]["per"] == pytest.approx(72_000 / 3200)
-    bps = (360_000_000 * 1000) / 5_969_782_550
-    assert body["indicators"]["pbr"] == pytest.approx(72_000 / bps)
+    assert body["indicators"]["per"] == pytest.approx(347_750 / 3200)
+    controlling_equity_thousand_krw = 424_313_255_000
+    shares_outstanding_thousand_shares = 6_735_613
+    bps = controlling_equity_thousand_krw / shares_outstanding_thousand_shares
+    assert bps == pytest.approx(62_995.489)
+    assert body["indicators"]["pbr"] == pytest.approx(347_750 / bps)
+    assert body["indicators"]["pbr"] == pytest.approx(5.52, rel=0.01)
     assert body["meta"]["industry_name"] == "반도체"
     assert body["meta"]["stock_name"] == "삼성전자"
 
