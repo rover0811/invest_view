@@ -12,7 +12,23 @@ import pytest_asyncio
 from sqlalchemy import text
 
 from alert_service.api.app import create_app
+from alert_service.api.routes.stock_info import _iso_or_str
 from alert_service.db.session import create_engine, create_session_factory
+
+
+@pytest.mark.unit
+def test_iso_or_str_none():
+    assert _iso_or_str(None) is None
+
+
+@pytest.mark.unit
+def test_iso_or_str_passthrough():
+    assert _iso_or_str("1989-09-25") == "1989-09-25"
+
+
+@pytest.mark.unit
+def test_iso_or_str_date():
+    assert _iso_or_str(date(1975, 6, 11)) == "1975-06-11"
 
 
 pytestmark = pytest.mark.qa

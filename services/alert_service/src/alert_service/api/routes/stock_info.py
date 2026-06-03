@@ -49,6 +49,14 @@ _EQUITY_ITEM = "지배주주지분"
 _SHARES_ITEM = "발행주식수"
 
 
+def _iso_or_str(value: Any) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        return value
+    return value.isoformat()
+
+
 def _row_value(row: Any) -> float | None:
     return _to_float(row.value)
 
@@ -147,9 +155,7 @@ async def get_stock_info(
             "market_cap": meta_row.market_cap,
             "industry_name": meta_row.industry_name,
             "ceo_name": meta_row.ceo_name,
-            "listing_date": meta_row.listing_date.isoformat()
-            if meta_row.listing_date is not None
-            else None,
+            "listing_date": _iso_or_str(meta_row.listing_date),
         },
         "financials": _group_financials(financial_rows),
         "indicators": {"eps": eps, "per": per, "pbr": pbr},
