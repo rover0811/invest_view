@@ -465,3 +465,26 @@ async def test_iterator_stops_cleanly_on_stop():
         await manager.__anext__()
 
 
+@pytest.mark.asyncio
+async def test_iterator_propagates_reconnect_exhaustion_for_fail_fast():
+    from kis_ingestion.connection_manager import ReconnectExhaustedError
+
+    manager, _, ws_client, _, _, _, _ = make_manager()
+    manager._running = True
+
+    import websockets.exceptions
+    async def mock_recv():
+        raise websockets.exceptions.ConnectionClosed(None, None)
+    ws_client.recv = mock_recv
+    manager._reconnect = AsyncMock(side_effect=ReconnectExhaustedError("exhausted"))
+
+    with pytest.raises(ReconnectExhaustedError):
+        await manager.__anext__()
+
+
+def test_reconnect_exhausted_is_not_caught_as_transient():
+    from kis_ingestion.connection_manager import ReconnectExhaustedError
+
+    assert not issubclass(ReconnectExhaustedError, (ConnectionError, OSError, RuntimeError))
+
+
