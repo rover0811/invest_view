@@ -78,6 +78,7 @@ def test_tables_allowed_all_allowed_tables_ok():
         "reference.bronze_stock_overview",
         "serving.symbol_snapshot",
         "serving.symbol_intraday_5m",
+        "serving.symbol_daily_ohlc",
         "serving.symbol_signal_timeline",
     ]:
         assert_tables_allowed(f"SELECT * FROM {table}")

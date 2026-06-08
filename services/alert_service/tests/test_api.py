@@ -18,11 +18,15 @@ class FakeContainer:
     def __init__(self):
         self.config = MagicMock()
         self.config.allow_origins = []
+        self.config.jwt_secret = SECRET
+        self.config.jwt_algorithm = "HS256"
+        self.config.jwt_user_id_claim = "sub"
         self.jwt_verifier = JWTVerifier(secret=SECRET, algorithm="HS256", user_id_claim="sub")
         self.connection_registry = MagicMock()
         self.connection_registry._by_user = {}
         self.connection_registry.add = MagicMock()
         self.connection_registry.remove = MagicMock()
+        self.user_repo = MagicMock()
         self.watchlist_repo = MagicMock()
         self.watchlist_repo.list_for_user = AsyncMock(return_value=[])
         self.watchlist_repo.add = AsyncMock()

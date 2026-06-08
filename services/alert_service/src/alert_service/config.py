@@ -50,6 +50,9 @@ class AlertServiceConfig(BaseSettings):
     http_host: str = "0.0.0.0"
     http_port: int = 8000
 
+    # Price resolution
+    price_realtime_ttl_seconds: int = 300
+
     # Test seams
     fanout_fail_after_alert: bool = False
 

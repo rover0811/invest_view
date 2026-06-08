@@ -17,6 +17,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from alert_service.api.heartbeat import heartbeat_loop
 from alert_service.api.routes import (
     agent_chat,
+    auth,
     candles,
     consensus,
     health,
@@ -58,6 +59,7 @@ def create_app(container: Any) -> FastAPI:
 
     app.state.jwt_verifier = container.jwt_verifier
     app.state.connection_registry = container.connection_registry
+    app.state.user_repo = container.user_repo
     app.state.watchlist_repo = container.watchlist_repo
     app.state.notification_repo = container.notification_repo
     app.state.alert_consumer = container.alert_consumer
@@ -74,6 +76,7 @@ def create_app(container: Any) -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(watchlist.router)
     app.include_router(notifications.router)
     app.include_router(ws.router)

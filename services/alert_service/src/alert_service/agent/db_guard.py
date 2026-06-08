@@ -17,6 +17,7 @@ ALLOWED_TABLES: frozenset[str] = frozenset(
         "reference.bronze_stock_overview",
         "serving.symbol_snapshot",
         "serving.symbol_intraday_5m",
+        "serving.symbol_daily_ohlc",
         "serving.symbol_signal_timeline",
     }
 )
