@@ -12,7 +12,7 @@ from strands import ToolContext, tool
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from alert_service.agent.financial_items import UNIT, resolve_item_names
-from alert_service.agent.repository import fetch_financials, search_financial_items
+from alert_service.agent.repository import fetch_financials, fetch_price_series, search_financial_items
 
 
 _SessionFactory = Callable[[], AbstractAsyncContextManager[AsyncSession]]
@@ -35,6 +35,11 @@ def _require_session_factory(tool_context: _ToolContextLike) -> _SessionFactory:
 
 def _normalize_chart_type(chart_type: str) -> str:
     return "bar" if chart_type == "bar" else "line"
+
+
+def _normalize_source(source: str) -> str:
+    normalized = source.strip().lower() if source else "financial"
+    return "price" if normalized == "price" else "financial"
 
 
 def _normalize_transform(transform: str) -> str:
@@ -121,6 +126,7 @@ def _build_chart_spec(
     item_names: list[str],
     chart_type: str,
     transform: str = "raw",
+    title_subject: str = "재무",
 ) -> dict[str, object] | None:
     series_by_item: dict[str, list[dict[str, object]]] = {}
     first_unit = UNIT
@@ -174,7 +180,7 @@ def _build_chart_spec(
 
     return {
         "chart_type": _normalize_chart_type(chart_type),
-        "title": f"{ticker} 재무 추이{title_suffix}",
+        "title": f"{ticker} {title_subject} 추이{title_suffix}",
         "x_label": "기간",
         "y_label": y_unit,
         "unit": y_unit,
@@ -190,27 +196,43 @@ async def _render_chart_impl(
     start_period: str | None = None,
     end_period: str | None = None,
     transform: str = "raw",
+    source: str = "financial",
 ) -> dict[str, object]:
     ticker = tool_context.invocation_state.get("current_ticker")
     if not isinstance(ticker, str) or not ticker:
         raise ValueError("current_ticker is required in invocation_state")
 
     session_factory = _require_session_factory(tool_context)
-    resolved_item_names = resolve_item_names(stmt_type, item_names) or []
     effective_transform = _infer_transform_from_item_names(item_names, transform)
+    normalized_source = _normalize_source(source)
     async with session_factory() as session:
-        rows = await fetch_financials(
-            session,
-            [ticker],
-            stmt_type,
-            resolved_item_names,
-            "Y",
-            start_period,
-            end_period,
-        )
+        if normalized_source == "price":
+            rows = await fetch_price_series(session, [ticker], start_period, end_period)
+            resolved_item_names = ["종가"]
+            spec = _build_chart_spec(
+                ticker,
+                rows,
+                resolved_item_names,
+                chart_type,
+                effective_transform,
+                title_subject="주가",
+            )
+        else:
+            resolved_item_names = resolve_item_names(stmt_type, item_names) or []
+            rows = await fetch_financials(
+                session,
+                [ticker],
+                stmt_type,
+                resolved_item_names,
+                "Y",
+                start_period,
+                end_period,
+            )
 
-        spec = _build_chart_spec(ticker, rows, resolved_item_names, chart_type, effective_transform)
+            spec = _build_chart_spec(ticker, rows, resolved_item_names, chart_type, effective_transform)
         if spec is None:
+            if normalized_source == "price":
+                return {"status": "no_data", "source": "price", "items": ["종가"]}
             matches = await search_financial_items(
                 session, [ticker], stmt_type=stmt_type, keyword=None, limit=15
             )
@@ -247,8 +269,9 @@ async def render_chart(
     start_period: str | None = None,
     end_period: str | None = None,
     transform: str = "raw",
+    source: str = "financial",
 ) -> dict[str, object]:
-    """현재 종목의 재무 추이를 차트로 생성한다. item_names는 한국어 재무 항목명 리스트(예: 매출액(수익), 영업이익). chart_type은 line 또는 bar. stmt_type은 INC/BAL/CAS. transform은 raw/pct_change/yoy_growth/indexed_to_100/cumulative_pct_change. 연간(Y) 데이터만."""
+    """현재 종목의 재무 또는 가격 추이를 차트로 생성한다. source는 financial 또는 price. financial일 때 item_names는 한국어 재무 항목명 리스트(예: 매출액(수익), 영업이익), stmt_type은 INC/BAL/CAS. price일 때 백필된 연간 종가를 사용한다. chart_type은 line 또는 bar. transform은 raw/pct_change/yoy_growth/indexed_to_100/cumulative_pct_change."""
     return await _render_chart_impl(
         tool_context,
         item_names,
@@ -257,4 +280,5 @@ async def render_chart(
         start_period,
         end_period,
         transform,
+        source,
     )

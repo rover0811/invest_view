@@ -74,6 +74,7 @@ def test_render_chart_is_strands_tool_with_expected_schema() -> None:
         "start_period",
         "end_period",
         "transform",
+        "source",
     }
 
 
@@ -341,6 +342,81 @@ async def test_render_chart_empty_data_includes_available_matches(
         "items": ["없는항목"],
         "available_matches": ["자산총계", "부채총계"],
     }
+    assert chart_sink.empty()
+
+
+async def test_render_chart_price_source_fetches_price_series_and_applies_growth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chart_sink: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+    calls: list[tuple[object, list[str], str | None, str | None]] = []
+
+    async def fake_fetch_price_series(
+        session: object,
+        tickers: list[str],
+        start_period: str | None = None,
+        end_period: str | None = None,
+    ) -> list[dict[str, object]]:
+        calls.append((session, tickers, start_period, end_period))
+        return [
+            {"ticker": "005930", "period": "2022-12", "item": "종가", "value": 100.0, "unit": "원"},
+            {"ticker": "005930", "period": "2023-12", "item": "종가", "value": 120.0, "unit": "원"},
+            {"ticker": "005930", "period": "2024-12", "item": "종가", "value": 180.0, "unit": "원"},
+        ]
+
+    async def fail_fetch_financials(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        raise AssertionError("price source must not fetch financials")
+
+    monkeypatch.setattr("alert_service.agent.tools.chart.fetch_price_series", fake_fetch_price_series)
+    monkeypatch.setattr("alert_service.agent.tools.chart.fetch_financials", fail_fetch_financials)
+
+    context = _context(chart_sink=chart_sink)
+    result = await _render_chart_impl(
+        context,
+        ["주가"],
+        start_period="2022-12",
+        end_period="2024-12",
+        transform="yoy_growth",
+        source="price",
+    )
+
+    assert calls == [
+        (context.invocation_state["session_factory"].session, ["005930"], "2022-12", "2024-12")  # pyright: ignore[reportAny]
+    ]
+    assert result == {
+        "status": "success",
+        "chart_type": "line",
+        "items": ["종가 증가율(%)"],
+        "periods": 2,
+    }
+    spec = chart_sink.get_nowait()
+    assert spec["title"] == "005930 주가 추이 증가율(%)"
+    assert spec["unit"] == "%"
+    series = spec["series"]
+    assert isinstance(series, list)
+    assert series[0]["points"] == [
+        {"x": "2023-12", "y": 20.0},
+        {"x": "2024-12", "y": 50.0},
+    ]
+
+
+async def test_render_chart_price_source_empty_data_skips_financial_item_search(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chart_sink: asyncio.Queue[dict[str, object]] = asyncio.Queue()
+
+    async def fake_fetch_price_series(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        return []
+
+    async def fail_search_financial_items(*_args: object, **_kwargs: object) -> list[dict[str, object]]:
+        raise AssertionError("price source must not search financial items")
+
+    monkeypatch.setattr("alert_service.agent.tools.chart.fetch_price_series", fake_fetch_price_series)
+    monkeypatch.setattr("alert_service.agent.tools.chart.search_financial_items", fail_search_financial_items)
+
+    result = await _render_chart_impl(_context(chart_sink=chart_sink), ["주가"], source="price")
+
+    assert result == {"status": "no_data", "source": "price", "items": ["종가"]}
     assert chart_sink.empty()
 
 

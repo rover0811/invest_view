@@ -15,7 +15,7 @@ from alert_service.agent.schemas import AnalysisResponse
 def test_system_prompt_is_nonempty_string():
     assert isinstance(SYSTEM_PROMPT, str)
     assert len(SYSTEM_PROMPT) > 0
-    assert len(SYSTEM_PROMPT) <= 4500
+    assert len(SYSTEM_PROMPT) <= 4000
 
 
 def test_system_prompt_uses_structured_gemini_sections():
@@ -73,12 +73,16 @@ def test_system_prompt_requires_immediate_partial_execution_without_permission_a
     assert "불가능한 일부만 제한" in SYSTEM_PROMPT
 
 
-def test_system_prompt_guides_stock_growth_partial_answer():
+def test_system_prompt_guides_stock_price_chart_routing():
+    # Old fallback (no yearly price data) must be gone; new routing to source="price" must be present.
     assert "주가 증가율" in SYSTEM_PROMPT
-    assert "연간 주가 데이터가 없" in SYSTEM_PROMPT
-    assert "EPS" in SYSTEM_PROMPT
-    assert "화면 왼쪽 캔들 차트" in SYSTEM_PROMPT
-    assert "가짜 연간 주가" in SYSTEM_PROMPT
+    assert 'source="price"' in SYSTEM_PROMPT
+    assert 'render_chart(source="price")' in SYSTEM_PROMPT
+    assert "백필된 연간 종가" in SYSTEM_PROMPT
+    # Old fallback phrases must NOT appear
+    assert "연간 주가 데이터가 없" not in SYSTEM_PROMPT
+    assert "화면 왼쪽 캔들 차트" not in SYSTEM_PROMPT
+    assert "가짜 연간 주가" not in SYSTEM_PROMPT
 
 
 def test_system_prompt_lists_all_market_analyst_tools():
@@ -162,6 +166,19 @@ def test_system_prompt_allows_transparent_arithmetic_but_forbids_fabricated_raw_
     assert "거절은 마지막 수단" in SYSTEM_PROMPT
     assert "해당 기능 없음" in SYSTEM_PROMPT
     assert "가능한 부분을 먼저 수행" in SYSTEM_PROMPT
+
+
+def test_system_prompt_mandates_report_body_reading_before_summary():
+    assert "반드시 report_idx를 확보한 뒤" in SYSTEM_PROMPT
+    assert "각 리포트에 get_report_body를 호출합니다" in SYSTEM_PROMPT
+    assert "report_idx 목록 확보" in SYSTEM_PROMPT
+    assert "각 report_idx마다 get_report_body 호출" in SYSTEM_PROMPT
+    assert "본문 내용만 근거로 요약" in SYSTEM_PROMPT
+    assert "제목만으로 요약하거나" in SYSTEM_PROMPT
+    assert "본문이 제공되지 않아 제목으로 미루어" in SYSTEM_PROMPT
+    assert "절대 금지" in SYSTEM_PROMPT
+    assert "본문을 읽은 뒤에만 요약합니다" in SYSTEM_PROMPT
+    assert "제목 추측 요약은 절대 금지" in SYSTEM_PROMPT
 
 
 def test_analysis_response_constructs():

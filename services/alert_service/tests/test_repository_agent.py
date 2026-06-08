@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import re
 import sys
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -25,6 +26,7 @@ from alert_service.agent.db_guard import guard
 from alert_service.agent.repository import (
     _CONSENSUS_SQL,
     _FINANCIALS_SQL,
+    _PRICE_SERIES_SQL,
     _REPORT_BODY_SQL,
     _RECENT_REPORTS_SQL,
     _SEARCH_REPORTS_SQL,
@@ -33,6 +35,7 @@ from alert_service.agent.repository import (
     escape_like,
     fetch_consensus,
     fetch_financials,
+    fetch_price_series,
     fetch_report_body,
     fetch_recent_reports,
     fetch_snapshot,
@@ -78,6 +81,7 @@ def test_repository_sql_templates_pass_guard() -> None:
         _CONSENSUS_SQL,
         _SEARCH_REPORTS_SQL,
         _SNAPSHOT_SQL,
+        _PRICE_SERIES_SQL,
     ]:
         assert guard(sql) == sql
 
@@ -124,8 +128,47 @@ async def test_fetch_snapshot_maps_trade_strength_and_last_trade_time() -> None:
             "trading_halted": "N",
             "last_trade_time": "142530",
             "updated_at": "2026-06-03T14:25:30+09:00",
+            "price": None,
+            "source": "none",
+            "display_label": "데이터 없음",
+            "as_of": None,
+            "is_realtime": False,
         }
     ]
+
+
+async def test_fetch_snapshot_adds_resolved_daily_fallback_fields() -> None:
+    session = _FakeSession(
+        [
+            {
+                "requested_ticker": "005930",
+                "symbol": "005930",
+                "last_price": 72000,
+                "change": 1200,
+                "change_rate": "1.74",
+                "change_sign": "RISE",
+                "cumulative_volume": 1234567,
+                "trade_strength": "112.34",
+                "vi_trigger_price": None,
+                "trading_halted": "N",
+                "last_trade_time": "142530",
+                "updated_at": datetime.now(timezone.utc) - timedelta(seconds=600),
+                "daily_symbol": "005930",
+                "daily_trade_date": date(2026, 6, 3),
+                "daily_close": 70000,
+                "daily_volume": 999,
+                "daily_fetched_at": datetime(2026, 6, 4, tzinfo=timezone.utc),
+            }
+        ]
+    )
+
+    rows = await fetch_snapshot(session, ["005930"])  # type: ignore[arg-type]
+
+    assert rows[0]["price"] == 70000
+    assert rows[0]["source"] == "daily_close"
+    assert rows[0]["display_label"] == "장마감 종가 기준"
+    assert rows[0]["as_of"] == "2026-06-03T15:30:00+09:00"
+    assert rows[0]["is_realtime"] is False
 
 
 async def test_search_financial_items_maps_rows_and_escapes_keyword() -> None:
@@ -163,6 +206,30 @@ async def test_search_financial_items_maps_rows_and_escapes_keyword() -> None:
             "periods": 10,
             "latest_period": "2025-12",
         }
+    ]
+
+
+async def test_fetch_price_series_maps_yearly_close_rows() -> None:
+    session = _FakeSession(
+        [
+            {
+                "ticker": "005930",
+                "period": "2025-12",
+                "item": "종가",
+                "value": 347000,
+                "unit": "원",
+            }
+        ]
+    )
+
+    rows = await fetch_price_series(session, ["005930"], "2020-12", "2025-12")  # type: ignore[arg-type]
+
+    assert session.params == {"tickers": ["005930"], "start_year": "2020", "end_year": "2025"}
+    assert session.statement is not None
+    assert "serving.symbol_daily_ohlc" in session.statement
+    assert "DISTINCT ON" in session.statement
+    assert rows == [
+        {"ticker": "005930", "period": "2025-12", "item": "종가", "value": 347000.0, "unit": "원"}
     ]
 
 

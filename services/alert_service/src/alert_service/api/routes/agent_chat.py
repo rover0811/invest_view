@@ -181,7 +181,12 @@ async def stream_chat_session(
                 messages=history,
                 conversation_manager=build_conversation_manager(),
             )
-            invocation_state = {"current_ticker": ticker, "session_factory": session_factory, "chart_sink": chart_sink}
+            invocation_state = {
+                "current_ticker": ticker,
+                "session_factory": session_factory,
+                "chart_sink": chart_sink,
+                "price_realtime_ttl_seconds": config.price_realtime_ttl_seconds,
+            }
             async for event in agent.stream_async(
                 body.text,
                 invocation_state=invocation_state,
@@ -278,7 +283,12 @@ async def regenerate_chat_message(
                 messages=history,
                 conversation_manager=build_conversation_manager(),
             )
-            invocation_state = {"current_ticker": ticker, "session_factory": session_factory, "chart_sink": chart_sink}
+            invocation_state = {
+                "current_ticker": ticker,
+                "session_factory": session_factory,
+                "chart_sink": chart_sink,
+                "price_realtime_ttl_seconds": config.price_realtime_ttl_seconds,
+            }
             async for event in agent.stream_async(
                 prompt,
                 invocation_state=invocation_state,

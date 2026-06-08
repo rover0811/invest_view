@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal
 from typing import cast
 
@@ -11,6 +11,7 @@ from sqlalchemy import text
 from sqlalchemy.engine import Result
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from alert_service.api.price_resolution import resolve_price
 from alert_service.agent.db_guard import guard
 from alert_service.agent.financial_items import (
     CONTROLLING_EQUITY,
@@ -85,10 +86,45 @@ LIMIT :limit
 """
 
 _SNAPSHOT_SQL = """
-SELECT symbol, last_price, change, change_rate, change_sign, cumulative_volume,
-       trade_strength, vi_trigger_price, trading_halted, last_trade_time, updated_at
-FROM serving.symbol_snapshot
-WHERE symbol = ANY(CAST(:tickers AS text[]))
+WITH requested AS (
+    SELECT unnest(CAST(:tickers AS text[])) AS ticker
+)
+SELECT r.ticker AS requested_ticker,
+       s.symbol, s.last_price, s.change, s.change_rate, s.change_sign, s.cumulative_volume,
+       s.trade_strength, s.vi_trigger_price, s.trading_halted, s.last_trade_time, s.updated_at,
+       d.symbol AS daily_symbol, d.trade_date AS daily_trade_date, d.close AS daily_close,
+       d.volume AS daily_volume, d.fetched_at AS daily_fetched_at
+FROM requested r
+LEFT JOIN serving.symbol_snapshot s ON s.symbol = r.ticker
+LEFT JOIN LATERAL (
+    SELECT symbol, trade_date, close, volume, fetched_at
+    FROM serving.symbol_daily_ohlc
+    WHERE symbol = r.ticker AND "interval" = 'd' AND close IS NOT NULL
+    ORDER BY trade_date DESC
+    LIMIT 1
+) d ON true
+"""
+
+_PRICE_SERIES_SQL = """
+WITH yearly_close AS (
+    SELECT DISTINCT ON (symbol, date_part('year', trade_date))
+           symbol AS ticker,
+           (to_char(trade_date, 'YYYY') || '-12') AS period,
+           '종가' AS item,
+           close AS value,
+           '원' AS unit,
+           trade_date
+    FROM serving.symbol_daily_ohlc
+    WHERE symbol = ANY(CAST(:tickers AS text[]))
+      AND "interval" = 'd'
+      AND close IS NOT NULL
+      AND (CAST(:start_year AS text) IS NULL OR to_char(trade_date, 'YYYY') >= CAST(:start_year AS text))
+      AND (CAST(:end_year AS text) IS NULL OR to_char(trade_date, 'YYYY') <= CAST(:end_year AS text))
+    ORDER BY symbol, date_part('year', trade_date), trade_date DESC
+)
+SELECT ticker, period, item, value, unit
+FROM yearly_close
+ORDER BY ticker, period DESC
 """
 
 _INDICATOR_FINANCIALS_SQL = """
@@ -120,6 +156,16 @@ def _to_isoformat(value: object) -> str | None:
     return str(value)
 
 
+def _to_datetime(value: object) -> datetime | None:
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value
+    if isinstance(value, str):
+        return datetime.fromisoformat(value)
+    raise TypeError(f"Cannot coerce {type(value).__name__} to datetime")
+
+
 def _mappings(result: Result[tuple[object, ...]]) -> list[Mapping[str, object]]:
     return cast(list[Mapping[str, object]], result.mappings().all())
 
@@ -127,6 +173,13 @@ def _mappings(result: Result[tuple[object, ...]]) -> list[Mapping[str, object]]:
 def escape_like(keyword: str) -> str:
     """Escape LIKE wildcards and the escape character for parameterized ILIKE."""
     return keyword.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+
+
+def _period_year(period: str | None) -> str | None:
+    if period is None:
+        return None
+    stripped = period.strip()
+    return stripped[:4] if len(stripped) >= 4 and stripped[:4].isdigit() else None
 
 
 async def fetch_financials(
@@ -189,6 +242,33 @@ async def search_financial_items(
             "unit": row["unit"],
             "periods": row["periods"],
             "latest_period": _to_isoformat(row["latest_period"]),
+        }
+        for row in rows
+    ]
+
+
+async def fetch_price_series(
+    session: AsyncSession,
+    tickers: list[str],
+    start_period: str | None = None,
+    end_period: str | None = None,
+) -> list[dict[str, object]]:
+    result = await session.execute(
+        text(guard(_PRICE_SERIES_SQL)),
+        {
+            "tickers": tickers,
+            "start_year": _period_year(start_period),
+            "end_year": _period_year(end_period),
+        },
+    )
+    rows = _mappings(result)
+    return [
+        {
+            "ticker": row["ticker"],
+            "period": row["period"],
+            "item": row["item"],
+            "value": _to_float(row["value"]),
+            "unit": row["unit"],
         }
         for row in rows
     ]
@@ -294,12 +374,45 @@ async def search_reports_ilike(
     ]
 
 
-async def fetch_snapshot(session: AsyncSession, tickers: list[str]) -> list[dict[str, object]]:
+async def fetch_snapshot(
+    session: AsyncSession, tickers: list[str], ttl_seconds: int = 300
+) -> list[dict[str, object]]:
     result = await session.execute(text(guard(_SNAPSHOT_SQL)), {"tickers": tickers})
     rows = _mappings(result)
-    return [
-        {
-            "symbol": row["symbol"],
+    snapshots: list[dict[str, object]] = []
+    now_utc = datetime.now(timezone.utc)
+    for row in rows:
+        updated_at = _to_datetime(row.get("updated_at"))
+        snapshot = None
+        if row.get("symbol") is not None:
+            snapshot = {
+                "symbol": row["symbol"],
+                "last_price": row["last_price"],
+                "change": row["change"],
+                "change_rate": _to_float(row["change_rate"]),
+                "change_sign": row["change_sign"],
+                "cumulative_volume": row["cumulative_volume"],
+                "vi_trigger_price": row["vi_trigger_price"],
+                "trading_halted": row["trading_halted"],
+                "updated_at": updated_at,
+            }
+        daily = None
+        if row.get("daily_symbol") is not None:
+            daily = {
+                "symbol": row["daily_symbol"],
+                "trade_date": row["daily_trade_date"],
+                "close": row["daily_close"],
+                "volume": row["daily_volume"],
+                "fetched_at": row["daily_fetched_at"],
+            }
+        resolved = resolve_price(snapshot, daily, now_utc=now_utc, ttl_seconds=ttl_seconds)
+        if resolved["symbol"] is None:
+            resolved["symbol"] = row.get("requested_ticker")
+        if row.get("symbol") is None and daily is None:
+            continue
+        snapshots.append(
+            {
+            "symbol": row["symbol"] or resolved["symbol"],
             "last_price": _to_float(row["last_price"]),
             "change": _to_float(row["change"]),
             "change_rate": _to_float(row["change_rate"]),
@@ -309,10 +422,15 @@ async def fetch_snapshot(session: AsyncSession, tickers: list[str]) -> list[dict
             "vi_trigger_price": _to_float(row["vi_trigger_price"]),
             "trading_halted": row["trading_halted"],
             "last_trade_time": row["last_trade_time"],
-            "updated_at": _to_isoformat(row["updated_at"]),
+            "updated_at": _to_isoformat(updated_at),
+            "price": resolved["price"],
+            "source": resolved["source"],
+            "display_label": resolved["display_label"],
+            "as_of": _to_isoformat(resolved["as_of"]),
+            "is_realtime": resolved["is_realtime"],
         }
-        for row in rows
-    ]
+        )
+    return snapshots
 
 
 async def fetch_indicator_inputs(
