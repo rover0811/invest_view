@@ -5,6 +5,7 @@ import type {
   Snapshot,
   TimelineEvent,
   TickDetail,
+  ResolvedPrice,
   Consensus,
   Indicators,
   Financials,
@@ -22,9 +23,17 @@ async function getJson<T>(path: string): Promise<T> {
   return res.json() as Promise<T>;
 }
 
+export async function getSnapshot(symbol: string): Promise<Snapshot> {
+  return getJson<Snapshot>(`/snapshot/${symbol}`);
+}
+
+export async function getPrice(symbol: string): Promise<ResolvedPrice> {
+  return getJson<ResolvedPrice>(`/price/${symbol}`);
+}
+
 // tick-detail returns 404 when no tick row exists for the symbol (e.g. market
 // closed / never traded). That is an expected empty state, not an error.
-async function getTickDetail(symbol: string): Promise<TickDetail | null> {
+export async function getTickDetail(symbol: string): Promise<TickDetail | null> {
   const res = await fetch(`${BASE}/tick-detail/${symbol}`);
   if (res.status === 404) {
     return null;
@@ -52,7 +61,7 @@ interface StockInfoResponse {
 export async function getStockData(symbol: string): Promise<StockData> {
   const [candles, snapshot, timeline, tickDetail, stockInfo, consensus] = await Promise.all([
     getJson<Candle[]>(`/candles/${symbol}`),
-    getJson<Snapshot>(`/snapshot/${symbol}`),
+    getSnapshot(symbol),
     getJson<TimelineEvent[]>(`/timeline/${symbol}`),
     getTickDetail(symbol),
     getJson<StockInfoResponse>(`/stock-info/${symbol}?period_type=Y`),
@@ -111,6 +120,31 @@ export function hasAuthToken(): boolean {
   return getAuthToken() !== null;
 }
 
+export function setAuthToken(token: string): void {
+  if (typeof window !== 'undefined') {
+    window.localStorage.setItem('authToken', token);
+  }
+}
+
+export function clearAuthToken(): void {
+  if (typeof window !== 'undefined') {
+    window.localStorage.removeItem('authToken');
+  }
+}
+
+// Login is unauthenticated by design (no authHeaders); the caller persists the token.
+export async function login(nickname: string): Promise<{ token: string; user_id: string }> {
+  const res = await fetch(`${BASE}/auth/login`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ nickname }),
+  });
+  if (!res.ok) {
+    throw new Error(`로그인 실패: ${res.status} ${res.statusText}`);
+  }
+  return res.json() as Promise<{ token: string; user_id: string }>;
+}
+
 function authHeaders(extra: Record<string, string> = {}): Record<string, string> {
   const token = getAuthToken();
   const headers: Record<string, string> = { ...extra };
@@ -143,7 +177,12 @@ export interface AgentStreamCallbacks {
   onChart?(spec: ChartSpec): void;
 }
 
-function dispatchFrame(frame: string, callbacks: AgentStreamCallbacks): void {
+interface ParsedSSEFrame {
+  event: string;
+  payload: Record<string, unknown>;
+}
+
+function parseSSEFrame(frame: string): ParsedSSEFrame | null {
   let event = 'message';
   const dataLines: string[] = [];
   for (const rawLine of frame.split('\n')) {
@@ -157,16 +196,23 @@ function dispatchFrame(frame: string, callbacks: AgentStreamCallbacks): void {
     if (field === 'event') event = value;
     else if (field === 'data') dataLines.push(value);
   }
-  if (dataLines.length === 0) return;
+  if (dataLines.length === 0) return null;
 
   const dataStr = dataLines.join('\n');
   let payload: unknown;
   try {
     payload = JSON.parse(dataStr);
   } catch {
-    return;
+    return null;
   }
-  const p = payload as Record<string, unknown>;
+  if (!payload || typeof payload !== 'object') return null;
+  return { event, payload: payload as Record<string, unknown> };
+}
+
+function dispatchFrame(frame: string, callbacks: AgentStreamCallbacks): void {
+  const parsed = parseSSEFrame(frame);
+  if (parsed == null) return;
+  const { event, payload: p } = parsed;
   if (event === 'token') {
     if (typeof p.text === 'string') callbacks.onToken(p.text);
   } else if (event === 'done') {
@@ -214,7 +260,7 @@ function isChartSpec(v: unknown): v is ChartSpec {
 // in a buffer and only dispatched once terminated by a blank line ("\n\n").
 async function consumeSSE(
   body: ReadableStream<Uint8Array>,
-  callbacks: AgentStreamCallbacks,
+  onFrame: (frame: string) => void,
 ): Promise<void> {
   const reader = body.getReader();
   const decoder = new TextDecoder();
@@ -226,7 +272,7 @@ async function consumeSSE(
     while ((sep = buffer.indexOf('\n\n')) !== -1) {
       const frame = buffer.slice(0, sep);
       buffer = buffer.slice(sep + 2);
-      if (frame.trim() !== '') dispatchFrame(frame, callbacks);
+      if (frame.trim() !== '') onFrame(frame);
     }
   };
 
@@ -239,7 +285,7 @@ async function consumeSSE(
   buffer += decoder.decode();
   drainCompleteFrames();
   const tail = buffer.trim();
-  if (tail !== '') dispatchFrame(tail, callbacks);
+  if (tail !== '') onFrame(tail);
 }
 
 async function openAgentStream(
@@ -277,10 +323,60 @@ async function openAgentStream(
   }
 
   try {
-    await consumeSSE(res.body, callbacks);
+    await consumeSSE(res.body, (frame) => dispatchFrame(frame, callbacks));
   } catch (err) {
     if ((err as Error)?.name === 'AbortError') return;
     callbacks.onError('스트림을 읽는 중 오류가 발생했습니다');
+  }
+}
+
+export interface PriceStreamCallbacks {
+  onPrice(price: ResolvedPrice): void;
+  onError(message: string): void;
+}
+
+function dispatchPriceFrame(frame: string, callbacks: PriceStreamCallbacks): void {
+  const parsed = parseSSEFrame(frame);
+  if (parsed == null) return;
+  const { event, payload } = parsed;
+  if (event === 'price') callbacks.onPrice(payload as unknown as ResolvedPrice);
+  else if (event === 'error') {
+    callbacks.onError(typeof payload.message === 'string' ? payload.message : '가격 스트리밍 오류가 발생했습니다');
+  }
+}
+
+export async function streamPrice(
+  symbol: string,
+  callbacks: PriceStreamCallbacks,
+  signal?: AbortSignal,
+): Promise<void> {
+  let res: Response;
+  try {
+    res = await fetch(`${BASE}/price-stream/${symbol}`, {
+      method: 'GET',
+      headers: { Accept: 'text/event-stream' },
+      signal,
+    });
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return;
+    callbacks.onError('가격 스트림 네트워크 오류가 발생했습니다');
+    return;
+  }
+
+  if (!res.ok) {
+    callbacks.onError(`가격 스트림 요청 실패: ${res.status} ${res.statusText}`);
+    return;
+  }
+  if (!res.body) {
+    callbacks.onError('가격 스트림 응답이 비어 있습니다');
+    return;
+  }
+
+  try {
+    await consumeSSE(res.body, (frame) => dispatchPriceFrame(frame, callbacks));
+  } catch (err) {
+    if ((err as Error)?.name === 'AbortError') return;
+    callbacks.onError('가격 스트림을 읽는 중 오류가 발생했습니다');
   }
 }
 

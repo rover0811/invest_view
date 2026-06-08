@@ -1,6 +1,7 @@
 <script lang="ts">
   import type { StockData, ChartSpec } from './types';
   import InlineChatChart from './InlineChatChart.svelte';
+  import LoginForm from './LoginForm.svelte';
   import { marked } from 'marked';
   import DOMPurify from 'dompurify';
   import {
@@ -44,6 +45,8 @@
   // Non-reactive synchronous lock to close the batched-$state race where a
   // double Enter (or Enter + button) fires ask() twice before `streaming` flips.
   let _sending = false;
+  let showLoginForm = $state(false);
+  let pendingAsk = $state('');
 
   const STORAGE_KEY = 'aiPanelCollapsed';
   const FULLWIDTH_KEY = 'aiPanelFullWidth';
@@ -162,12 +165,8 @@
     inputValue = '';
 
     if (!hasAuthToken()) {
-      messages.push({ role: 'user', text });
-      messages.push({
-        role: 'bot',
-        text: '로그인이 필요합니다. (개발 환경에서는 VITE_DEV_JWT 환경변수를 설정하세요.)',
-        error: true,
-      });
+      pendingAsk = text;
+      showLoginForm = true;
       _sending = false;
       return;
     }
@@ -190,6 +189,13 @@
     messages.push({ role: 'bot', text: '', streaming: true });
     const botIndex = messages.length - 1;
     runStream((cbs, signal) => streamAgentChat(sid, text, cbs, { signal }), botIndex);
+  }
+
+  function handleLoginSuccess() {
+    showLoginForm = false;
+    const retry = pendingAsk;
+    pendingAsk = '';
+    if (retry) ask(retry);
   }
 
   function regenerate() {
@@ -321,6 +327,10 @@
       <button class="ai-send" type="button" onclick={() => ask(inputValue)}>전송</button>
     {/if}
   </div>
+  {/if}
+
+  {#if showLoginForm}
+    <LoginForm onSuccess={handleLoginSuccess} onClose={() => showLoginForm = false} />
   {/if}
 </aside>
 

@@ -1,0 +1,28 @@
+# .dockerignore for the frontend image build context (context root = frontend/).
+# CRITICAL: .gitignore is NOT honored by Docker — this file is what keeps the dev
+# JWT out of the image. .env.local holds VITE_DEV_JWT + a localhost VITE_API_TARGET;
+# excluding all .env* guarantees `vite build` produces a clean prod bundle with
+# import.meta.env.VITE_DEV_JWT === undefined and the relative "/api" base only.
+
+# Local env files (the dev JWT lives in .env.local) — never bake into the image
+.env
+.env.*
+*.local
+
+# Reinstalled fresh via `npm ci`; rebuilt fresh via `vite build`
+node_modules
+dist
+dist-ssr
+
+# VCS / editor / logs / OS clutter
+.git
+.gitignore
+.vscode
+.idea
+*.log
+.DS_Store
+
+# Build inputs that the image build does not need
+Dockerfile
+.dockerignore
+README.md

@@ -1,10 +1,19 @@
 <script lang="ts">
   import SearchOverlay from './SearchOverlay.svelte';
+  import LoginForm from './LoginForm.svelte';
   import { appState } from './stores.svelte';
+  import { hasAuthToken, clearAuthToken } from './api';
 
   let { onNavigate }: { onNavigate: (path: string) => void } = $props();
 
   let searchOpen = $state(false);
+  let loginOpen = $state(false);
+  let loggedIn = $state(hasAuthToken());
+
+  function logout() {
+    clearAuthToken();
+    window.location.reload();
+  }
 
   function handleKeydown(e: KeyboardEvent) {
     // Ignore if typing in an input
@@ -47,7 +56,12 @@
         <span class="shortcut">/</span>
       </button>
       <div class="profile">
-        <div class="avatar"></div>
+        {#if loggedIn}
+          <div class="avatar" aria-hidden="true"></div>
+          <button class="auth-btn" type="button" onclick={logout}>로그아웃</button>
+        {:else}
+          <button class="auth-btn primary" type="button" onclick={() => loginOpen = true}>로그인</button>
+        {/if}
       </div>
     </div>
   </div>
@@ -58,6 +72,10 @@
   onClose={() => searchOpen = false} 
   onNavigate={onNavigate} 
 />
+
+{#if loginOpen}
+  <LoginForm onSuccess={() => window.location.reload()} onClose={() => loginOpen = false} />
+{/if}
 
 <style>
   .gnb {
@@ -173,6 +191,7 @@
   .profile {
     display: flex;
     align-items: center;
+    gap: var(--space-2);
   }
 
   .avatar {
@@ -181,5 +200,34 @@
     border-radius: 50%;
     background: var(--surface-raised);
     border: 1px solid var(--border-subtle);
+  }
+
+  .auth-btn {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-secondary);
+    background: var(--surface-body);
+    border: 1px solid var(--border-subtle);
+    border-radius: 20px;
+    padding: 6px 14px;
+    cursor: pointer;
+    transition: color var(--dur-hover) var(--ease-out), background var(--dur-hover) var(--ease-out), border-color var(--dur-hover) var(--ease-out);
+  }
+
+  .auth-btn:hover {
+    color: var(--text-primary);
+    background: var(--surface-raised);
+    border-color: var(--border-strong);
+  }
+
+  .auth-btn.primary {
+    color: var(--text-on-brand);
+    background: var(--brand);
+    border-color: var(--brand);
+  }
+
+  .auth-btn.primary:hover {
+    color: var(--text-on-brand);
+    opacity: 0.9;
   }
 </style>

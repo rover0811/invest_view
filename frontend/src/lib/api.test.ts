@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { getStockData, getStockList, getCandles } from './api';
+import { getStockData, getStockList, getCandles, streamPrice } from './api';
 
 function jsonResponse(body: unknown, status = 200): Response {
   return {
@@ -7,6 +7,21 @@ function jsonResponse(body: unknown, status = 200): Response {
     status,
     statusText: String(status),
     json: async () => body
+  } as Response;
+}
+
+function sseResponse(body: string): Response {
+  const encoded = new TextEncoder().encode(body);
+  return {
+    ok: true,
+    status: 200,
+    statusText: '200',
+    body: new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoded);
+        controller.close();
+      }
+    })
   } as Response;
 }
 
@@ -106,5 +121,22 @@ describe('getCandles', () => {
     await getCandles('005930', '1d');
     const url = f.mock.calls[0][0] as string;
     expect(url).toBe('/api/candles/005930?interval=1d');
+  });
+});
+
+describe('streamPrice', () => {
+  it('opens the unauthenticated price stream and dispatches price frames', async () => {
+    const payload = { symbol: '005930', price: 72000, source: 'realtime_snapshot', as_of: '2026-06-05T05:00:00Z', is_realtime: true, is_stale: false, display_label: '실시간', change: 1500, change_rate: 1.23, change_sign: '2', cumulative_volume: 123, vi_trigger_price: 71000, trading_halted: '0' };
+    const f = vi.fn(async () => sseResponse(`event: price\ndata: ${JSON.stringify(payload)}\n\n`));
+    vi.stubGlobal('fetch', f);
+    const seen: unknown[] = [];
+
+    await streamPrice('005930', { onPrice: (p) => seen.push(p), onError: (m) => { throw new Error(m); } });
+
+    expect(f).toHaveBeenCalledWith('/api/price-stream/005930', expect.objectContaining({
+      method: 'GET',
+      headers: { Accept: 'text/event-stream' }
+    }));
+    expect(seen).toEqual([payload]);
   });
 });
