@@ -1,4 +1,4 @@
-"""User repository — minimal v1: lookup only (no create — seeded externally)."""
+"""User repository."""
 from __future__ import annotations
 
 import uuid
@@ -23,3 +23,18 @@ class UserRepository:
                 select(User.user_id).where(User.user_id == user_id)
             )
             return result.scalar_one_or_none() is not None
+
+    async def get_or_create_by_nickname(self, nickname: str) -> User:
+        async with self._sf() as session:
+            result = await session.execute(
+                select(User).where(User.nickname == nickname).limit(1)
+            )
+            user = result.scalar_one_or_none()
+            if user is not None:
+                return user
+
+            user = User(user_id=uuid.uuid4(), nickname=nickname)
+            session.add(user)
+            await session.commit()
+            await session.refresh(user)
+            return user

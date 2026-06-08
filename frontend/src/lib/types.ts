@@ -18,6 +18,25 @@ export interface Snapshot {
   updated_at: string;
 }
 
+// /api/price always 200. price/change/etc. are null on daily-close fallback
+// (source='daily_close') or no data (source='none'); is_realtime gates the
+// realtime-only fields (change/체결강도/VI) from being shown as live.
+export interface ResolvedPrice {
+  symbol: string | null;
+  price: number | null;
+  source: 'realtime_snapshot' | 'daily_close' | 'none';
+  as_of: string | null;
+  is_realtime: boolean;
+  is_stale: boolean;
+  display_label: '실시간' | '장마감 종가 기준' | '데이터 없음';
+  change: number | null;
+  change_rate: number | null;
+  change_sign: string | null;
+  cumulative_volume: number | null;
+  vi_trigger_price: number | null;
+  trading_halted: string | null;
+}
+
 export interface TimelineEvent {
   time: number;
   event_kind: 'alert' | 'pattern';
@@ -108,3 +127,26 @@ export interface StockListItem {
   change_rate: number;
   market: string;
 }
+
+export interface ChartPoint {
+  x: string;   // period e.g. "2024-12"
+  y: number;
+}
+
+export interface ChartSeries {
+  name: string;
+  points: ChartPoint[];
+}
+
+export interface ChartSpec {
+  chart_type: 'line' | 'bar';
+  title: string;
+  x_label: string;
+  y_label: string;
+  unit: string;
+  series: ChartSeries[];
+}
+
+export type MessagePart =
+  | { kind: 'text'; text: string }
+  | { kind: 'chart'; spec: ChartSpec };

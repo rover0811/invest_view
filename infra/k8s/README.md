@@ -25,8 +25,10 @@ Both images use `imagePullPolicy: Never` — they must be `kind load`ed first (`
 
 ## Secrets (referenced, NOT committed)
 
-These manifests reference four Secrets by name — they are **not** committed with real values.
-`make secrets` bootstraps them from the root `.env` (KIS_APP_KEY / KIS_APP_SECRET):
+These manifests reference five Secrets by name — they are **not** committed with real values.
+`make secrets` bootstraps the first four from the root `.env` (KIS_APP_KEY / KIS_APP_SECRET);
+`gcp-vertex-credentials` is optional and only created when `GCP_SA_KEY_FILE` points at a
+service-account JSON (`make secrets GCP_SA_KEY_FILE=/path/to/key.json`):
 
 | Secret | Keys |
 |--------|------|
@@ -34,6 +36,7 @@ These manifests reference four Secrets by name — they are **not** committed wi
 | `alert-service-secrets` | `ALERT_SERVICE_DATABASE_URL`, `ALERT_SERVICE_JWT_SECRET` |
 | `tick-persistence-secrets` | `TICK_PERSISTENCE_DATABASE_URL` |
 | `event-pattern-persistence-secrets` | `EVENT_PATTERN_PERSISTENCE_DATABASE_URL` |
+| `gcp-vertex-credentials` (optional) | `key.json` (GCP service-account; mounted at `/var/secrets/google` for Vertex ADC) |
 
 ## Deploy
 

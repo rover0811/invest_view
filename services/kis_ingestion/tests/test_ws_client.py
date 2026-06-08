@@ -35,7 +35,9 @@ async def test_connect_sets_connected_true():
 
         assert client.connected is True
         assert client._ws is mock_ws
-        mock_connect.assert_awaited_once_with("ws://example.com", ping_interval=None)
+        mock_connect.assert_awaited_once_with(
+            "ws://example.com", ping_interval=20, ping_timeout=20
+        )
 
 
 def test_connect_does_not_accept_approval_key_argument():

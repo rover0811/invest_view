@@ -12,6 +12,11 @@ dist
 dist-ssr
 *.local
 
+# Local env files (may hold a dev JWT) — keep .env.example committed
+.env
+.env.*
+!.env.example
+
 # Root .gitignore has a Python-oriented `lib/` rule that wrongly matches
 # frontend/src/lib/. Re-include our Svelte source lib explicitly.
 !src/lib/

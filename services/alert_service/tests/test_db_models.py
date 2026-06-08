@@ -7,7 +7,9 @@ def test_metadata_contains_all_tables():
     assert "alert_service.watchlist_items" in names
     assert "alert_service.alert_events" in names
     assert "alert_service.notification_events" in names
-    assert len(names) == 4
+    # agent chat tables (0002_agent_chat) share the same Base.metadata
+    assert "agent.chat_sessions" in names
+    assert "agent.chat_messages" in names
 
 
 def test_watchlist_composite_pk():

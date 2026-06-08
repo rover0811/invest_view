@@ -13,9 +13,11 @@ from testcontainers.postgres import PostgresContainer
 _EXPECTED_OBJECTS: tuple[str, ...] = (
     "bronze.tick_history",
     "silver.symbol_5m_metrics",
+    "silver.symbol_daily_ohlc",
     "serving.symbol_signal_timeline",
+    "serving.symbol_daily_ohlc",
 )
-_HEAD_REVISION = "0003_signal_timeline_view"
+_HEAD_REVISION = "0005_daily_ohlc_view"
 
 
 def _asyncpg_url(container: PostgresContainer) -> str:

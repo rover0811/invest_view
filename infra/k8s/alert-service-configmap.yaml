@@ -10,3 +10,8 @@ data:
   ALERT_SERVICE_AVRO_SCHEMA_PATH: "/app/schemas/stock-alerts.avsc"
   ALERT_SERVICE_KAFKA_TOPIC: "stock-alerts"
   ALERT_SERVICE_KAFKA_CONSUMER_GROUP: "alert-service-v1"
+  # GCP Vertex AI (Gemini) — agent LLM. Non-secret config; ADC service-account JSON is
+  # mounted separately via the gcp-vertex-credentials Secret (see deployment).
+  ALERT_SERVICE_GCP_PROJECT: "REPLACE_WITH_GCP_PROJECT"
+  ALERT_SERVICE_GCP_LOCATION: "us-central1"
+  ALERT_SERVICE_GEMINI_MODEL_ID: "gemini-2.5-flash"

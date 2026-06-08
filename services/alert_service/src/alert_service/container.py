@@ -6,6 +6,12 @@ the FastAPI app factory can attach them to app.state.
 """
 from __future__ import annotations
 
+# pyright: reportUnknownVariableType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownArgumentType=false, reportUnannotatedClassAttribute=false, reportExplicitAny=false, reportAny=false
+
+from typing import Any
+
+from alert_service.agent.market_analyst import build_market_analyst_agent
+from alert_service.agent.model import build_gemini_model
 from alert_service.auth.jwt import JWTVerifier
 from alert_service.config import AlertServiceConfig
 from alert_service.db.session import create_engine, create_session_factory
@@ -49,4 +55,21 @@ class Container:
         self.alert_consumer = AlertConsumer(
             config=config,
             on_message=self.alert_pusher.handle,
+        )
+
+    def build_agent_model(self) -> Any:
+        return build_gemini_model(self.config)
+
+    def build_market_analyst(
+        self,
+        *,
+        model: Any | None = None,
+        messages: Any | None = None,
+        conversation_manager: Any | None = None,
+    ) -> Any:
+        return build_market_analyst_agent(
+            self.config,
+            model=model,
+            messages=messages,
+            conversation_manager=conversation_manager,
         )

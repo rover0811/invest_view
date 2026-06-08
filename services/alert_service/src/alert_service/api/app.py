@@ -1,3 +1,4 @@
+# pyright: reportMissingImports=false
 """FastAPI app factory.
 
 Container is provided at create_app time; its objects are attached to
@@ -15,6 +16,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from alert_service.api.heartbeat import heartbeat_loop
 from alert_service.api.routes import (
+    agent_chat,
+    auth,
     candles,
     consensus,
     health,
@@ -56,11 +59,13 @@ def create_app(container: Any) -> FastAPI:
 
     app.state.jwt_verifier = container.jwt_verifier
     app.state.connection_registry = container.connection_registry
+    app.state.user_repo = container.user_repo
     app.state.watchlist_repo = container.watchlist_repo
     app.state.notification_repo = container.notification_repo
     app.state.alert_consumer = container.alert_consumer
     app.state.engine = container.engine
     app.state.session_factory = container.session_factory
+    app.state.config = container.config
 
     app.add_middleware(
         CORSMiddleware,
@@ -71,9 +76,11 @@ def create_app(container: Any) -> FastAPI:
     )
 
     app.include_router(health.router)
+    app.include_router(auth.router)
     app.include_router(watchlist.router)
     app.include_router(notifications.router)
     app.include_router(ws.router)
+    app.include_router(agent_chat.router)
     app.include_router(candles.router)
     app.include_router(stock_info.router)
     app.include_router(consensus.router)

@@ -23,6 +23,8 @@
     "vitest": "^3.2.6"
   },
   "dependencies": {
-    "lightweight-charts": "^5.2.0"
+    "dompurify": "^3.4.7",
+    "lightweight-charts": "^5.2.0",
+    "marked": "^18.0.4"
   }
 }

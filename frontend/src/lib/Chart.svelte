@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte';
   import {
     createChart,
     CandlestickSeries,
@@ -20,19 +21,16 @@
   } from 'lightweight-charts';
   import { fmtPrice, fmtVol } from './format';
   import { getCandles, type CandleInterval } from './api';
+  import { createTimeframeSelection } from './timeframeSelection.svelte';
   import type { Candle, Snapshot, TimelineEvent } from './types';
 
   let { candles, timeline, snapshot, symbol }: { candles: Candle[]; timeline: TimelineEvent[]; snapshot: Snapshot; symbol: string } = $props();
 
   let container = $state<HTMLDivElement>();
-  let activeTimeframe = $state<CandleInterval>('5m');
-  let activeCandles = $state<Candle[]>([]);
   let loadError = $state(false);
 
-  $effect(() => {
-    activeCandles = candles;
-    activeTimeframe = '5m';
-  });
+  const tf = createTimeframeSelection(() => symbol, () => candles);
+
   let legendItems = $state<LegendItem[]>([]);
   let eventTicks = $state<EventTick[]>([]);
   let tooltip = $state<TooltipState>({ visible: false, left: 0, top: 0, label: '', kindClass: '' });
@@ -86,7 +84,6 @@
     ma5: '#e0a64e',
     ma20: '#4ec9b0',
     ma60: '#b58cf0',
-    vwap: '#8a8f98',
     positiveVolume: 'rgba(220, 46, 71, 0.5)',
     negativeVolume: 'rgba(49, 130, 246, 0.5)'
   } as const;
@@ -110,6 +107,10 @@
   ];
 
   let fitChartContent = () => {};
+  // Re-applies timeline event markers to the EXISTING chart (set by the render
+  // effect). A separate effect calls this when `timeline` changes so the markers
+  // refresh WITHOUT recreating the chart — preserving the user's zoom/pan.
+  let refreshEventMarkers = () => {};
 
   // chart `time` is a UTC epoch second but the data is bucketed on the KST wall
   // clock; shifting by +9h and reading UTC getters yields the KST calendar values.
@@ -257,13 +258,13 @@
   }
 
   async function selectTimeframe(timeframe: CandleInterval) {
-    if (timeframe === activeTimeframe) {
+    if (timeframe === tf.activeTimeframe) {
       return;
     }
-    activeTimeframe = timeframe;
+    tf.activeTimeframe = timeframe;
     loadError = false;
     try {
-      activeCandles = await getCandles(symbol, timeframe);
+      tf.activeCandles = await getCandles(symbol, timeframe);
     } catch {
       loadError = true;
     }
@@ -278,14 +279,23 @@
     let measuring = false;
     let measureStart: { x: number } | undefined;
     let disposed = false;
-    const allCandles = activeCandles;
+    const allCandles = tf.activeCandles;
     const latestCandle = allCandles.at(-1);
     const volumeByTime = new Map<number, number>();
     const markerByTime = new Map<number, TimelineEvent>();
 
-    timeline.forEach((event) => {
-      markerByTime.set(event.time, event);
-    });
+    // `timeline` is read via untrack so this render effect (which creates the LWC
+    // chart and calls fitContent) does NOT subscribe to the timeline prop. It
+    // therefore depends only on `activeCandles` + `container`, so the 5s price
+    // poll never destroys/recreates the chart and the user's zoom/pan persists.
+    // The separate timeline effect below keeps markers fresh on the live chart.
+    function rebuildMarkers() {
+      markerByTime.clear();
+      untrack(() => timeline).forEach((event) => {
+        markerByTime.set(event.time, event);
+      });
+    }
+    rebuildMarkers();
 
     const fontSans = getComputedStyle(document.documentElement).getPropertyValue('--font-sans').trim() || 'Pretendard, system-ui, -apple-system, sans-serif';
 
@@ -316,7 +326,8 @@
         }
       },
       localization: {
-        timeFormatter: formatCrosshairTime
+        timeFormatter: formatCrosshairTime,
+        priceFormatter: (price: number) => fmtPrice(price)
       },
       timeScale: {
         timeVisible: true,
@@ -375,21 +386,9 @@
       lastValueVisible: false
     });
 
-    const vwapSeries = chart.addSeries(LineSeries, {
-      color: T.vwap,
-      lineWidth: 1,
-      lineStyle: LineStyle.Dashed,
-      priceLineVisible: false,
-      lastValueVisible: false,
-      title: 'VWAP'
-    });
-
     candleSeries.setData(allCandles.map(toChartCandle));
 
     const volumeData: ChartVolume[] = [];
-    const vwapData: ChartLine[] = [];
-    let cumulativeVolume = 0;
-    let cumulativeTypicalVolume = 0;
 
     allCandles.forEach((candle) => {
       const isUp = candle.close >= candle.open;
@@ -402,19 +401,9 @@
         value: synthVol,
         color: isUp ? T.positiveVolume : T.negativeVolume
       });
-
-      const typicalPrice = (candle.high + candle.low + candle.close) / 3;
-      cumulativeVolume += synthVol;
-      cumulativeTypicalVolume += typicalPrice * synthVol;
-
-      vwapData.push({
-        time: asTime(candle.time),
-        value: cumulativeTypicalVolume / cumulativeVolume
-      });
     });
 
     volumeSeries.setData(volumeData);
-    vwapSeries.setData(vwapData);
     ma5Series.setData(calculateMA(allCandles, 5));
     ma20Series.setData(calculateMA(allCandles, 20));
     ma60Series.setData(calculateMA(allCandles, 60));
@@ -424,20 +413,9 @@
       panes[1].setStretchFactor(0.2);
     }
 
-    if (snapshot.vi_trigger_price) {
-      candleSeries.createPriceLine({
-        price: snapshot.vi_trigger_price,
-        color: T.textTertiary,
-        lineWidth: 1,
-        lineStyle: LineStyle.Dashed,
-        axisLabelVisible: true,
-        title: 'VI'
-      });
-    }
-
     function buildEventLane() {
       const timeScale = chart.timeScale();
-      eventTicks = timeline.flatMap((event, index) => {
+      eventTicks = untrack(() => timeline).flatMap((event, index) => {
         const x = timeScale.timeToCoordinate(asTime(event.time));
         if (x == null) {
           return [];
@@ -588,6 +566,10 @@
 
     renderLegend(latestCandle, latestCandle ? volumeByTime.get(latestCandle.time) : undefined);
     fitChartContent = () => chart.timeScale().fitContent();
+    refreshEventMarkers = () => {
+      rebuildMarkers();
+      buildEventLane();
+    };
     syncSize();
     chart.timeScale().fitContent();
     buildEventLane();
@@ -595,6 +577,7 @@
     return () => {
       disposed = true;
       fitChartContent = () => {};
+      refreshEventMarkers = () => {};
       eventTicks = [];
       hideTooltip();
       measure = { visible: false, left: 0, width: 0, direction: 'up' };
@@ -606,6 +589,16 @@
       window.removeEventListener('mouseup', handleMeasureEnd);
       chart.remove();
     };
+  });
+
+  // Defense-in-depth: when the `timeline` prop genuinely changes, refresh the
+  // event-lane markers on the EXISTING chart instead of letting the render effect
+  // rebuild the whole chart (which would reset zoom/pan). With the StockDetail
+  // in-place poll fix this won't fire on the 5s poll, but it keeps live timeline
+  // updates working without touching the chart instance.
+  $effect(() => {
+    void timeline;
+    refreshEventMarkers();
   });
 </script>
 
@@ -624,7 +617,7 @@
   <div class="timeframe-row" aria-label="차트 기간 선택">
     {#each timeframes as timeframe}
       <button
-        class:active={activeTimeframe === timeframe.value}
+        class:active={tf.activeTimeframe === timeframe.value}
         class="timeframe-btn"
         type="button"
         data-tf={timeframe.value}
@@ -643,7 +636,6 @@
       <span class="ma-item ma5"><i></i>MA5</span>
       <span class="ma-item ma20"><i></i>MA20</span>
       <span class="ma-item ma60"><i></i>MA60</span>
-      <span class="ma-item vwap"><i></i>VWAP</span>
     </div>
     <div
       class="marker-tooltip"
@@ -825,7 +817,6 @@
   .ma-item.ma5 i { background: var(--ma5); }
   .ma-item.ma20 i { background: var(--ma20); }
   .ma-item.ma60 i { background: var(--ma60); }
-  .ma-item.vwap i { background: var(--vwap); }
 
   .event-lane {
     position: relative;

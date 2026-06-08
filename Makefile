@@ -6,6 +6,11 @@ CLUSTER ?= invest-flink
 
 ALERT_ID ?=
 
+# Path to a GCP service-account JSON for Vertex AI (Gemini) ADC; defaults to the operator's
+# GOOGLE_APPLICATION_CREDENTIALS host env. When empty/missing, 'make secrets' skips the
+# gcp-vertex-credentials Secret (non-fatal — Vertex agent stays unauthenticated in dev/CI).
+GCP_SA_KEY_FILE ?= $(GOOGLE_APPLICATION_CREDENTIALS)
+
 STRIMZI_DIR := infra/k8s/strimzi
 OPERATOR_DIR := $(STRIMZI_DIR)/operator
 INJECTORS_DIR := infra/k8s/injectors
@@ -97,7 +102,14 @@ secrets:
 		--dry-run=client -o yaml | kubectl apply -f -; \
 	kubectl create secret generic event-pattern-persistence-secrets \
 		--from-literal=EVENT_PATTERN_PERSISTENCE_DATABASE_URL='postgresql+asyncpg://postgres:postgres@postgres:5432/invest_view' \
-		--dry-run=client -o yaml | kubectl apply -f -
+		--dry-run=client -o yaml | kubectl apply -f -; \
+	if [ -n "$(GCP_SA_KEY_FILE)" ] && [ -f "$(GCP_SA_KEY_FILE)" ]; then \
+		kubectl create secret generic gcp-vertex-credentials \
+			--from-file=key.json="$(GCP_SA_KEY_FILE)" \
+			--dry-run=client -o yaml | kubectl apply -f - ; \
+	else \
+		echo "  (skip) GCP_SA_KEY_FILE not set/found — gcp-vertex-credentials secret not created (Vertex agent will be unauthenticated)"; \
+	fi
 
 images:
 	docker build -f services/kis_ingestion/Dockerfile -t kis_ingestion:qa .

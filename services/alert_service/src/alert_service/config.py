@@ -1,3 +1,5 @@
+from typing import ClassVar
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -8,7 +10,7 @@ class AlertServiceConfig(BaseSettings):
     Required (no default): database_url, kafka_bootstrap_servers, jwt_secret, schema_registry_url.
     """
 
-    model_config = SettingsConfigDict(
+    model_config: ClassVar[SettingsConfigDict] = SettingsConfigDict(
         env_prefix="ALERT_SERVICE_",
         env_file=None,  # don't auto-load .env - explicit via env vars
         extra="ignore",
@@ -32,12 +34,24 @@ class AlertServiceConfig(BaseSettings):
     jwt_algorithm: str = "HS256"
     jwt_user_id_claim: str = "sub"
 
+    # Vertex AI / Gemini (agent layer)
+    # ADC is provided via the GOOGLE_APPLICATION_CREDENTIALS env var
+    # (google-genai auto-detects it; no API-key style auth is used).
+    gcp_project: str | None = None
+    gcp_location: str = "us-central1"
+    gemini_model_id: str = "gemini-2.5-flash"
+    gemini_temperature: float = 1.0
+    gemini_max_output_tokens: int = 8192
+
     # CORS
     allow_origins: list[str] = []
 
     # HTTP
     http_host: str = "0.0.0.0"
     http_port: int = 8000
+
+    # Price resolution
+    price_realtime_ttl_seconds: int = 300
 
     # Test seams
     fanout_fail_after_alert: bool = False

@@ -35,6 +35,13 @@ spec:
                 name: alert-service-config
             - secretRef:
                 name: alert-service-secrets
+          env:
+            - name: GOOGLE_APPLICATION_CREDENTIALS
+              value: /var/secrets/google/key.json
+          volumeMounts:
+            - name: gcp-creds
+              mountPath: /var/secrets/google
+              readOnly: true
           ports:
             - containerPort: 8000
           readinessProbe:
@@ -58,3 +65,11 @@ spec:
             limits:
               cpu: "500m"
               memory: "512Mi"
+      volumes:
+        # GCP service-account JSON for Vertex AI ADC. optional:true so the pod still
+        # starts in dev/CI without Vertex creds — the Gemini agent only fails when
+        # actually invoked, not at pod startup. Provision via: make secrets GCP_SA_KEY_FILE=...
+        - name: gcp-creds
+          secret:
+            secretName: gcp-vertex-credentials
+            optional: true

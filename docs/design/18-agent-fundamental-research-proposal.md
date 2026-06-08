@@ -61,6 +61,16 @@ v2까지는 **데이터 접근 토폴로지**(결정론 selective query + 확률
 
 핵심 결정 근거(턴키 프레임워크/LangGraph 영속화/OSS 챗앱 스키마/커뮤니티 실무자 5각도 조사)는 **부록 B**에 정리한다. 한 줄 요약: **"프레임워크가 데이터를 소유하게 하지 마라 — Strands는 stateless brain, 대화 상태는 우리 Postgres가 소유."**
 
+## v3.1 정정 (구현 진척 반영, PR #25 머지 + financial_metrics 신설)
+
+v3 작성 후 실제 코드/데이터가 진척되어 정정한다.
+
+| v3 가정 | 실제 | 영향 |
+| --- | --- | --- |
+| `get_financials`는 bronze JSONB 이중 unnest | `reference.financial_metrics` **flat 테이블 신설 + 백필 100% 완료**(2,765종목/1,800만행, 실측 2026-06-03) | **§5-6** — flat primary. stmt_type=BAL/INC/CAS 확정, **period_type=Y(연간)만**, period 포맷 `2025-12`, item_name=한국어만 |
+| 프론트/REST API 미정 | **frontend/ Svelte 5 + read API 4종(PR #25) 이미 머지** | **§18** — 챗 UI 스캐폴드(`AiPanel.svelte`) 존재, 세션=ticker 전제가 실제 UI로 검증 |
+| agent tool만 데이터 접근 | REST API와 agent tool이 같은 `reference.*` 공유 | **§18-3** — 역할분담(프론트 fetch용 고정 응답 vs LLM selective). 중복 의도적, 공유 SQL 레이어 권장 |
+
 ## 0. 핵심 설계 원칙 — 결정론적 vs 확률적 분리
 
 이 설계의 가장 중요한 결정은 **데이터를 두 부류로 나누는 것**이다.
@@ -239,6 +249,37 @@ ORDER BY fs.ticker, entry->>'period' DESC;
 - **반환은 long format flat rows**: `[{ticker, period, item, value, unit}]`. nested JSON보다 LLM 비교 정확도 우수 (tabular 구조)
 - **결정론적 계산은 SQL/도구에서**: EBITDA 성장률 `(현재-과거)/NULLIF(과거,0)`를 SQL로 계산해 반환. LLM은 산술 신뢰 불가(다단계 산술 정확도 급락 사례) → LLM은 트렌드 해석·비교·시나리오만
 - **개방형 분석**: "무엇을 볼지(파라미터)"와 "어떻게 해석할지"는 LLM이 결정, "어떻게 뽑을지(SQL)"는 고정
+
+### 5-6. (v3 신규) `reference.financial_metrics` flat 테이블 우선
+
+v2 작성 후 stock-crawler PR #1로 **bronze JSONB를 평평하게 정규화한 `reference.financial_metrics` 테이블이 신설**됐다(alembic 0002). §5-4의 이중 unnest는 여전히 유효한 fallback이지만, 신규 데이터는 이 flat 테이블을 우선 조회한다.
+
+**스키마**:
+
+| 컬럼 | 타입 | 비고 |
+| --- | --- | --- |
+| `id` | BIGINT PK | autoincrement |
+| `ticker` | TEXT | 저장 포맷(`005930`) |
+| `stmt_type` | TEXT | `selectedFactor["code"]` |
+| `period_type` | TEXT | `selectedPeriod["code"]` |
+| `period` | TEXT | `"2023"`, `"2023/3Q"` 등 |
+| `item_name` | TEXT | **`itemNameKor` (한국어만)** — `itemNameEng` 미저장 |
+| `value` | NUMERIC | 콤마 제거·파싱 완료, 비수치→NULL |
+| `unit` | TEXT | `unitType` |
+| `updated_at` | TIMESTAMPTZ | |
+
+- **Unique key**: `(ticker, stmt_type, period_type, period, item_name)`. dedupe 자연키 = `itemNameKor`. **`itemNameKor` 없는 항목은 적재에서 제외됨** (핸드오프의 키 논쟁 결론).
+- **인덱스**: `(ticker, stmt_type, period_type)`, `(ticker, period_type, period)`. `item_name` 단독 인덱스 없음(ticker 파티션 내 스캔).
+
+**get_financials 전략 (백필 완료 — 실측 2026-06-03)**:
+- **백필 100% 완료**: `financial_metrics`에 **2,765 종목 전부 = 약 1,800만 행** 적재 확인(bronze 종목수와 일치). v1 tool은 flat 테이블을 primary로 사용. JSONB fallback은 분기 데이터 등 flat에 없는 경우에만(아래).
+- **장점**: flat 조회는 unnest 불필요 — `WHERE ticker=ANY(:tickers) AND stmt_type=:s AND period_type=:p`. value가 이미 NUMERIC.
+- **stmt_type 코드 확정**: 실측 결과 **`BAL`/`INC`/`CAS`** 그대로(불투명 코드 아님). §5-3 시그니처와 **이미 일치 — 매핑 불필요.** EBITDA는 INC, `item_name='*EBITDA'`로 정상 적재 확인(삼성전자 2018~2025 8개년).
+- **period_type은 `Y`(연간)만 존재**: 실측상 flat 테이블에 **분기(`Q`) 데이터 없음.** 따라서:
+  - `get_financials`의 `period_type` 기본값을 **`'Y'`로** (§5-3은 `'Q'` 기본이었음 → 정정 필요).
+  - 분기 분석이 필요하면 JSONB fallback(`bronze_financial_statement`) 또는 분기 백필 별도 진행. v1은 연간 위주.
+- **period 포맷은 `"2025-12"`** (하이픈): §5-1 초안의 `"2024/12"`(슬래시)는 부정확. start/end_period 필터는 `"2018-12"` 형식으로 바인딩.
+- **주의 (한국어 item_name)**: `item_name`이 `itemNameKor`만 존재(영어명 없음). agent/프롬프트는 한국어 항목명(`매출액`,`영업이익`,`*EBITDA`)을 알아야 함. 영어 라벨이 필요하면 별도 매핑 유지.
 
 ## 6. 리포트 검색 (확률적)
 
@@ -425,6 +466,10 @@ class AnalysisResponse(BaseModel):
 - **parent_id는 처음부터**: regenerate 브랜칭의 토대. 나중에 추가 불가하므로 0-5에서 컬럼 포함
 - **v1 stop은 in-process**: `is_disconnected`+`try/finally`. Redis pub/sub는 멀티워커 확장 시(§17-2)
 - **UC 평가 v1 보류**: UC 커버리지만 넓힘. UC별 정량 eval은 trace 쌓인 후 Phase 2
+- **financial_metrics flat 우선**: `get_financials`는 flat 테이블 먼저, 없으면 JSONB fallback. 백필 100% 후 JSONB 은퇴(§5-6)
+- **item_name 한국어**: flat 테이블은 `itemNameKor`만. 영어명 없음 → 프롬프트가 한국어 항목명 알아야 함
+- **REST/agent 중복은 의도**: 같은 테이블 읽되 소비자(프론트 vs LLM)·projection 다름. 통합 말고 공유 SQL 레이어로(§18-3)
+- **챗 UI는 신규 아님**: `AiPanel.svelte` 스캐폴드 존재. mock 응답을 SSE로 교체만(§18-1)
 
 ## 14. 에스컬레이션 트리거
 
@@ -637,6 +682,52 @@ agent = Agent(session_manager=session_manager, tools=[...])
 
 - **단계**: v1은 ① 우리 테이블 + history/CRUD API를 먼저 구축(동작 확인) → ② 그 위에 `SessionRepository` 어댑터로 Strands 멀티턴 복원 연결. 같은 테이블을 둘이 공유.
 - 컨텍스트 윈도잉(어떤 메시지를 LLM에 보낼지)은 Strands `ConversationManager`(`SlidingWindowConversationManager`)가 담당 — 직접 짜지 않음.
+
+## 18. (v3 신규) 프론트엔드 연동 현황 + REST/agent 역할분담
+
+이 절은 v2 작성 후 **이미 머지·구현된 프론트와 REST API**를 정리한다. 에이전트 설계가 허공이 아니라 **실제 존재하는 UI 스캐폴드와 데이터 API 위에** 얹힌다는 점을 명시한다.
+
+### 18-1. 프론트엔드는 이미 존재한다 (`frontend/`, Svelte 5)
+
+| 화면 | 파일 | 역할 |
+| --- | --- | --- |
+| 랜딩(피커) | `Home.svelte` | 거래량순 40종목 리스트 + 지수 스트립. 종목 클릭 → StockDetail |
+| 종목 상세 | `StockDetail.svelte` | 4탭: 차트 / 종목정보 / 이벤트 / 리포트·컨센서스 |
+| **챗 사이드바** | `AiPanel.svelte` | 차트탭 우측 접이식 챗 UI. 현재 rule-based mock. **MarketAnalystAgent의 UI 스캐폴드** |
+
+**§3(세션=ticker 고정)이 실제 프론트 구조로 검증됨**:
+- 랜딩(Home)은 **피커** — 종목을 고르는 곳, 챗 없음
+- 챗(AiPanel)은 **StockDetail 차트탭 안에만** 존재 — 이미 ticker가 확정된 컨텍스트
+- 사용자 흐름: 리스트에서 종목 선택 → 그 종목 페이지에서 챗. **챗에 직접 랜딩하지 않음**
+- 이는 업계 표준(TradingView/Toss/Public.com의 "피커→종목페이지 사이드카 챗")과 일치. ticker-pinned 세션 모델이 UI·업계 양쪽에 부합.
+
+즉 에이전트가 할 일은 **새 UI를 만드는 게 아니라**, 이미 있는 `AiPanel.svelte`의 mock 응답을 `POST /agent/sessions/{id}/stream`(§17) SSE로 교체하는 것이다. `current_ticker`는 StockDetail의 ticker를 그대로 주입.
+
+### 18-2. 머지된 4개 read REST API (PR #25)
+
+차트 페이지용 read-only 엔드포인트 4종이 이미 `main`에 머지됐다(비인증, raw SQL, `candles.py` 패턴).
+
+| 엔드포인트 | 읽는 테이블 | 반환 | agent tool과의 관계 |
+| --- | --- | --- | --- |
+| `GET /api/stocks` | `serving.symbol_snapshot` ⋈ `reference.bronze_market_ticker` | 40종목 (code/name/market/price/change_rate) | 랜딩 피커 전용. agent tool 아님 |
+| `GET /api/stock-info/{symbol}` | `reference.financial_metrics` + `bronze_market_ticker` + `bronze_stock_overview` + `symbol_snapshot` | meta + income/balance/cashflow + EPS/PER/PBR + `coverage_note` | `get_financials`와 **데이터 중복** (둘 다 financial_metrics 읽음) |
+| `GET /api/consensus/{symbol}` | `reference.bronze_consensus_report` | 리포트 메타 N건 (full_text 제외) | `get_recent_reports`/`get_consensus`와 **기능 중복** |
+| `GET /api/tick-detail/{symbol}` | `bronze.tick_history` 최신 1건 | 체결강도/호가 14필드 | 실시간 시세 tool과 보완 |
+
+### 18-3. REST API vs agent tool — 역할분담
+
+둘 다 같은 `reference.*`/`serving.*`를 raw SQL로 읽지만 **소비자와 목적이 다르다**. 통합하지 않고 **병존**한다.
+
+| 구분 | REST API (PR #25) | agent tool (§9) |
+| --- | --- | --- |
+| 소비자 | 프론트 컴포넌트가 직접 fetch (StockDetail 4탭) | LLM이 agent loop에서 호출 |
+| 형태 | 화면 1:1 고정 응답(탭 렌더용) | LLM 추론용 long-format flat rows, selective projection |
+| 결정 주체 | 프론트가 어떤 엔드포인트 부를지 고정 | LLM이 어떤 tool·파라미터·조합인지 결정 |
+| 예 | "종목정보 탭 = stock-info 1콜" | "급락했는데 펀더멘털 문제야?" → get_signal_timeline + get_financials 조율 |
+
+- **중복은 의도된 것**: stock-info는 탭 렌더용 고정 응답, get_financials는 LLM이 임의 항목·기간·다종목을 selective하게 뽑는 용도. 같은 테이블을 읽되 projection·소비 방식이 다르다.
+- **공유 SQL 레이어 권장**: financial_metrics/consensus 조회 SQL은 공통 repository 함수로 두고, REST 핸들러와 agent tool이 각자 호출. DRY + 일관성.
+- **coverage 비대칭 주의**: `/api/stocks`(시세 40종목, INNER JOIN)와 재무/리포트(2765/2319종목)의 커버리지 차이. 시세 없는 종목도 재무·리포트는 있을 수 있음 → agent는 `coverage_note`(§9)로 명시.
 
 ## 부록 A. 근거 (측정 데이터)
 

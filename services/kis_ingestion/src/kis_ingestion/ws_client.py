@@ -25,7 +25,9 @@ class KISWebSocketClient:
         if self._connected:
             return
 
-        self._ws = await websockets.connect(self._ws_url, ping_interval=None)
+        self._ws = await websockets.connect(
+            self._ws_url, ping_interval=20, ping_timeout=20
+        )
         self._connected = True
 
     async def disconnect(self) -> None:
