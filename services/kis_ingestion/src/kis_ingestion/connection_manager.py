@@ -26,6 +26,11 @@ UNSUBSCRIBE_ACK_CODES = frozenset({"OPSP0001", "OPSP0003"})
 ControlOperation = Literal["subscribe", "unsubscribe"]
 
 
+class ReconnectExhaustedError(Exception):
+    """Must NOT subclass ConnectionError/OSError/RuntimeError, or the consume
+    loop's transient-error handler would re-catch it and defeat fail-fast."""
+
+
 class KISConnectionManager:
     """
     Manages KIS WebSocket connections and subscriptions.
@@ -130,7 +135,6 @@ class KISConnectionManager:
             except (
                 ConnectionError,
                 OSError,
-                RuntimeError,
                 websockets.exceptions.ConnectionClosed,
             ) as exc:
                 if not self._running:
@@ -216,7 +220,9 @@ class KISConnectionManager:
                 )
 
         logger.critical("Reconnect failed after %s attempts", self._max_retries)
-        raise RuntimeError("Failed to reconnect KIS WebSocket") from last_error
+        raise ReconnectExhaustedError(
+            f"Failed to reconnect KIS WebSocket after {self._max_retries} attempts"
+        ) from last_error
 
     async def _handle_json_response(self, raw: str) -> None:
         response = cast(dict[str, object], self._raw_parser.parse_json_response(raw))
