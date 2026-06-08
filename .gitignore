@@ -230,3 +230,8 @@ services/stream_detection/jars/
 .playwright-mcp/
 /*.png
 *.screenshot.png
+# Root-level screenshot/verification images (QA artifacts, not source)
+/*.jpeg
+/*.jpg
+# Presentation / slide artifacts (binaries, not source)
+docs/slides/
