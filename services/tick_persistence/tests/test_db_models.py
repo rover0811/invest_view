@@ -54,7 +54,9 @@ def test_tick_history_has_all_kis_fields_plus_meta():
     assert KIS_FIELDS <= cols, f"missing KIS fields: {KIS_FIELDS - cols}"
     for meta in ("tick_id", "persisted_at", "kafka_topic", "kafka_partition", "kafka_offset", "tick_dedupe_key"):
         assert meta in cols
-    assert len(cols) == 55
+    for contract_col in ("event_id", "event_ts"):
+        assert contract_col in cols, f"missing event-time contract column (migration 0006): {contract_col}"
+    assert len(cols) == 57
 
 
 def test_tick_history_column_types():

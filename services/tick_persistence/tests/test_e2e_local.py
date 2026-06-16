@@ -22,6 +22,8 @@ def _tick_value(
     *, symbol: str = "005930", price: int, trade_time: str, business_date: str = "20260601", volume: int = 10
 ) -> dict[str, Any]:
     return {
+        "source_tr_id": "H0STCNT0",
+        "market": "KRX",
         "symbol": symbol,
         "business_date": business_date,
         "trade_time": trade_time,
@@ -35,6 +37,7 @@ def _tick_value(
         "trade_strength": Decimal("100.0"),
         "vi_trigger_price": 71000,
         "trading_halted": "N",
+        "trade_type": "2",
     }
 
 
