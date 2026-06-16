@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 from datetime import datetime, timezone
 from typing import Literal, Self, cast
 from uuid import uuid4
@@ -24,6 +25,10 @@ RECORD_FIELD_COUNT = 46
 SUBSCRIBE_ACK_CODES = frozenset({"OPSP0000", "OPSP0002"})
 UNSUBSCRIBE_ACK_CODES = frozenset({"OPSP0001", "OPSP0003"})
 ControlOperation = Literal["subscribe", "unsubscribe"]
+DEFAULT_MAX_RETRIES = 8
+DEFAULT_BASE_DELAY_SECONDS = 1.0
+DEFAULT_JITTER_MAX_SECONDS = DEFAULT_BASE_DELAY_SECONDS
+MAX_RECONNECT_DELAY_SECONDS = 300.0
 
 
 class ReconnectExhaustedError(Exception):
@@ -52,6 +57,8 @@ class KISConnectionManager:
     _running: bool
     _max_retries: int
     _base_delay: float
+    _jitter_max: float
+    _max_delay: float
     _pending_control_ops: dict[tuple[str, str], ControlOperation]
     _tick_buffer: list[tuple[ParsedTick, str, int]]
 
@@ -74,8 +81,10 @@ class KISConnectionManager:
         self._session_id: str = str(uuid4())
         self._sequence: int = 0
         self._running: bool = False
-        self._max_retries: int = 5
-        self._base_delay: float = 1.0
+        self._max_retries: int = DEFAULT_MAX_RETRIES
+        self._base_delay: float = DEFAULT_BASE_DELAY_SECONDS
+        self._jitter_max: float = DEFAULT_JITTER_MAX_SECONDS
+        self._max_delay: float = MAX_RECONNECT_DELAY_SECONDS
         self._pending_control_ops: dict[tuple[str, str], ControlOperation] = {}
         self._tick_buffer: list[tuple[ParsedTick, str, int]] = []
 
@@ -193,7 +202,10 @@ class KISConnectionManager:
         last_error: Exception | None = None
 
         for attempt in range(1, self._max_retries + 1):
-            await asyncio.sleep(self._base_delay * attempt)
+            exponential_delay: float = self._base_delay * (2.0 ** (attempt - 1))
+            jitter: float = random.uniform(0.0, self._jitter_max)
+            delay: float = min(exponential_delay + jitter, self._max_delay)
+            await asyncio.sleep(delay)
 
             try:
                 if self._ws_client.connected:
