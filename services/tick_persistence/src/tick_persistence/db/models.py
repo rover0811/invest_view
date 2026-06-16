@@ -1,4 +1,4 @@
-"""tick_persistence ORM. Types mirror schemas/stock-ticks.avsc 1:1; KIS fields raw and nullable except symbol + tick_dedupe_key."""
+"""tick_persistence ORM for bronze/silver/serving tables."""
 from __future__ import annotations
 
 import uuid
@@ -30,9 +30,10 @@ class Base(DeclarativeBase):
 
 
 class TickHistory(Base):
-    __tablename__ = "tick_history"
-    __table_args__ = (
+    __tablename__: str = "tick_history"
+    __table_args__: tuple[object, ...] = (
         UniqueConstraint("tick_dedupe_key", name="tick_history_dedupe_key_uq"),
+        UniqueConstraint("event_id", name="tick_history_event_id_uq"),
         Index("ix_tick_history_symbol_persisted", "symbol", text("persisted_at DESC")),
         {"schema": SCHEMA_BRONZE},
     )
@@ -45,6 +46,7 @@ class TickHistory(Base):
     kafka_partition: Mapped[int | None] = mapped_column(Integer, nullable=True)
     kafka_offset: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
     tick_dedupe_key: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     change: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -83,7 +85,7 @@ class TickHistory(Base):
 
     source_tr_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     market: Mapped[str | None] = mapped_column(Text, nullable=True)
-    received_at: Mapped[str | None] = mapped_column(Text, nullable=True)
+    received_at: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     symbol: Mapped[str] = mapped_column(Text, nullable=False)
     trade_time: Mapped[str | None] = mapped_column(Text, nullable=True)
     change_sign: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -95,6 +97,7 @@ class TickHistory(Base):
     low_time: Mapped[str | None] = mapped_column(Text, nullable=True)
     low_vs_sign: Mapped[str | None] = mapped_column(Text, nullable=True)
     business_date: Mapped[str | None] = mapped_column(Text, nullable=True)
+    event_ts: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     market_session_code: Mapped[str | None] = mapped_column(Text, nullable=True)
     trading_halted: Mapped[str | None] = mapped_column(Text, nullable=True)
     hour_class_code: Mapped[str | None] = mapped_column(Text, nullable=True)
@@ -106,8 +109,8 @@ class TickHistory(Base):
 
 
 class Symbol5mMetrics(Base):
-    __tablename__ = "symbol_5m_metrics"
-    __table_args__ = (
+    __tablename__: str = "symbol_5m_metrics"
+    __table_args__: tuple[object, ...] = (
         UniqueConstraint("symbol", "bucket_start", name="symbol_5m_metrics_symbol_bucket_uq"),
         Index("ix_symbol_5m_metrics_symbol_bucket", "symbol", text("bucket_start DESC")),
         {"schema": SCHEMA_SILVER},
@@ -133,8 +136,8 @@ class Symbol5mMetrics(Base):
 
 
 class SymbolSnapshot(Base):
-    __tablename__ = "symbol_snapshot"
-    __table_args__ = ({"schema": SCHEMA_SERVING},)
+    __tablename__: str = "symbol_snapshot"
+    __table_args__: tuple[object, ...] = ({"schema": SCHEMA_SERVING},)
 
     symbol: Mapped[str] = mapped_column(Text, primary_key=True)
     last_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -146,6 +149,8 @@ class SymbolSnapshot(Base):
     vi_trigger_price: Mapped[int | None] = mapped_column(Integer, nullable=True)
     trading_halted: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_trade_time: Mapped[str | None] = mapped_column(Text, nullable=True)
+    business_date: Mapped[str | None] = mapped_column(Text, nullable=True)
+    last_event_ts: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=text("now()"), nullable=False
     )
