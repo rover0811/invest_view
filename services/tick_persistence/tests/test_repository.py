@@ -23,6 +23,9 @@ KST = ZoneInfo("Asia/Seoul")
 
 def _tick_value(symbol: str = "005930", price: int = 70000, volume: int = 1500) -> dict[str, Any]:
     return {
+        "source_tr_id": "H0STCNT0",
+        "market": "KRX",
+        "received_at": "2026-06-01T00:00:01+00:00",
         "symbol": symbol,
         "price": price,
         "trade_volume": volume,
@@ -35,6 +38,7 @@ def _tick_value(symbol: str = "005930", price: int = 70000, volume: int = 1500) 
         "vi_trigger_price": 71000,
         "trading_halted": "0",
         "trade_time": "090301",
+        "trade_type": "2",
         "business_date": "20260601",
     }
 
@@ -73,25 +77,47 @@ async def test_bronze_insert_round_trip(db_session_factory):
     assert row.kafka_topic == "stock-ticks"
     assert row.kafka_partition == 2
     assert row.kafka_offset == 456
-    assert row.tick_dedupe_key == "stock-ticks:2:456"
+    assert row.tick_dedupe_key is not None
+    assert row.event_id == "d73d1d9a-3c9d-5411-a711-33ed3789bf23"
+    assert row.event_ts == datetime(2026, 6, 1, 9, 3, 1, tzinfo=KST)
 
 
-async def test_bronze_duplicate_message_is_skipped(db_session_factory):
+async def test_bronze_same_event_id_at_different_offsets_is_skipped(db_session_factory):
     repo = TickHistoryRepository()
-    message = _message(_tick_value(price=70000), topic="stock-ticks", partition=1, offset=999)
+    tick = _tick_value(price=70000)
+    message = _message(tick, topic="stock-ticks", partition=1, offset=999)
 
     first = await _insert_tick(db_session_factory, repo, message)
-    second = await _insert_tick(db_session_factory, repo, _message(_tick_value(price=70500), topic="stock-ticks", partition=1, offset=999))
+    second = await _insert_tick(db_session_factory, repo, _message(tick, topic="stock-ticks", partition=2, offset=1000))
 
     assert first is True
     assert second is False
 
     async with db_session_factory() as session:
         count = await session.scalar(
-            sa.text("SELECT count(*) FROM bronze.tick_history WHERE tick_dedupe_key = :k"),
-            {"k": "stock-ticks:1:999"},
+            sa.text("SELECT count(*) FROM bronze.tick_history WHERE event_id = :event_id"),
+            {"event_id": "d73d1d9a-3c9d-5411-a711-33ed3789bf23"},
         )
     assert count == 1
+
+
+async def test_bronze_prefers_payload_event_id_when_present(db_session_factory):
+    repo = TickHistoryRepository()
+    payload_event_id = "cc293f67-5c08-58c8-86fb-ef8835363c9c"
+    tick = {
+        **_tick_value(symbol="005930", price=70100),
+        "business_date": "20260617",
+        "trade_time": "091530",
+        "cumulative_volume": 123456,
+        "event_id": payload_event_id,
+    }
+
+    assert await _insert_tick(db_session_factory, repo, _message(tick, partition=3, offset=1001)) is True
+
+    async with db_session_factory() as session:
+        event_id = await session.scalar(sa.select(TickHistory.event_id).where(TickHistory.kafka_offset == 1001))
+
+    assert event_id == payload_event_id
 
 
 def _bar(*, close: int, is_final: bool, tick_count: int) -> BarState:
@@ -148,7 +174,7 @@ async def test_silver_load_bar_state_absent_returns_none(db_session_factory):
     assert loaded is None
 
 
-async def test_snapshot_upsert_keeps_latest(db_session_factory):
+async def test_snapshot_equal_event_ts_applies_last_write(db_session_factory):
     repo = SnapshotRepository()
     symbol = "005930"
 

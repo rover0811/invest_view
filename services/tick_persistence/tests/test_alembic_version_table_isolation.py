@@ -17,7 +17,7 @@ _EXPECTED_OBJECTS: tuple[str, ...] = (
     "serving.symbol_signal_timeline",
     "serving.symbol_daily_ohlc",
 )
-_HEAD_REVISION = "0005_daily_ohlc_view"
+_HEAD_REVISION = "0006_tick_event_time_contract"
 
 
 def _asyncpg_url(container: PostgresContainer) -> str:

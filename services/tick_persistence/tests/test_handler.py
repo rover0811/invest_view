@@ -20,10 +20,14 @@ pytestmark = pytest.mark.qa
 
 def _tick_value(*, symbol: str = "005930", price: int, trade_time: str, volume: int = 1) -> dict[str, Any]:
     return {
+        "source_tr_id": "H0STCNT0",
+        "market": "KRX",
+        "received_at": "2026-06-01T00:00:01+00:00",
         "symbol": symbol,
         "business_date": "20260601",
         "trade_time": trade_time,
         "price": price,
+        "trade_type": "2",
         "trade_volume": volume,
         "vwap": Decimal(str(price)),
         "change": price - 70000,

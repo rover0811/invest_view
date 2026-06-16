@@ -15,6 +15,7 @@ dependencies = [
 
 [tool.uv]
 dev-dependencies = [
+    "hypothesis",
     "pytest",
     "pytest-asyncio",
     "testcontainers[postgres]>=4",
