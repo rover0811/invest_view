@@ -6,6 +6,7 @@
     {"name": "source_tr_id", "type": "string"},
     {"name": "market", "type": "string"},
     {"name": "received_at", "type": "string"},
+    {"name": "event_id", "type": ["null", "string"], "default": null},
     {"name": "symbol", "type": "string"},
     {"name": "trade_time", "type": "string"},
     {"name": "price", "type": "int"},
