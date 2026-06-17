@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -58,7 +59,7 @@ class TickConsumer:
         self,
         config: TickPersistenceConfig,
         on_message: BatchMessageHandler,
-        queue_maxsize: int = 1000,
+        queue_maxsize: int | None = None,
         poll_timeout: float | None = None,
         batch_size: int | None = None,
         on_revoke: StateClearer | None = None,
@@ -69,6 +70,11 @@ class TickConsumer:
         self._on_message = on_message
         self._poll_timeout = config.poll_timeout if poll_timeout is None else poll_timeout
         self._batch_size = config.batch_size if batch_size is None else batch_size
+        self._queue_max_batches = (
+            queue_maxsize
+            if queue_maxsize is not None
+            else _queue_max_batches(config.max_queued_messages, self._batch_size)
+        )
         self._on_revoke_clear_state = on_revoke
         self._metrics = metrics
         self._ledger = ledger
@@ -94,7 +100,7 @@ class TickConsumer:
             }
         )
 
-        self._queue: asyncio.Queue[list[_QueuedMessage]] = asyncio.Queue(maxsize=queue_maxsize)
+        self._queue: asyncio.Queue[list[_QueuedMessage]] = asyncio.Queue(maxsize=self._queue_max_batches)
         self._stop_event = asyncio.Event()
         self._poll_task: asyncio.Task[None] | None = None
         self._dispatch_task: asyncio.Task[None] | None = None
@@ -368,3 +374,15 @@ def _headers_to_dict(
         else:
             result[key] = value
     return result
+
+
+def _queue_max_batches(max_queued_messages: int, batch_size: int) -> int:
+    if batch_size <= 0:
+        raise ValueError("batch_size must be positive")
+    if max_queued_messages < batch_size:
+        raise ValueError("max_queued_messages must be greater than or equal to batch_size")
+
+    # The asyncio queue stores batches, but production memory pressure is driven by
+    # deserialized messages. 5000 messages * roughly 2 KiB (payload dict + Kafka
+    # Message wrapper) is about 10 MiB, far below the 512 MiB pod limit.
+    return max(1, math.floor(max_queued_messages / batch_size))

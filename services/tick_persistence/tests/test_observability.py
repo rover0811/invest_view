@@ -129,6 +129,7 @@ def test_consumer_records_consumed_and_skip_into_ledger():
         config.kafka_topic = "stock-ticks"
         config.poll_timeout = 0.01
         config.batch_size = 500
+        config.max_queued_messages = 5000
         config.max_poll_interval_ms = 300_000
         metrics = TickMetrics()
         ledger = ReconciliationLedger(metrics)
