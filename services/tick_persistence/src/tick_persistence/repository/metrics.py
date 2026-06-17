@@ -7,8 +7,8 @@ from sqlalchemy import func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from tick_persistence.aggregation.ohlc import BarState
-from tick_persistence.db.models import Symbol5mMetrics
+from tick_persistence.aggregation.ohlc import BUCKET_SIZE, BarState
+from tick_persistence.db.models import Symbol5mMetrics, TickHistory
 
 
 class Metrics5mRepository:
@@ -53,31 +53,28 @@ class Metrics5mRepository:
     async def load_bar_state(
         self, session: AsyncSession, symbol: str, bucket_start: datetime
     ) -> BarState | None:
-        """Hydrate a persisted bar for restart-mid-bucket recovery; None if the bucket is absent."""
+        """Rebuild an active bar from bronze rows so open/close order keys survive restart."""
         result = await session.execute(
-            select(Symbol5mMetrics).where(
-                Symbol5mMetrics.symbol == symbol,
-                Symbol5mMetrics.bucket_start == bucket_start,
+            select(
+                TickHistory.event_ts,
+                TickHistory.kafka_partition,
+                TickHistory.kafka_offset,
+                TickHistory.price,
+                TickHistory.trade_volume,
+                TickHistory.vwap,
+            ).where(
+                TickHistory.symbol == symbol,
+                TickHistory.event_ts >= bucket_start,
+                TickHistory.event_ts < bucket_start + BUCKET_SIZE,
             )
         )
-        row = result.scalar_one_or_none()
-        if row is None:
-            return None
-        open_ = row.open
-        high = row.high
-        low = row.low
-        close = row.close
-        volume = row.volume
-        tick_count = row.tick_count
-        if open_ is None or high is None or low is None or close is None or volume is None or tick_count is None:
-            return None
-        return BarState.from_existing(
-            open=open_,
-            high=high,
-            low=low,
-            close=close,
-            volume=volume,
-            vwap=row.vwap,
-            tick_count=tick_count,
-            is_final=row.is_final,
-        )
+        bar: BarState | None = None
+        for event_ts, partition, offset, price, volume, vwap in result.all():
+            if event_ts is None or partition is None or offset is None or price is None or volume is None:
+                continue
+            tick_key = (event_ts, partition, offset)
+            if bar is None:
+                bar = BarState.from_tick(price=price, volume=volume, vwap=vwap, tick_key=tick_key)
+            else:
+                bar.add_tick(price=price, volume=volume, vwap=vwap, tick_key=tick_key)
+        return bar
