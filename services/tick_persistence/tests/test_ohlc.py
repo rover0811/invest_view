@@ -27,6 +27,20 @@ def _tick(
     }
 
 
+def _event_ts(tick: dict[str, Any]) -> datetime:
+    return datetime.strptime(f"{tick['business_date']}{tick['trade_time']}", "%Y%m%d%H%M%S").replace(tzinfo=KST)
+
+
+def _add_tick(
+    agg: FiveMinuteAggregator,
+    tick: dict[str, Any],
+    *,
+    partition: int = 0,
+    offset: int,
+) -> tuple[datetime, BarState]:
+    return agg.add_tick(tick, event_ts=_event_ts(tick), partition=partition, offset=offset)
+
+
 def _visible(bar: BarState) -> tuple[Any, ...]:
     return (bar.open, bar.high, bar.low, bar.close, bar.volume, bar.vwap_last, bar.tick_count, bar.is_final)
 
@@ -50,8 +64,8 @@ def test_multi_tick_bucket_exact_ohlc_volume_vwap_and_count():
 
     bucket = None
     bar = None
-    for tick in ticks:
-        bucket, bar = agg.add_tick(tick)
+    for offset, tick in enumerate(ticks, start=1):
+        bucket, bar = _add_tick(agg, tick, offset=offset)
 
     assert bucket == datetime(2026, 6, 1, 9, 0, tzinfo=KST)
     assert bar is not None
@@ -60,38 +74,65 @@ def test_multi_tick_bucket_exact_ohlc_volume_vwap_and_count():
     assert bar.low <= bar.close <= bar.high
 
 
-def test_reordered_same_tick_set_produces_same_bar_and_duplicate_replay_is_ignored():
-    ticks = [
-        _tick("090330", 70500, 7),
-        _tick("090301", 70000, 5),
-        _tick("090459", 70100, 13),
-        _tick("090405", 69800, 11),
+def test_reordered_same_inserted_tick_set_produces_same_bar_by_event_partition_offset_key():
+    tick_entries = [
+        (_tick("090330", 70500, 7), 0, 20),
+        (_tick("090301", 70000, 5), 0, 10),
+        (_tick("090459", 70100, 13), 1, 30),
+        (_tick("090405", 69800, 11), 0, 40),
     ]
     forward = FiveMinuteAggregator()
     reordered = FiveMinuteAggregator()
     forward_bar: BarState | None = None
     reordered_bar: BarState | None = None
 
-    for tick in ticks:
-        _, forward_bar = forward.add_tick(tick)
-    for tick in reversed(ticks):
-        _, reordered_bar = reordered.add_tick(tick)
+    for tick, partition, offset in tick_entries:
+        _, forward_bar = _add_tick(forward, tick, partition=partition, offset=offset)
+    for tick, partition, offset in reversed(tick_entries):
+        _, reordered_bar = _add_tick(reordered, tick, partition=partition, offset=offset)
 
     assert forward_bar is not None
     assert reordered_bar is not None
     assert _visible(forward_bar) == _visible(reordered_bar)
+    assert forward_bar.open_key == reordered_bar.open_key == (datetime(2026, 6, 1, 9, 3, 1, tzinfo=KST), 0, 10)
+    assert forward_bar.close_key == reordered_bar.close_key == (datetime(2026, 6, 1, 9, 4, 59, tzinfo=KST), 1, 30)
 
-    before = _visible(forward_bar)
-    for tick in reversed(ticks):
-        _, forward_bar = forward.add_tick(tick)
-    assert _visible(forward_bar) == before
+
+def test_same_event_time_open_close_tie_breaks_by_partition_offset_and_keeps_close_vwap():
+    agg = FiveMinuteAggregator()
+    first = _tick("090100", 70000, 5, vwap=Decimal("70000.00000000"))
+    lower_key_same_second = _tick("090100", 70500, 7, vwap=Decimal("70500.00000000"))
+    later_same_second = _tick("090200", 69800, 11, vwap=Decimal("69800.00000000"))
+    higher_key_same_second = _tick("090200", 70100, 13, vwap=Decimal("70100.00000000"))
+
+    _add_tick(agg, higher_key_same_second, partition=3, offset=1)
+    _add_tick(agg, first, partition=1, offset=2)
+    _add_tick(agg, later_same_second, partition=0, offset=99)
+    _, bar = _add_tick(agg, lower_key_same_second, partition=0, offset=1)
+
+    assert _visible(bar) == (70500, 70500, 69800, 70100, 36, Decimal("70100.00000000"), 4, False)
+    assert bar.open_key == (datetime(2026, 6, 1, 9, 1, tzinfo=KST), 0, 1)
+    assert bar.close_key == (datetime(2026, 6, 1, 9, 2, tzinfo=KST), 3, 1)
+    assert bar.low <= bar.open <= bar.high
+    assert bar.low <= bar.close <= bar.high
+
+
+def test_aggregator_counts_each_inserted_tick_once_and_keeps_no_observation_cache():
+    agg = FiveMinuteAggregator()
+    tick = _tick("090000", 70000, 10)
+
+    _add_tick(agg, tick, partition=0, offset=1)
+    _, bar = _add_tick(agg, tick, partition=0, offset=2)
+
+    assert _visible(bar) == (70000, 70000, 70000, 70000, 20, Decimal("70000"), 2, False)
+    assert not hasattr(bar, "_observations")
 
 
 def test_boundary_split_marks_prior_bucket_final_and_single_tick_bar():
     agg = FiveMinuteAggregator()
 
-    first_bucket, first = agg.add_tick(_tick("090459", 70000, 3))
-    second_bucket, second = agg.add_tick(_tick("090500", 70100, 4))
+    first_bucket, first = _add_tick(agg, _tick("090459", 70000, 3), offset=1)
+    second_bucket, second = _add_tick(agg, _tick("090500", 70100, 4), offset=2)
 
     assert first_bucket == datetime(2026, 6, 1, 9, 0, tzinfo=KST)
     assert second_bucket == datetime(2026, 6, 1, 9, 5, tzinfo=KST)
@@ -102,7 +143,7 @@ def test_boundary_split_marks_prior_bucket_final_and_single_tick_bar():
 
 def test_single_tick_bar_maintains_ohlc_invariants():
     agg = FiveMinuteAggregator()
-    _, bar = agg.add_tick(_tick("101500", 12345, 1, vwap=None))
+    _, bar = _add_tick(agg, _tick("101500", 12345, 1, vwap=None), offset=1)
 
     assert _visible(bar) == (12345, 12345, 12345, 12345, 1, None, 1, False)
     assert bar.low <= bar.open <= bar.high
@@ -120,11 +161,13 @@ def test_hydrate_existing_bar_then_add_tick_without_partial_overwrite():
         volume=30,
         vwap=Decimal("70300.00000000"),
         tick_count=3,
+        open_key=(datetime(2026, 6, 1, 9, 0, tzinfo=KST), 0, 1),
+        close_key=(datetime(2026, 6, 1, 9, 2, tzinfo=KST), 0, 3),
         is_final=False,
     )
 
     agg.hydrate("005930", bucket, existing)
-    result_bucket, bar = agg.add_tick(_tick("090430", 69900, 9, vwap=Decimal("70200.00000000")))
+    result_bucket, bar = _add_tick(agg, _tick("090430", 69900, 9, vwap=Decimal("70200.00000000")), offset=4)
 
     assert result_bucket == bucket
     assert bar is existing
@@ -133,12 +176,13 @@ def test_hydrate_existing_bar_then_add_tick_without_partial_overwrite():
 
 def test_finalized_bars_closes_elapsed_current_bucket():
     agg = FiveMinuteAggregator()
-    bucket, bar = agg.add_tick(_tick("090000", 70000, 1))
+    bucket, bar = _add_tick(agg, _tick("090000", 70000, 1), offset=1)
 
     finalized = agg.finalized_bars(datetime(2026, 6, 1, 0, 5, tzinfo=timezone.utc))
 
     assert finalized == [("005930", bucket, bar)]
     assert bar.is_final is True
+    assert agg._bars == {}
 
 
 def test_pop_finalized_bars_evicts_returned_bars_and_bounds_memory():
@@ -147,7 +191,7 @@ def test_pop_finalized_bars_evicts_returned_bars_and_bounds_memory():
     trade_times = ["090000", "090500", "091000", "091500", "092000", "092500"]
 
     for index, trade_time in enumerate(trade_times):
-        agg.add_tick(_tick(trade_time, 70000 + index, volume=index + 1))
+        _add_tick(agg, _tick(trade_time, 70000 + index, volume=index + 1), offset=index)
         flushed.extend(agg.pop_finalized_bars())
         assert len(agg._bars) <= 1
 
@@ -167,3 +211,26 @@ def test_pop_finalized_bars_evicts_returned_bars_and_bounds_memory():
     ]
     assert agg.pop_finalized_bars() == []
     assert set(agg._bars) == {("005930", datetime(2026, 6, 1, 9, 25, tzinfo=KST))}
+
+
+def test_many_symbols_and_past_buckets_evict_finalized_bars_immediately():
+    agg = FiveMinuteAggregator()
+    symbols = [f"{index:06}" for index in range(40)]
+    flushed: list[tuple[str, datetime, BarState]] = []
+
+    offset = 0
+    for bucket_index in range(10):
+        minute = bucket_index * 5
+        for symbol in symbols:
+            for second in range(3):
+                offset += 1
+                _add_tick(
+                    agg,
+                    _tick(f"09{minute:02}{second:02}", 70_000 + bucket_index + second, symbol=symbol),
+                    offset=offset,
+                )
+            flushed.extend(agg.pop_finalized_bars())
+            assert len(agg._bars) <= len(symbols)
+
+    assert len(flushed) == len(symbols) * 9
+    assert len(agg._bars) == len(symbols)

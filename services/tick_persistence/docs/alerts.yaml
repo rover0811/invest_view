@@ -1,0 +1,194 @@
+groups:
+  - name: tick-persistence-base-infra
+    rules:
+      - alert: TickPersistenceDown
+        expr: up{job="tick-persistence"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          team: invest
+          channel: invest
+        annotations:
+          summary: "tick-persistence scrape target is down"
+          impact: "No tick ingestion; front-end prices freeze."
+          current_value: "{{ $value }}"
+          threshold: "up == 0 for 2m"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Check pod logs/events; look for OOMKilled or crash; verify DB reachable."
+
+      - alert: TickPersistenceMetricsAbsent
+        expr: absent(up{job="tick-persistence"})
+        for: 5m
+        labels:
+          severity: critical
+          team: invest
+          channel: invest
+        annotations:
+          summary: "tick-persistence /metrics target is absent from Prometheus"
+          impact: "Blind spot: the consumer could be degrading undetected (the original incident)."
+          current_value: "absent"
+          threshold: "absent for 5m"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Verify ServiceMonitor/scrape config and that the pod exposes :9090/metrics."
+
+      - alert: TickPersistenceOOMKilled
+        expr: |
+          (kube_pod_container_status_last_terminated_reason{namespace="invest",container="tick-persistence",reason="OOMKilled"} == 1)
+          and (increase(kube_pod_container_status_restarts_total{namespace="invest",container="tick-persistence"}[10m]) > 0)
+        for: 1m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "tick-persistence was OOMKilled and restarted recently"
+          impact: "Catch-up backlog and tick gaps during the restart window."
+          current_value: "{{ $value }}"
+          threshold: "OOMKilled AND increase(restarts[10m]) > 0"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Review memory limits, batch_size, and recent deploys; raise limit if catch-up bound."
+
+      - alert: TickPersistenceRestartsHigh
+        expr: increase(kube_pod_container_status_restarts_total{namespace="invest",container="tick-persistence"}[1h]) > 3
+        for: 5m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "tick-persistence restarting repeatedly"
+          impact: "Instability; possible repeated reconnects / fail-fast loop."
+          current_value: "{{ $value }}"
+          threshold: "> 3 restarts / 1h"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Inspect crash reason (OOM vs ReconnectExhausted); check Kafka/DB health."
+
+  - name: tick-persistence-app-slo
+    rules:
+      - alert: ConsumerLagHigh
+        expr: sum(tick_persistence_consumer_lag) > 1000
+        for: 3m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "consumer lag above SLO threshold"
+          impact: "Processing is falling behind ingest; front-end prices will lag."
+          current_value: "{{ $value }}"
+          threshold: "sum(lag) > 1000 for 3m (SLO: lag approximately 0)"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Check DB write latency, CPU/RSS, batch size; scale out (max 3 partitions) if sustained."
+
+      - alert: ConsumerLagGrowing
+        expr: predict_linear(tick_persistence_consumer_lag[15m], 600) > 10000
+        for: 5m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "consumer lag trending up (will not drain)"
+          impact: "Early signal of throughput collapse before lag crosses the static threshold."
+          current_value: "{{ $value }}"
+          threshold: "predict_linear(lag[15m], 600) > 10000"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Investigate slow batches / DB contention before lag becomes user-visible."
+
+      - alert: SnapshotStale
+        expr: |
+          (sum(increase(kafka_topic_partition_current_offset{topic="stock-ticks"}[10m])) > 0)
+          and (quantile(0.99, tick_persistence_snapshot_staleness_seconds) > 3)
+        for: 3m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "snapshot freshness above warning threshold"
+          impact: "Served prices are stale beyond the 3s warning band."
+          current_value: "{{ $value }}s p99"
+          threshold: "p99 staleness > 3s for 3m (warning); gated on upstream Kafka activity"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Confirm consumer healthy and lag low; check DB upsert latency."
+
+      - alert: EndToEndFreshnessCritical
+        expr: |
+          (sum(increase(kafka_topic_partition_current_offset{topic="stock-ticks"}[10m])) > 0)
+          and (quantile(0.99, tick_persistence_snapshot_staleness_seconds) > 5)
+        for: 3m
+        labels:
+          severity: critical
+          team: invest
+          channel: invest
+        annotations:
+          summary: "end-to-end serving freshness SLO breached"
+          impact: "User-facing: front-end price is more than 5s stale while the market is active."
+          current_value: "{{ $value }}s p99"
+          threshold: "p99 staleness > 5s for 3m while upstream ticks flow"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Check ConsumerLagHigh / batch failures; verify KIS->Kafka->consumer->DB->serving path."
+
+      - alert: ThroughputBelowIngress
+        expr: |
+          (sum(rate(tick_persistence_consumed_total[10m])) > 0)
+          and (sum(rate(tick_persistence_inserted_total[10m])) + sum(rate(tick_persistence_conflict_total[10m]))
+               + sum(rate(tick_persistence_quarantined_total[10m])) + sum(rate(tick_persistence_skipped_total[10m]))
+               < sum(rate(tick_persistence_consumed_total[10m])) * 0.99)
+        for: 10m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "accounted throughput below consumed rate"
+          impact: "Messages consumed are not being fully accounted downstream."
+          current_value: "{{ $value }}"
+          threshold: "accounted/s < consumed/s for 10m"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Cross-check with ReconciliationImbalance; inspect handler errors."
+
+      - alert: PoisonPillSpike
+        expr: sum(increase(tick_persistence_quarantined_total[10m])) > 100
+        for: 5m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "poison-pill quarantine rate elevated"
+          impact: "Producer/schema regression or bad upstream data."
+          current_value: "{{ $value }} in 10m"
+          threshold: "> 100 quarantined / 10m"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Inspect bronze.tick_quarantine reasons; check kis_ingestion / schema registry."
+
+      - alert: BatchFailureSpike
+        expr: increase(tick_persistence_handle_batch_failures_total[10m]) > 0
+        for: 5m
+        labels:
+          severity: warning
+          team: invest
+          channel: invest
+        annotations:
+          summary: "handle_batch failures observed"
+          impact: "Batches not committed; consumer retries and may fail-fast restart."
+          current_value: "{{ $value }} in 10m"
+          threshold: "any handle_batch failure / 10m"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Check DB availability / constraint violations; inspect pod logs."
+
+      - alert: ReconciliationImbalance
+        expr: tick_persistence_reconciliation_imbalance != 0
+        for: 5m
+        labels:
+          severity: critical
+          team: invest
+          channel: invest
+        annotations:
+          summary: "completeness reconciliation imbalance (possible silent loss)"
+          impact: "consumed != inserted + conflict + quarantine + skip on a partition."
+          current_value: "{{ $value }}"
+          threshold: "imbalance != 0 for 5m"
+          runbook_url: "services/tick_persistence/docs/observability-slo.md"
+          action: "Inspect per-partition counters; a committed offset went unaccounted."

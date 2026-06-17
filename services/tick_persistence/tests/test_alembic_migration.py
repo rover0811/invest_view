@@ -178,6 +178,7 @@ def test_alembic_upgrade_and_downgrade_create_expected_objects(monkeypatch: pyte
         assert state["schemas"] == {"bronze", "silver", "serving"}
         assert state["tables"] == {
             ("bronze", "tick_history"),
+            ("bronze", "tick_quarantine"),
             ("silver", "symbol_5m_metrics"),
             ("silver", "symbol_daily_ohlc"),
             ("serving", "symbol_snapshot"),

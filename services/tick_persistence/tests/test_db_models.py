@@ -6,6 +6,7 @@ from tick_persistence.db.models import (
     Symbol5mMetrics,
     SymbolSnapshot,
     TickHistory,
+    TickQuarantine,
 )
 
 KIS_FIELDS = {
@@ -37,9 +38,32 @@ def test_kis_field_set_is_49():
     assert len(KIS_FIELDS) == 49
 
 
-def test_metadata_has_three_layered_tables():
+def test_metadata_has_layered_and_quarantine_tables():
     names = {t.fullname for t in Base.metadata.tables.values()}
-    assert names == {"bronze.tick_history", "silver.symbol_5m_metrics", "serving.symbol_snapshot"}
+    assert names == {
+        "bronze.tick_history",
+        "bronze.tick_quarantine",
+        "silver.symbol_5m_metrics",
+        "serving.symbol_snapshot",
+    }
+
+
+def test_tick_quarantine_schema_columns_and_lineage_unique():
+    assert TickQuarantine.__table__.schema == "bronze"
+    cols = TickQuarantine.__table__.columns
+    assert set(cols.keys()) == {
+        "id",
+        "raw_payload",
+        "kafka_topic",
+        "kafka_partition",
+        "kafka_offset",
+        "reason",
+        "quarantined_at",
+    }
+    assert "JSONB" in str(cols["raw_payload"].type)
+    assert cols["raw_payload"].nullable is False
+    assert cols["reason"].nullable is False
+    assert ("kafka_topic", "kafka_partition", "kafka_offset") in _unique_column_sets(TickQuarantine)
 
 
 def test_schema_constants_and_table_schemas():

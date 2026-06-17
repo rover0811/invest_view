@@ -37,8 +37,10 @@ def _required(tick: Mapping[str, object], field: str) -> object:
     return value
 
 
-def _clean_str(value: object) -> str:
+def _clean_str(value: object, field: str) -> str:
     text = str(value).strip()
+    if text == "":
+        raise ValueError(f"empty tick identity field: {field}")
     return text
 
 
@@ -63,13 +65,13 @@ def compute_event_id(tick: TickInput) -> str:
         market_value = _required(tick_mapping, "source_tr_id")
 
     normalized = {
-        "market": _clean_str(market_value).upper(),
-        "symbol": _clean_str(_required(tick_mapping, "symbol")),
-        "business_date": _clean_str(_required(tick_mapping, "business_date")),
+        "market": _clean_str(market_value, "market").upper(),
+        "symbol": _clean_str(_required(tick_mapping, "symbol"), "symbol"),
+        "business_date": _clean_str(_required(tick_mapping, "business_date"), "business_date"),
         "cumulative_volume": _int_string(_required(tick_mapping, "cumulative_volume"), "cumulative_volume"),
-        "trade_time": _clean_str(_required(tick_mapping, "trade_time")),
+        "trade_time": _clean_str(_required(tick_mapping, "trade_time"), "trade_time"),
         "price": _int_string(_required(tick_mapping, "price"), "price"),
-        "trade_type": _clean_str(_required(tick_mapping, "trade_type")),
+        "trade_type": _clean_str(_required(tick_mapping, "trade_type"), "trade_type"),
     }
     name_string = "|".join(normalized[field] for field in TICK_EVENT_ID_FIELDS)
     return str(uuid.uuid5(TICK_EVENT_NAMESPACE, name_string))

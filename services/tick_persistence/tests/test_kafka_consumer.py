@@ -5,7 +5,7 @@ import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from confluent_kafka import KafkaError
+from confluent_kafka import KafkaError, TopicPartition
 from confluent_kafka.serialization import SerializationError
 
 from tick_persistence.kafka.consumer import TickConsumer, TickMessage
@@ -18,6 +18,9 @@ def mock_config():
     cfg.kafka_bootstrap_servers = "localhost:9092"
     cfg.kafka_consumer_group = "test-group"
     cfg.kafka_auto_offset_reset = "earliest"
+    cfg.batch_size = 500
+    cfg.poll_timeout = 1.0
+    cfg.max_poll_interval_ms = 300_000
     cfg.schema_registry_url = "http://localhost:8081"
     cfg.avro_schema_path = "/dev/null"
     return cfg
@@ -61,10 +64,14 @@ class _DoneTask:
         return "fake-consumer-task"
 
 
+def _offset_triples(offsets: list[TopicPartition]) -> list[tuple[str, int, int]]:
+    return sorted((tp.topic, tp.partition, tp.offset) for tp in offsets)
+
+
 @pytest.mark.asyncio
 async def test_consumer_supervision_records_task_exception(mock_config, consumer_patches):
     consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
-    consumer_patches["Consumer"].return_value.poll.return_value = None
+    consumer_patches["Consumer"].return_value.consume.return_value = []
 
     await consumer.start()
     assert consumer.is_alive()
@@ -86,7 +93,7 @@ async def test_consumer_supervision_records_task_exception(mock_config, consumer
 @pytest.mark.asyncio
 async def test_consumer_supervision_ignores_cancelled_task(mock_config, consumer_patches):
     consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
-    consumer_patches["Consumer"].return_value.poll.return_value = None
+    consumer_patches["Consumer"].return_value.consume.return_value = []
 
     await consumer.start()
     consumer._on_task_done(_DoneTask(RuntimeError("cancelled"), cancelled=True))
@@ -107,7 +114,7 @@ async def test_consumer_supervision_ignores_cancelled_task(mock_config, consumer
 async def test_start_subscribes_to_topic(mock_config, consumer_patches):
     consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
     consumer._stop_event.set()
-    consumer_patches["Consumer"].return_value.poll.return_value = None
+    consumer_patches["Consumer"].return_value.consume.return_value = []
 
     await consumer.start()
 
@@ -116,7 +123,10 @@ async def test_start_subscribes_to_topic(mock_config, consumer_patches):
     await consumer._poll_task
     await consumer._dispatch_task
 
-    consumer_patches["Consumer"].return_value.subscribe.assert_called_once_with(["stock-ticks"])
+    _, kwargs = consumer_patches["Consumer"].return_value.subscribe.call_args
+    assert consumer_patches["Consumer"].return_value.subscribe.call_args.args == (["stock-ticks"],)
+    assert callable(kwargs["on_assign"])
+    assert callable(kwargs["on_revoke"])
 
 
 @pytest.mark.asyncio
@@ -126,13 +136,15 @@ async def test_poll_handles_none_message(mock_config, consumer_patches):
 
     call_count = {"n": 0}
 
-    def poll_se(timeout):
+    def consume_se(*, num_messages, timeout):
+        assert num_messages == 500
+        assert timeout == 0.01
         call_count["n"] += 1
         if call_count["n"] >= 2:
             consumer._stop_event.set()
-        return None
+        return []
 
-    consumer._consumer.poll.side_effect = poll_se
+    consumer._consumer.consume.side_effect = consume_se
 
     await consumer._run_poll_loop()
 
@@ -152,14 +164,14 @@ async def test_poll_handles_partition_eof(mock_config, consumer_patches):
 
     call_count = {"n": 0}
 
-    def poll_se(timeout):
+    def consume_se(*, num_messages, timeout):
         call_count["n"] += 1
         if call_count["n"] >= 2:
             consumer._stop_event.set()
-            return None
-        return msg
+            return []
+        return [msg]
 
-    consumer._consumer.poll.side_effect = poll_se
+    consumer._consumer.consume.side_effect = consume_se
 
     await consumer._run_poll_loop()
 
@@ -168,73 +180,98 @@ async def test_poll_handles_partition_eof(mock_config, consumer_patches):
 
 
 @pytest.mark.asyncio
-async def test_poll_commits_and_skips_on_serialization_error(mock_config, consumer_patches):
+async def test_deserialize_error_is_skipped_but_offset_is_committed_after_batch_success(mock_config, consumer_patches):
     consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
     consumer._loop = asyncio.get_running_loop()
 
-    msg = _make_msg(value=b"raw-bytes")
-    consumer._deserializer.side_effect = SerializationError("bad payload")
+    bad_msg = _make_msg(value=b"bad-bytes", offset=10, partition=0)
+    good_msg = _make_msg(value=b"good-bytes", offset=11, partition=0)
+    payload = {"symbol": "005930", "price": 70000}
+    consumer._deserializer.side_effect = [SerializationError("bad payload"), payload]
 
     call_count = {"n": 0}
-    def poll_se(timeout):
+    def consume_se(*, num_messages, timeout):
         call_count["n"] += 1
         if call_count["n"] >= 2:
             consumer._stop_event.set()
-            return None
-        return msg
+            return []
+        return [bad_msg, good_msg]
 
-    consumer._consumer.poll.side_effect = poll_se
+    consumer._consumer.consume.side_effect = consume_se
 
     await consumer._run_poll_loop()
 
-    consumer._consumer.commit.assert_called_once_with(message=msg, asynchronous=False)
-    assert consumer._queue.empty()
+    seen = []
+
+    async def handler(batch: list[TickMessage]) -> None:
+        consumer._consumer.commit.assert_not_called()
+        seen.extend(batch)
+
+    consumer._on_message = handler
+    await consumer._run_dispatch_loop()
+
+    assert seen == [TickMessage(value=payload, topic="stock-ticks", partition=0, offset=11, headers={})]
+    consumer._consumer.commit.assert_called_once()
+    assert _offset_triples(consumer._consumer.commit.call_args.kwargs["offsets"]) == [("stock-ticks", 0, 12)]
+    assert consumer._consumer.commit.call_args.kwargs["asynchronous"] is False
 
 
 @pytest.mark.asyncio
-async def test_poll_deserializes_valid_message_then_dispatch_commits_after_handler(mock_config, consumer_patches):
+async def test_batch_dispatch_commits_partition_offsets_after_handler_success(mock_config, consumer_patches):
     consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
     consumer._loop = asyncio.get_running_loop()
 
-    payload = {"symbol": "005930", "price": 70000}
-    msg = _make_msg(
+    payload1 = {"symbol": "005930", "price": 70000}
+    payload2 = {"symbol": "000660", "price": 120000}
+    payload3 = {"symbol": "035420", "price": 200000}
+    msg1 = _make_msg(
         value=b"raw-bytes",
         topic="stock-ticks",
         partition=2,
         offset=123,
         headers=[("trace-id", b"abc"), ("source", "kis")],
     )
-    consumer._deserializer.return_value = payload
+    msg2 = _make_msg(value=b"raw-bytes", topic="stock-ticks", partition=1, offset=7)
+    msg3 = _make_msg(value=b"raw-bytes", topic="stock-ticks", partition=2, offset=125)
+    consumer._deserializer.side_effect = [payload1, payload2, payload3]
 
     call_count = {"n": 0}
-    def poll_se(timeout):
+    def consume_se(*, num_messages, timeout):
         call_count["n"] += 1
         if call_count["n"] >= 2:
             consumer._stop_event.set()
-            return None
-        return msg
+            return []
+        return [msg1, msg2, msg3]
 
-    consumer._consumer.poll.side_effect = poll_se
+    consumer._consumer.consume.side_effect = consume_se
     await consumer._run_poll_loop()
 
     seen = []
-    async def handler(tick_message: TickMessage) -> None:
+
+    async def handler(batch: list[TickMessage]) -> None:
         consumer._consumer.commit.assert_not_called()
-        seen.append(tick_message)
+        seen.extend(batch)
 
     consumer._on_message = handler
     await consumer._run_dispatch_loop()
 
     assert seen == [
         TickMessage(
-            value=payload,
+            value=payload1,
             topic="stock-ticks",
             partition=2,
             offset=123,
             headers={"trace-id": "abc", "source": "kis"},
-        )
+        ),
+        TickMessage(value=payload2, topic="stock-ticks", partition=1, offset=7, headers={}),
+        TickMessage(value=payload3, topic="stock-ticks", partition=2, offset=125, headers={}),
     ]
-    consumer._consumer.commit.assert_called_once_with(message=msg, asynchronous=False)
+    consumer._consumer.commit.assert_called_once()
+    assert _offset_triples(consumer._consumer.commit.call_args.kwargs["offsets"]) == [
+        ("stock-ticks", 1, 8),
+        ("stock-ticks", 2, 126),
+    ]
+    assert consumer._consumer.commit.call_args.kwargs["asynchronous"] is False
 
 
 @pytest.mark.asyncio
@@ -244,14 +281,14 @@ async def test_dispatch_does_not_commit_when_handler_raises_and_dead_is_set(mock
 
     msg = _make_msg()
     payload = {"symbol": "005930"}
-    await consumer._queue.put((msg, payload))
+    await consumer._queue.put([(msg, TickMessage(value=payload, topic="stock-ticks", partition=0, offset=42, headers={}))])
     consumer._stop_event.set()
 
     with pytest.raises(RuntimeError, match="boom") as exc_info:
         await consumer._run_dispatch_loop()
     consumer._on_task_done(_DoneTask(exc_info.value))
 
-    handler.assert_awaited_once_with(TickMessage(value=payload, topic="stock-ticks", partition=0, offset=42, headers={}))
+    handler.assert_awaited_once_with([TickMessage(value=payload, topic="stock-ticks", partition=0, offset=42, headers={})])
     consumer._consumer.commit.assert_not_called()
     await asyncio.wait_for(consumer.wait_dead(), timeout=0.1)
     assert consumer.fatal_error is exc_info.value
@@ -266,16 +303,55 @@ async def test_dispatch_fail_fast_does_not_advance_to_later_message(mock_config,
     msg2 = _make_msg(offset=20)
     payload1 = {"symbol": "005930"}
     payload2 = {"symbol": "000660"}
-    await consumer._queue.put((msg1, payload1))
-    await consumer._queue.put((msg2, payload2))
+    batch1 = [(msg1, TickMessage(value=payload1, topic="stock-ticks", partition=0, offset=10, headers={}))]
+    batch2 = [(msg2, TickMessage(value=payload2, topic="stock-ticks", partition=0, offset=20, headers={}))]
+    await consumer._queue.put(batch1)
+    await consumer._queue.put(batch2)
     consumer._stop_event.set()
 
     with pytest.raises(RuntimeError, match="boom"):
         await consumer._run_dispatch_loop()
 
-    handler.assert_awaited_once_with(TickMessage(value=payload1, topic="stock-ticks", partition=0, offset=10, headers={}))
+    handler.assert_awaited_once_with([TickMessage(value=payload1, topic="stock-ticks", partition=0, offset=10, headers={})])
     consumer._consumer.commit.assert_not_called()
-    assert consumer._queue.get_nowait() == (msg2, payload2)
+    assert consumer._queue.get_nowait() == batch2
+
+
+@pytest.mark.asyncio
+async def test_empty_consume_batch_continues_without_commit(mock_config, consumer_patches):
+    consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
+    consumer._loop = asyncio.get_running_loop()
+
+    calls = {"n": 0}
+
+    def consume_se(*, num_messages, timeout):
+        calls["n"] += 1
+        if calls["n"] >= 2:
+            consumer._stop_event.set()
+        return []
+
+    consumer._consumer.consume.side_effect = consume_se
+
+    await consumer._run_poll_loop()
+
+    consumer._consumer.commit.assert_not_called()
+    assert consumer._queue.empty()
+
+
+def test_revoke_discards_pending_batches_clears_state_and_commits_success_offsets(mock_config, consumer_patches):
+    clear_state = MagicMock()
+    consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01, on_revoke=clear_state)
+    msg = _make_msg(offset=10)
+    consumer._queue.put_nowait([(msg, TickMessage(value={"symbol": "005930"}, topic="stock-ticks", partition=0, offset=10, headers={}))])
+    consumer._last_successful_offsets[("stock-ticks", 0)] = TopicPartition("stock-ticks", 0, 9)
+
+    consumer._on_revoke(consumer._consumer, [TopicPartition("stock-ticks", 0)])
+
+    assert consumer._queue.empty()
+    clear_state.assert_called_once_with()
+    consumer._consumer.commit.assert_called_once()
+    assert _offset_triples(consumer._consumer.commit.call_args.kwargs["offsets"]) == [("stock-ticks", 0, 9)]
+    assert consumer._consumer.commit.call_args.kwargs["asynchronous"] is False
 
 
 def test_stop_sets_event_and_closes(mock_config, consumer_patches):
