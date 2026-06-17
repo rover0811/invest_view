@@ -5,7 +5,9 @@ from tick_persistence.config import TickPersistenceConfig
 from tick_persistence.db.session import create_engine, create_session_factory
 from tick_persistence.handler import TickHandler
 from tick_persistence.kafka.consumer import TickConsumer
+from tick_persistence.observability import FreshnessMonitor, ReconciliationLedger, TickMetrics
 from tick_persistence.repository.metrics import Metrics5mRepository
+from tick_persistence.repository.quarantine import QuarantineRepository
 from tick_persistence.repository.snapshot import SnapshotRepository
 from tick_persistence.repository.tick_history import TickHistoryRepository
 
@@ -16,9 +18,13 @@ class Container:
         self.engine = create_engine(config.database_url)
         self.session_factory = create_session_factory(self.engine)
 
+        self.metrics = TickMetrics()
+        self.ledger = ReconciliationLedger(self.metrics)
+
         self.tick_history_repo = TickHistoryRepository()
         self.snapshot_repo = SnapshotRepository()
         self.metrics_repo = Metrics5mRepository()
+        self.quarantine_repo = QuarantineRepository()
         self.aggregator = FiveMinuteAggregator()
 
         self.handler = TickHandler(
@@ -27,5 +33,19 @@ class Container:
             snapshot_repo=self.snapshot_repo,
             metrics_repo=self.metrics_repo,
             aggregator=self.aggregator,
+            quarantine_repo=self.quarantine_repo,
+            metrics=self.metrics,
+            ledger=self.ledger,
         )
-        self.consumer = TickConsumer(config=config, on_message=self.handler.handle)
+        self.consumer = TickConsumer(
+            config=config,
+            on_message=self.handler.handle_batch,
+            on_revoke=self.handler.clear_state,
+            metrics=self.metrics,
+            ledger=self.ledger,
+        )
+        self.freshness_monitor = FreshnessMonitor(
+            self.session_factory,
+            self.metrics,
+            interval_seconds=config.freshness_refresh_interval_seconds,
+        )

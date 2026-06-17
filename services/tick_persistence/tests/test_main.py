@@ -9,6 +9,7 @@ import pytest
 @dataclass
 class _FakeConfig:
     log_level: str = "INFO"
+    metrics_enabled: bool = False
 
 
 class _FakeEngine:

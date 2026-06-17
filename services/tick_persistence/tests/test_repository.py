@@ -14,6 +14,7 @@ from tick_persistence.db.models import Symbol5mMetrics, SymbolSnapshot, TickHist
 from tick_persistence.kafka.consumer import TickMessage
 from tick_persistence.repository.metrics import Metrics5mRepository
 from tick_persistence.repository.snapshot import SnapshotRepository
+from tick_persistence.repository import tick_history as tick_history_module
 from tick_persistence.repository.tick_history import TickHistoryRepository
 
 pytestmark = pytest.mark.qa
@@ -45,6 +46,12 @@ def _tick_value(symbol: str = "005930", price: int = 70000, volume: int = 1500) 
 
 def _message(value: dict[str, Any], *, topic: str = "stock-ticks", partition: int = 0, offset: int = 123) -> TickMessage:
     return TickMessage(value=value, topic=topic, partition=partition, offset=offset, headers={})
+
+
+def _hhmmss(seconds_after_midnight: int) -> str:
+    hours, remainder = divmod(seconds_after_midnight, 60 * 60)
+    minutes, seconds = divmod(remainder, 60)
+    return f"{hours:02}{minutes:02}{seconds:02}"
 
 
 async def _insert_tick(db_session_factory, repo: TickHistoryRepository, message: TickMessage) -> bool:
@@ -120,6 +127,36 @@ async def test_bronze_prefers_payload_event_id_when_present(db_session_factory):
     assert event_id == payload_event_id
 
 
+async def test_bronze_insert_many_splits_large_batch_and_returns_inserted_lineage(db_session_factory):
+    repo = TickHistoryRepository()
+    max_rows = tick_history_module.postgres_max_insert_rows()
+    messages = [
+        _message(
+            _tick_value(price=70_000 + (index % 100), volume=1)
+            | {
+                "trade_time": _hhmmss(9 * 3600 + index),
+                "cumulative_volume": 1_000_000 + index,
+            },
+            partition=2,
+            offset=index,
+        )
+        for index in range(max_rows + 1)
+    ]
+
+    async with db_session_factory() as session:
+        inserted = await repo.insert_many(session, messages)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        count = await session.scalar(sa.select(sa.func.count()).select_from(TickHistory))
+
+    assert len(inserted) == len(messages)
+    assert int(count or 0) == len(messages)
+    assert {(row.partition, row.offset) for row in inserted} == {(2, index) for index in range(max_rows + 1)}
+    assert all(row.value is messages[row.offset].value for row in inserted)
+    assert all(row.market == "KRX" for row in inserted)
+
+
 def _bar(*, close: int, is_final: bool, tick_count: int) -> BarState:
     return BarState(
         open=70000,
@@ -129,6 +166,8 @@ def _bar(*, close: int, is_final: bool, tick_count: int) -> BarState:
         volume=1500,
         vwap_last=Decimal("70200.50"),
         tick_count=tick_count,
+        open_key=(datetime(2026, 6, 1, 9, 0, tzinfo=KST), 0, 1),
+        close_key=(datetime(2026, 6, 1, 9, 4, tzinfo=KST), 0, 5),
         is_final=is_final,
     )
 
@@ -157,14 +196,38 @@ async def test_silver_upsert_is_idempotent_and_updates(db_session_factory):
 
     async with db_session_factory() as session:
         loaded = await repo.load_bar_state(session, symbol, bucket_start)
+    assert loaded is None
+
+
+async def test_load_bar_state_reconstructs_active_bucket_from_bronze_order_keys(db_session_factory):
+    tick_repo = TickHistoryRepository()
+    repo = Metrics5mRepository()
+    symbol = "005930"
+    bucket_start = datetime(2026, 6, 1, 9, 0, tzinfo=KST)
+    ticks = [
+        (_tick_value(symbol=symbol, price=70100, volume=13) | {"trade_time": "090400", "vwap": Decimal("70100.00")}, 2, 30),
+        (_tick_value(symbol=symbol, price=70500, volume=7) | {"trade_time": "090100", "vwap": Decimal("70500.00")}, 0, 1),
+        (_tick_value(symbol=symbol, price=69800, volume=11) | {"trade_time": "090300", "vwap": Decimal("69800.00")}, 1, 20),
+    ]
+
+    async with db_session_factory() as session:
+        for tick, partition, offset in ticks:
+            await tick_repo.insert(session, _message(tick, partition=partition, offset=offset))
+        await session.commit()
+
+    async with db_session_factory() as session:
+        loaded = await repo.load_bar_state(session, symbol, bucket_start)
+
     assert loaded is not None
-    assert loaded.close == 70300
-    assert loaded.open == 70000
+    assert loaded.open == 70500
     assert loaded.high == 70500
     assert loaded.low == 69800
-    assert loaded.tick_count == 5
-    assert loaded.is_final is True
-    assert loaded.vwap_last == Decimal("70200.50")
+    assert loaded.close == 70100
+    assert loaded.volume == 31
+    assert loaded.tick_count == 3
+    assert loaded.vwap_last == Decimal("70100.00")
+    assert loaded.open_key == (datetime(2026, 6, 1, 9, 1, tzinfo=KST), 0, 1)
+    assert loaded.close_key == (datetime(2026, 6, 1, 9, 4, tzinfo=KST), 2, 30)
 
 
 async def test_silver_load_bar_state_absent_returns_none(db_session_factory):
