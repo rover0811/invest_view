@@ -17,6 +17,7 @@ class TickPersistenceConfig(BaseSettings):
     kafka_consumer_group: str = "tick-persistence-v1"
     kafka_auto_offset_reset: str = "earliest"
     batch_size: int = 500
+    max_queued_messages: int = 5000
     poll_timeout: float = 1.0
     max_poll_interval_ms: int = 300_000
 

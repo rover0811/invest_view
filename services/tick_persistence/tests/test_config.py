@@ -1,3 +1,4 @@
+# pyright: reportCallIssue=false
 import os
 
 import pytest
@@ -34,6 +35,7 @@ def test_config_defaults(monkeypatch):
     assert cfg.kafka_consumer_group == "tick-persistence-v1"
     assert cfg.kafka_auto_offset_reset == "earliest"
     assert cfg.batch_size == 500
+    assert cfg.max_queued_messages == 5000
     assert cfg.poll_timeout == 1.0
     assert cfg.max_poll_interval_ms == 300_000
     assert cfg.avro_schema_path == "schemas/stock-ticks.avsc"
@@ -50,6 +52,7 @@ def test_config_overrides(monkeypatch):
     monkeypatch.setenv("TICK_PERSISTENCE_KAFKA_TOPIC", "custom-ticks")
     monkeypatch.setenv("TICK_PERSISTENCE_KAFKA_AUTO_OFFSET_RESET", "latest")
     monkeypatch.setenv("TICK_PERSISTENCE_BATCH_SIZE", "250")
+    monkeypatch.setenv("TICK_PERSISTENCE_MAX_QUEUED_MESSAGES", "1250")
     monkeypatch.setenv("TICK_PERSISTENCE_POLL_TIMEOUT", "0.5")
     monkeypatch.setenv("TICK_PERSISTENCE_MAX_POLL_INTERVAL_MS", "600000")
     monkeypatch.setenv("TICK_PERSISTENCE_METRICS_ENABLED", "false")
@@ -59,6 +62,7 @@ def test_config_overrides(monkeypatch):
     assert cfg.kafka_topic == "custom-ticks"
     assert cfg.kafka_auto_offset_reset == "latest"
     assert cfg.batch_size == 250
+    assert cfg.max_queued_messages == 1250
     assert cfg.poll_timeout == 0.5
     assert cfg.max_poll_interval_ms == 600_000
     assert cfg.metrics_enabled is False

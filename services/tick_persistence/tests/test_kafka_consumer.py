@@ -2,6 +2,7 @@
 # pyright: reportPrivateUsage=false, reportAttributeAccessIssue=false, reportArgumentType=false, reportUnknownParameterType=false, reportMissingParameterType=false, reportUnknownMemberType=false, reportAny=false, reportUnknownArgumentType=false, reportUnusedParameter=false, reportMissingTypeStubs=false
 
 import asyncio
+import contextlib
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -19,6 +20,7 @@ def mock_config():
     cfg.kafka_consumer_group = "test-group"
     cfg.kafka_auto_offset_reset = "earliest"
     cfg.batch_size = 500
+    cfg.max_queued_messages = 5000
     cfg.poll_timeout = 1.0
     cfg.max_poll_interval_ms = 300_000
     cfg.schema_registry_url = "http://localhost:8081"
@@ -47,6 +49,14 @@ def _make_msg(*, value=None, error=None, topic="stock-ticks", offset=42, partiti
     msg.partition.return_value = partition
     msg.headers.return_value = headers
     return msg
+
+
+async def _wait_until(predicate, *, timeout: float = 0.2) -> None:
+    deadline = asyncio.get_running_loop().time() + timeout
+    while not predicate():
+        if asyncio.get_running_loop().time() >= deadline:
+            raise AssertionError("condition was not met before timeout")
+        await asyncio.sleep(0.001)
 
 
 class _DoneTask:
@@ -336,6 +346,50 @@ async def test_empty_consume_batch_continues_without_commit(mock_config, consume
 
     consumer._consumer.commit.assert_not_called()
     assert consumer._queue.empty()
+
+
+@pytest.mark.asyncio
+async def test_poll_loop_blocks_when_queued_message_budget_is_full(mock_config, consumer_patches):
+    mock_config.batch_size = 2
+    mock_config.max_queued_messages = 4
+    consumer = TickConsumer(mock_config, AsyncMock(), poll_timeout=0.01)
+    loop = asyncio.get_running_loop()
+    consumer._loop = loop
+
+    batches = [
+        [_make_msg(value=b"raw", offset=0), _make_msg(value=b"raw", offset=1)],
+        [_make_msg(value=b"raw", offset=2), _make_msg(value=b"raw", offset=3)],
+        [_make_msg(value=b"raw", offset=4), _make_msg(value=b"raw", offset=5)],
+    ]
+    consumer._deserializer.side_effect = [
+        {"symbol": "005930", "seq": seq} for seq in range(6)
+    ]
+    third_batch_consumed = asyncio.Event()
+    calls = {"n": 0}
+
+    def consume_se(*, num_messages, timeout):
+        assert num_messages == 2
+        calls["n"] += 1
+        if calls["n"] == 3:
+            loop.call_soon_threadsafe(third_batch_consumed.set)
+        if calls["n"] <= len(batches):
+            return batches[calls["n"] - 1]
+        return []
+
+    consumer._consumer.consume.side_effect = consume_se
+    task = asyncio.create_task(consumer._run_poll_loop())
+
+    await asyncio.wait_for(third_batch_consumed.wait(), timeout=0.2)
+    await _wait_until(lambda: consumer._queue.qsize() >= 2)
+    await asyncio.sleep(0.02)
+
+    assert consumer._queue.qsize() == 2
+
+    consumer.stop()
+    if not task.done():
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
 
 
 def test_revoke_discards_pending_batches_clears_state_and_commits_success_offsets(mock_config, consumer_patches):
