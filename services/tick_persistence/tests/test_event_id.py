@@ -45,3 +45,47 @@ def test_compute_event_id_rejects_missing_identity_field() -> None:
 
     with pytest.raises(ValueError, match="missing required tick identity field: trade_type"):
         compute_event_id(tick)
+
+
+def test_compute_event_id_rejects_empty_identity_field() -> None:
+    tick = {
+        "market": "KRX",
+        "symbol": "",
+        "business_date": "20260617",
+        "cumulative_volume": 123456,
+        "trade_time": "091530",
+        "price": 70100,
+        "trade_type": "2",
+    }
+
+    with pytest.raises(ValueError, match="empty tick identity field: symbol"):
+        compute_event_id(tick)
+
+
+def test_compute_event_id_rejects_whitespace_only_identity_field() -> None:
+    tick = {
+        "market": "   ",
+        "symbol": "005930",
+        "business_date": "20260617",
+        "cumulative_volume": 123456,
+        "trade_time": "091530",
+        "price": 70100,
+        "trade_type": "2",
+    }
+
+    with pytest.raises(ValueError, match="empty tick identity field: market"):
+        compute_event_id(tick)
+
+
+def test_compute_event_id_parity_unchanged_for_valid_inputs() -> None:
+    tick = {
+        "market": "KRX",
+        "symbol": "005930",
+        "business_date": "20260617",
+        "cumulative_volume": 123456,
+        "trade_time": "091530",
+        "price": 70100,
+        "trade_type": "2",
+    }
+
+    assert compute_event_id(tick) == "cc293f67-5c08-58c8-86fb-ef8835363c9c"

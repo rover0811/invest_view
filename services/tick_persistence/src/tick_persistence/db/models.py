@@ -16,7 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     text,
 )
-from sqlalchemy.dialects.postgresql import UUID
+from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -152,5 +152,31 @@ class SymbolSnapshot(Base):
     business_date: Mapped[str | None] = mapped_column(Text, nullable=True)
     last_event_ts: Mapped[datetime | None] = mapped_column(TIMESTAMP(timezone=True), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
+        TIMESTAMP(timezone=True), server_default=text("now()"), nullable=False
+    )
+
+
+class TickQuarantine(Base):
+    """Durable isolation for deterministic poison-pill ticks; idempotent on Kafka lineage."""
+
+    __tablename__: str = "tick_quarantine"
+    __table_args__: tuple[object, ...] = (
+        UniqueConstraint(
+            "kafka_topic",
+            "kafka_partition",
+            "kafka_offset",
+            name="tick_quarantine_lineage_uq",
+        ),
+        Index("ix_tick_quarantine_quarantined_at", text("quarantined_at DESC")),
+        {"schema": SCHEMA_BRONZE},
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, primary_key=True, autoincrement=True)
+    raw_payload: Mapped[dict[str, object]] = mapped_column(JSONB, nullable=False)
+    kafka_topic: Mapped[str | None] = mapped_column(Text, nullable=True)
+    kafka_partition: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    kafka_offset: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    reason: Mapped[str] = mapped_column(Text, nullable=False)
+    quarantined_at: Mapped[datetime] = mapped_column(
         TIMESTAMP(timezone=True), server_default=text("now()"), nullable=False
     )
