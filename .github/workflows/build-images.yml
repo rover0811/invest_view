@@ -70,8 +70,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: rover0811
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Build and push ${{ matrix.image }}
         uses: docker/build-push-action@v6
@@ -111,8 +111,8 @@ jobs:
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          username: rover0811
+          password: ${{ secrets.GHCR_PAT }}
 
       - name: Build and push stream_detection
         uses: docker/build-push-action@v6
