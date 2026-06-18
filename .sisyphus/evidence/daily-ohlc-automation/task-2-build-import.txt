@@ -1,0 +1,103 @@
+=== TASK 2 BUILD + IMPORT SMOKE EVIDENCE ===
+date: 2026-06-18T04:54:35Z
+docker server: 27.5.1
+build mode: LIVE (native arm64 local build)
+
+=== docker build ===
+#0 building with "desktop-linux" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile
+#1 transferring dockerfile: 1.96kB done
+#1 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+#2 ...
+
+#3 [auth] astral-sh/uv:pull token for ghcr.io
+#3 DONE 0.0s
+
+#2 [internal] load metadata for ghcr.io/astral-sh/uv:python3.11-bookworm-slim
+#2 DONE 1.2s
+
+#4 [internal] load .dockerignore
+#4 transferring context: 893B done
+#4 DONE 0.0s
+
+#5 [1/6] FROM ghcr.io/astral-sh/uv:python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36
+#5 resolve ghcr.io/astral-sh/uv:python3.11-bookworm-slim@sha256:4f5d923c9dcea037f57bda425dd209f3ec643da2f0b74227f68d09dab0b3bb36 0.0s done
+#5 DONE 0.0s
+
+#6 [2/6] WORKDIR /app
+#6 CACHED
+
+#7 [internal] load build context
+#7 transferring context: 160.68kB 0.0s done
+#7 DONE 0.0s
+
+#8 [3/6] RUN uv pip install --system     "httpx"     "sqlalchemy[asyncio]>=2.0"     "asyncpg"     "pydantic>=2"     "pydantic-settings"
+#8 0.278 Using Python 3.11.14 environment at: /usr/local
+#8 0.712 Resolved 16 packages in 420ms
+#8 0.736 Downloading pydantic-core (1.9MiB)
+#8 0.741 Downloading sqlalchemy (3.2MiB)
+#8 0.757 Downloading asyncpg (2.8MiB)
+#8 1.428  Downloaded pydantic-core
+#8 1.603  Downloaded asyncpg
+#8 1.632  Downloaded sqlalchemy
+#8 1.633 Prepared 16 packages in 917ms
+#8 1.665 Installed 16 packages in 32ms
+#8 1.665  + annotated-types==0.7.0
+#8 1.665  + anyio==4.14.0
+#8 1.665  + asyncpg==0.31.0
+#8 1.666  + certifi==2026.6.17
+#8 1.666  + greenlet==3.5.2
+#8 1.666  + h11==0.16.0
+#8 1.666  + httpcore==1.0.9
+#8 1.666  + httpx==0.28.1
+#8 1.666  + idna==3.18
+#8 1.666  + pydantic==2.13.4
+#8 1.666  + pydantic-core==2.46.4
+#8 1.666  + pydantic-settings==2.14.1
+#8 1.666  + python-dotenv==1.2.2
+#8 1.666  + sqlalchemy==2.0.51
+#8 1.666  + typing-extensions==4.15.0
+#8 1.666  + typing-inspection==0.4.2
+#8 DONE 1.7s
+
+#9 [4/6] COPY services/tick_persistence/src/ /app/services/tick_persistence/src/
+#9 DONE 0.0s
+
+#10 [5/6] COPY services/kis_ingestion/src/ /app/services/kis_ingestion/src/
+#10 DONE 0.0s
+
+#11 [6/6] COPY scripts/backfill_daily_ohlc.py /app/scripts/backfill_daily_ohlc.py
+#11 DONE 0.0s
+
+#12 exporting to image
+#12 exporting layers
+#12 exporting layers 0.7s done
+#12 exporting manifest sha256:54e5cf40b6ed5ff4bbb43d98cebe4f66aee3870c69f6b4323bd891e5b3045253 done
+#12 exporting config sha256:e22bd1b98ef19cfcf7b277d5b84d662f1f0e9753a0a7b4d3c8ecce74b4ebcbe2 done
+#12 exporting attestation manifest sha256:9a658fcd300699b63e6f549c498d455bea0b3904222da0789c993fc4101628c8 done
+#12 exporting manifest list sha256:60b245c63b87dc22bacbf4ff110761b42299ad29bb0d69fca9b1fc5debbb587e done
+#12 naming to docker.io/library/backfill_ohlc:smoke done
+#12 unpacking to docker.io/library/backfill_ohlc:smoke
+#12 unpacking to docker.io/library/backfill_ohlc:smoke 0.2s done
+#12 DONE 1.0s
+
+View build details: docker-desktop://dashboard/build/desktop-linux/desktop-linux/emjh1scksa4vq6yhj2ssbjr1a
+BUILD_EXIT=
+
+=== image present ===
+backfill_ohlc:smoke 60b245c63b87 336MB
+
+=== smoke 1: 3 runtime imports (kis_ingestion.token_manager.KISTokenManager, tick_persistence.kis.daily_client.fetch_all_history, tick_persistence.db.session.create_engine) ===
+imports OK
+IMPORT_EXIT=0
+
+=== existing Dockerfiles UNTOUCHED (git status --porcelain, empty = clean) ===
+(empty above = untouched)
+
+=== no .env/secret in image; /app contains only scripts/ + both src/ trees ===
+scripts/, services/kis_ingestion/src/, services/tick_persistence/src/ — verified, no .env*/secret*
+
+RESULT: LIVE build OK; import smoke OK (exit 0); --help OK (exit 0); siblings untouched; no secrets.

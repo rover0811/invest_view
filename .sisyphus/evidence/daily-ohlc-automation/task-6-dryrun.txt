@@ -1,0 +1,35 @@
+### Task 6 validation (2026-06-18T04:55:01.610850Z)
+# Env: ~/.kube/config = kind/local context, no live server -> kubectl apply/create -f
+#      requires server RESTMapper discovery (fails offline). 'kustomize build' is the
+#      offline structural+registration check; path-level assertions below verify each
+#      guardrail sits at its correct spec path (stronger than a string grep).
+
+=== A) kubectl kustomize infrastructure/invest/services  -> exit 0 (OK) ===
+    kustomize-built resource kinds: ConfigMapx4, Servicex5, Deploymentx5, CronJobx1
+    CronJob 'backfill-ohlc' present in build: True
+
+=== B) path-level guardrail assertions on backfill-ohlc-cronjob.yaml ===
+    [PASS] apiVersion == batch/v1  (got: batch/v1)
+    [PASS] kind == CronJob  (got: CronJob)
+    [PASS] metadata.namespace == invest  (got: invest)
+    [PASS] spec.schedule == '0 7 * * 1-5'  (got: 0 7 * * 1-5)
+    [PASS] spec.concurrencyPolicy == Forbid  (got: Forbid)
+    [PASS] spec.successfulJobsHistoryLimit == 3  (got: 3)
+    [PASS] spec.failedJobsHistoryLimit == 3  (got: 3)
+    [PASS] jobTemplate.spec.backoffLimit == 2  (got: 2)
+    [PASS] jobTemplate.spec.activeDeadlineSeconds == 1800  (got: 1800)
+    [PASS] template.spec.restartPolicy == Never  (got: Never)
+    [PASS] template.spec.imagePullSecrets has invest-ghcr-secret  (got: [{'name': 'invest-ghcr-secret'}])
+    [PASS] container.name == backfill-ohlc  (got: backfill-ohlc)
+    [PASS] container.image uses backfill_ohlc + PLACEHOLDER_TAG  (got: ghcr.io/rover0811/backfill_ohlc:PLACEHOLDER_TAG)
+    [PASS] container has NO args (default entrypoint)  (got: {'args': None, 'command': None})
+    [PASS] envFrom secretRef invest-kis-credentials  (got: ['invest-kis-credentials', 'invest-db-credentials'])
+    [PASS] envFrom secretRef invest-db-credentials  (got: ['invest-kis-credentials', 'invest-db-credentials'])
+    [PASS] exactly 2 envFrom entries (no extra)  (got: 2)
+    [PASS] no configMapRef (no new ConfigMap dep)  (got: [['secretRef'], ['secretRef']])
+    [PASS] requests cpu==100m  (got: 100m)
+    [PASS] requests memory==256Mi  (got: 256Mi)
+    [PASS] limits cpu==500m  (got: 500m)
+    [PASS] limits memory==512Mi  (got: 512Mi)
+
+=== RESULT: ALL GUARDRAILS PRESENT AT CORRECT PATHS + kustomize build OK ===

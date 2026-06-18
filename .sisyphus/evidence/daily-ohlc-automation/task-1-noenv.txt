@@ -1,0 +1,19 @@
+============================= test session starts ==============================
+platform darwin -- Python 3.11.11, pytest-8.4.1, pluggy-1.6.0 -- /opt/homebrew/opt/python@3.11/bin/python3.11
+cachedir: .pytest_cache
+rootdir: /Users/rover0811/PycharmProjects
+configfile: pytest.ini
+plugins: asyncio-1.4.0, anyio-4.8.0, playwright-0.7.0, base-url-2.1.0
+asyncio: mode=Mode.STRICT, debug=False, asyncio_default_fixture_loop_scope=None, asyncio_default_test_loop_scope=function
+collecting ... collected 1 item
+
+scripts/tests/test_backfill_env.py::test_load_root_env_missing_file_does_not_raise PASSED [100%]
+
+=============================== warnings summary ===============================
+../../../../opt/homebrew/lib/python3.11/site-packages/_pytest/config/__init__.py:1474
+  /opt/homebrew/lib/python3.11/site-packages/_pytest/config/__init__.py:1474: PytestConfigWarning: Unknown config option: DJANGO_SETTINGS_MODULE
+  
+    self._warn_or_fail_if_strict(f"Unknown config option: {key}\n")
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+========================= 1 passed, 1 warning in 0.06s =========================

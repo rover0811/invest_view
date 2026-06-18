@@ -1,0 +1,28 @@
+=== TASK 2 --help SMOKE EVIDENCE ===
+date: 2026-06-18T04:55:00Z
+cmd: docker run --rm backfill_ohlc:smoke python /app/scripts/backfill_daily_ohlc.py --help
+
+usage: backfill_daily_ohlc.py [-h] [--symbols SYMBOLS] [--years YEARS]
+                              [--intervals INTERVALS] [--adjusted]
+                              [--no-adjusted]
+
+Backfill KIS daily/weekly/monthly OHLC bars into silver.symbol_daily_ohlc.
+
+options:
+  -h, --help            show this help message and exit
+  --symbols SYMBOLS     Comma-separated symbols. Defaults to KIS_WATCH_SYMBOLS
+                        JSON array from root .env.
+  --years YEARS         History years to fetch. Default: 10.
+  --intervals INTERVALS
+                        Comma-separated intervals among d,w,m. Default: d,w,m.
+  --adjusted            Fetch adjusted prices. Default: enabled.
+  --no-adjusted         Fetch raw/unadjusted prices.
+HELP_EXIT=0
+
+=== default CMD form (no override) prints same help via --help passthrough check ===
+--- grep for required flags ---
+usage: backfill_daily_ohlc.py [-h] [--symbols SYMBOLS] [--years YEARS]
+                              [--intervals INTERVALS] [--adjusted]
+  --symbols SYMBOLS     Comma-separated symbols. Defaults to KIS_WATCH_SYMBOLS
+  --years YEARS         History years to fetch. Default: 10.
+  --intervals INTERVALS

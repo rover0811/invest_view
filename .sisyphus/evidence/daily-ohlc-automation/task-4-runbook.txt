@@ -1,0 +1,19 @@
+=== task-4-runbook evidence ===
+
+--- guardrail note exists (grep) ---
+186:> **⚠️ 가드레일 — `silver.symbol_daily_ohlc` 절대 TRUNCATE 금지**
+188:> `silver.symbol_daily_ohlc`(일/주/월봉)는 **tick 스트림과 무관한 별도 테이블**이다. Flink나 tick_persistence가 재기동해도 자동 복구되지 않는다. KIS REST 백필(`backfill-daily-ohlc` CronJob)만이 이 테이블을 채운다.
+190:> 아래 TRUNCATE 목록에 `silver.symbol_daily_ohlc`가 없는 것은 의도적이다. 임의로 추가하지 말 것.
+198:> SELECT interval, count(*) FROM silver.symbol_daily_ohlc GROUP BY 1;
+
+--- TRUNCATE SQL (lines 202-206) ---
+```bash
+ssh hyunsoo-cluster1 'P=$(sudo k3s kubectl -n invest get secret invest-db-credentials -o jsonpath="{.data.POSTGRES_PASSWORD}" | base64 -d); \
+  sudo k3s kubectl -n postgres exec statefulset/postgresql -- env PGPASSWORD=$P psql -v ON_ERROR_STOP=1 -U invest -d invest_view \
+  -c "TRUNCATE TABLE gold.pattern_events, serving.symbol_snapshot, silver.symbol_5m_metrics, bronze.tick_history RESTART IDENTITY CASCADE;"'
+```
+
+--- TRUNCATE SQL unchanged verification ---
+4 tables only: gold.pattern_events, serving.symbol_snapshot, silver.symbol_5m_metrics, bronze.tick_history
+symbol_daily_ohlc occurrences in file: 4
+  -c "TRUNCATE TABLE gold.pattern_events, serving.symbol_snapshot, silver.symbol_5m_metrics, bronze.tick_history RESTART IDENTITY CASCADE;"'

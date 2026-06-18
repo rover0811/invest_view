@@ -1,0 +1,23 @@
+### Task 6 'no extra resources' assertions (2026-06-18T04:55:20Z)
+# The CronJob manifest must introduce NO new Secret/Service/Ingress/NodePort.
+# (The full kustomize build legitimately contains PRE-EXISTING Services from services.yaml;
+#  scope here is the new file only.)
+
+=== kinds declared in infrastructure/invest/services/backfill-ohlc-cronjob.yaml ===
+2:kind: CronJob
+
+=== ABSENCE assertions (each must print NOT FOUND) ===
+  [PASS] NOT FOUND: kind: Secret
+  [PASS] NOT FOUND: kind: Service
+  [PASS] NOT FOUND: kind: Ingress
+  [PASS] NOT FOUND: kind: ConfigMap
+  [PASS] NOT FOUND: NodePort
+
+=== git: which tracked/new files changed (only 2 expected) ===
+-- modified (tracked):
+    infrastructure/invest/services/kustomization.yaml
+-- new vs git (untracked), filtered to this task's file:
+    ?? infrastructure/invest/services/backfill-ohlc-cronjob.yaml
+
+=== confirm no OTHER manifest (deployments/services/configmaps/frontend) was touched ===
+  [PASS] no existing manifest changed (only kustomization.yaml + new cronjob file)
