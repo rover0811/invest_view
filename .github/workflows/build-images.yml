@@ -54,6 +54,9 @@ jobs:
           - image: event_pattern_persistence
             dockerfile: services/event_pattern_persistence/Dockerfile
             context: .
+          - image: backfill_ohlc
+            dockerfile: services/backfill_ohlc/Dockerfile
+            context: .
           - image: invest_view_frontend
             dockerfile: frontend/Dockerfile
             context: frontend
@@ -136,5 +139,5 @@ jobs:
           webhook-type: incoming-webhook
           payload: |
             {
-              "text": "Build Images ${{ needs.build-service-images.result == 'success' && needs.build-flink-image.result == 'success' && 'success' || 'failure' }}\nTag: ${{ needs.prepare-tag.outputs.tag }}\nCommit: ${{ github.event.workflow_run.head_sha }}\nServices: kis_ingestion, tick_persistence, alert_service, event_pattern_persistence, frontend, stream_detection\nWorkflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              "text": "Build Images ${{ needs.build-service-images.result == 'success' && needs.build-flink-image.result == 'success' && 'success' || 'failure' }}\nTag: ${{ needs.prepare-tag.outputs.tag }}\nCommit: ${{ github.event.workflow_run.head_sha }}\nServices: kis_ingestion, tick_persistence, alert_service, event_pattern_persistence, backfill_ohlc, frontend, stream_detection\nWorkflow: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
             }
