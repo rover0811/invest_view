@@ -73,7 +73,7 @@ def _parse_args() -> argparse.Namespace:
 def _load_root_env() -> None:
     env_path = ROOT_DIR / ".env"
     if not env_path.is_file():
-        raise FileNotFoundError(f"root .env not found: {env_path}")
+        return
     for raw_line in env_path.read_text(encoding="utf-8").splitlines():
         line = raw_line.strip()
         if not line or line.startswith("#") or "=" not in line:
