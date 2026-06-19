@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Mapping
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -84,31 +84,22 @@ class TickHandler:
                 if inserted_ticks:
                     self._observe_price_anomalies(inserted_ticks)
 
-                    for inserted_tick in _latest_ticks_by_symbol(inserted_ticks).values():
-                        await self._snapshot_repo.upsert_snapshot(session, inserted_tick.value)
+                    latest_ticks: list[Mapping[str, object]] = [
+                        t.value for t in _latest_ticks_by_symbol(inserted_ticks).values()
+                    ]
+                    await self._snapshot_repo.upsert_snapshots(session, latest_ticks)
 
                     changed_bars = self._add_inserted_ticks(inserted_ticks)
-                    for (symbol, bucket_start), bar in changed_bars.items():
-                        await self._metrics_repo.upsert_bar(
-                            session,
-                            symbol,
-                            bucket_start,
-                            bucket_start + BUCKET_SIZE,
-                            bar,
-                        )
-
                     finalized_bars = {
                         (finalized_symbol, finalized_start): finalized_bar
                         for finalized_symbol, finalized_start, finalized_bar in self._aggregator.pop_finalized_bars()
                     }
-                    for (finalized_symbol, finalized_start), finalized_bar in finalized_bars.items():
-                        await self._metrics_repo.upsert_bar(
-                            session,
-                            finalized_symbol,
-                            finalized_start,
-                            finalized_start + BUCKET_SIZE,
-                            finalized_bar,
-                        )
+                    merged = {**changed_bars, **finalized_bars}
+                    bar_rows: list[tuple[str, datetime, datetime | None, BarState]] = [
+                        (symbol, bucket_start, bucket_start + BUCKET_SIZE, bar)
+                        for (symbol, bucket_start), bar in merged.items()
+                    ]
+                    await self._metrics_repo.upsert_bars(session, bar_rows)
 
                     latest_bucket_by_symbol: dict[str, datetime] = {}
                     for symbol, bucket_start in changed_bars:

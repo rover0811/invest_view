@@ -154,7 +154,7 @@ async def test_handler_rolls_back_all_writes_when_snapshot_fails(db_session_fact
     async def fail_snapshot(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("snapshot boom")
 
-    monkeypatch.setattr(snapshot_repo, "upsert_snapshot", fail_snapshot)
+    monkeypatch.setattr(snapshot_repo, "upsert_snapshots", fail_snapshot)
     handler = _handler(db_session_factory, snapshot_repo=snapshot_repo)
 
     with pytest.raises(RuntimeError, match="snapshot boom"):
@@ -262,7 +262,7 @@ async def test_handle_batch_rolls_back_all_writes_when_snapshot_fails(db_session
     async def fail_snapshot(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("batch snapshot boom")
 
-    monkeypatch.setattr(snapshot_repo, "upsert_snapshot", fail_snapshot)
+    monkeypatch.setattr(snapshot_repo, "upsert_snapshots", fail_snapshot)
     handler = _handler(db_session_factory, snapshot_repo=snapshot_repo)
 
     with pytest.raises(RuntimeError, match="batch snapshot boom"):
@@ -278,12 +278,12 @@ async def test_handle_batch_rolls_back_all_writes_when_snapshot_fails(db_session
 
 async def test_handle_batch_upserts_one_latest_snapshot_per_symbol(db_session_factory):
     symbol = "011200"
-    calls: list[Mapping[str, object]] = []
+    calls: list[list[Mapping[str, object]]] = []
 
     class CountingSnapshotRepository(SnapshotRepository):
-        async def upsert_snapshot(self, session: AsyncSession, tick: Mapping[str, object]) -> None:
-            calls.append(tick)
-            await super().upsert_snapshot(session, tick)
+        async def upsert_snapshots(self, session: AsyncSession, ticks: list[Mapping[str, object]]) -> None:
+            calls.append(ticks)
+            await super().upsert_snapshots(session, ticks)
 
     handler = _handler(db_session_factory, snapshot_repo=CountingSnapshotRepository())
     await handler.handle_batch(
@@ -295,7 +295,8 @@ async def test_handle_batch_upserts_one_latest_snapshot_per_symbol(db_session_fa
     )
 
     _, snapshot = await _bar_and_snapshot(db_session_factory, symbol)
-    assert [tick["trade_time"] for tick in calls] == ["090200"]
+    assert len(calls) == 1
+    assert [tick["trade_time"] for tick in calls[0]] == ["090200"]
     assert snapshot.last_price == 70200
     assert snapshot.last_trade_time == "090200"
 
@@ -368,7 +369,7 @@ async def test_handle_batch_rolls_back_quarantine_with_failed_valid_batch(db_ses
     async def fail_snapshot(*_args: Any, **_kwargs: Any) -> None:
         raise RuntimeError("rollback boom")
 
-    monkeypatch.setattr(snapshot_repo, "upsert_snapshot", fail_snapshot)
+    monkeypatch.setattr(snapshot_repo, "upsert_snapshots", fail_snapshot)
     handler = _handler(db_session_factory, snapshot_repo=snapshot_repo)
     invalid = _tick_value(symbol=symbol, price=70000, trade_time="090000")
     del invalid["symbol"]
