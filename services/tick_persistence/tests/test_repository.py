@@ -1,6 +1,7 @@
 """Repository QA tests against a real testcontainers Postgres migrated via alembic upgrade head."""
 from __future__ import annotations
 
+from collections.abc import Mapping
 from datetime import datetime
 from decimal import Decimal
 from typing import Any
@@ -9,6 +10,7 @@ from zoneinfo import ZoneInfo
 import pytest
 import sqlalchemy as sa
 
+from tests._rtt_harness import count_db_roundtrips
 from tick_persistence.aggregation.ohlc import BarState
 from tick_persistence.db.models import Symbol5mMetrics, SymbolSnapshot, TickHistory
 from tick_persistence.kafka.consumer import TickMessage
@@ -199,6 +201,90 @@ async def test_silver_upsert_is_idempotent_and_updates(db_session_factory):
     assert loaded is None
 
 
+async def test_silver_bulk_upsert_uses_one_statement_for_forty_one_bars(db_session_factory):
+    repo = Metrics5mRepository()
+    bucket_start = datetime(2026, 6, 1, 9, 0, tzinfo=KST)
+    bucket_end = datetime(2026, 6, 1, 9, 5, tzinfo=KST)
+    bars: list[tuple[str, datetime, datetime | None, BarState]] = [
+        (f"{index:06}", bucket_start, bucket_end, _bar(close=70_000 + index, is_final=False, tick_count=index + 1))
+        for index in range(41)
+    ]
+    engine = db_session_factory.kw["bind"]
+
+    async with db_session_factory() as session:
+        with count_db_roundtrips(engine) as ctr:
+            await repo.upsert_bars(session, bars)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        count = await session.scalar(sa.select(sa.func.count()).select_from(Symbol5mMetrics))
+
+    assert ctr.statements == 1
+    assert ctr.inserts == 1
+    assert int(count or 0) == 41
+
+
+async def test_silver_bulk_upsert_is_idempotent_and_updates_existing_row(db_session_factory):
+    repo = Metrics5mRepository()
+    symbol = "005930"
+    bucket_start = datetime(2026, 6, 1, 9, 0, tzinfo=KST)
+    bucket_end = datetime(2026, 6, 1, 9, 5, tzinfo=KST)
+
+    async with db_session_factory() as session:
+        await repo.upsert_bars(session, [(symbol, bucket_start, bucket_end, _bar(close=70100, is_final=False, tick_count=4))])
+        await session.commit()
+    async with db_session_factory() as session:
+        await repo.upsert_bars(session, [(symbol, bucket_start, bucket_end, _bar(close=70300, is_final=True, tick_count=5))])
+        await session.commit()
+
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(sa.select(Symbol5mMetrics).where(Symbol5mMetrics.symbol == symbol))
+        ).scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].close == 70300
+    assert rows[0].is_final is True
+    assert rows[0].tick_count == 5
+
+
+async def test_silver_bulk_upsert_deduplicates_same_symbol_bucket_before_conflict(db_session_factory):
+    repo = Metrics5mRepository()
+    symbol = "005930"
+    bucket_start = datetime(2026, 6, 1, 9, 0, tzinfo=KST)
+    bucket_end = datetime(2026, 6, 1, 9, 5, tzinfo=KST)
+    bars: list[tuple[str, datetime, datetime | None, BarState]] = [
+        (symbol, bucket_start, bucket_end, _bar(close=70100, is_final=False, tick_count=4)),
+        (symbol, bucket_start, bucket_end, _bar(close=70200, is_final=False, tick_count=5)),
+        (symbol, bucket_start, bucket_end, _bar(close=70300, is_final=True, tick_count=6)),
+    ]
+
+    async with db_session_factory() as session:
+        await repo.upsert_bars(session, bars)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(sa.select(Symbol5mMetrics).where(Symbol5mMetrics.symbol == symbol))
+        ).scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].close == 70300
+    assert rows[0].is_final is True
+    assert rows[0].tick_count == 6
+
+
+async def test_silver_bulk_upsert_empty_list_does_not_execute(db_session_factory):
+    repo = Metrics5mRepository()
+    engine = db_session_factory.kw["bind"]
+
+    async with db_session_factory() as session:
+        with count_db_roundtrips(engine) as ctr:
+            await repo.upsert_bars(session, [])
+
+    assert ctr.statements == 0
+
+
 async def test_load_bar_state_reconstructs_active_bucket_from_bronze_order_keys(db_session_factory):
     tick_repo = TickHistoryRepository()
     repo = Metrics5mRepository()
@@ -256,3 +342,87 @@ async def test_snapshot_equal_event_ts_applies_last_write(db_session_factory):
     assert rows[0].last_price == 70500
     assert rows[0].last_trade_time == "090301"
     assert rows[0].cumulative_volume == 9_876_543
+
+
+async def test_snapshot_bulk_upsert_uses_one_statement_for_forty_one_symbols(db_session_factory):
+    repo = SnapshotRepository()
+    ticks: list[Mapping[str, object]] = [
+        _tick_value(symbol=f"{index:06}", price=70_000 + index)
+        | {
+            "trade_time": _hhmmss(9 * 3600 + index),
+            "cumulative_volume": 1_000_000 + index,
+        }
+        for index in range(41)
+    ]
+    engine = db_session_factory.kw["bind"]
+
+    async with db_session_factory() as session:
+        with count_db_roundtrips(engine) as ctr:
+            await repo.upsert_snapshots(session, ticks)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        count = await session.scalar(sa.select(sa.func.count()).select_from(SymbolSnapshot))
+
+    assert ctr.statements == 1
+    assert ctr.inserts == 1
+    assert int(count or 0) == 41
+
+
+async def test_snapshot_bulk_upsert_deduplicates_same_symbol_before_conflict(db_session_factory):
+    repo = SnapshotRepository()
+    symbol = "005930"
+    ticks: list[Mapping[str, object]] = [
+        _tick_value(symbol=symbol, price=70_000) | {"trade_time": "090301"},
+        _tick_value(symbol=symbol, price=70_500) | {"trade_time": "090302"},
+        _tick_value(symbol=symbol, price=70_700) | {"trade_time": "090302"},
+    ]
+
+    async with db_session_factory() as session:
+        await repo.upsert_snapshots(session, ticks)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        rows = (
+            await session.execute(sa.select(SymbolSnapshot).where(SymbolSnapshot.symbol == symbol))
+        ).scalars().all()
+
+    assert len(rows) == 1
+    assert rows[0].last_price == 70_700
+    assert rows[0].last_trade_time == "090302"
+
+
+async def test_snapshot_bulk_upsert_keeps_newer_existing_row(db_session_factory):
+    repo = SnapshotRepository()
+    symbol = "005930"
+    newer_tick = _tick_value(symbol=symbol, price=71_000) | {"trade_time": "090500"}
+    older_ticks: list[Mapping[str, object]] = [
+        _tick_value(symbol=symbol, price=70_000) | {"trade_time": "090301"}
+    ]
+
+    async with db_session_factory() as session:
+        await repo.upsert_snapshot(session, newer_tick)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        await repo.upsert_snapshots(session, older_ticks)
+        await session.commit()
+
+    async with db_session_factory() as session:
+        row = (
+            await session.execute(sa.select(SymbolSnapshot).where(SymbolSnapshot.symbol == symbol))
+        ).scalar_one()
+
+    assert row.last_price == 71_000
+    assert row.last_trade_time == "090500"
+
+
+async def test_snapshot_bulk_upsert_empty_list_does_not_execute(db_session_factory):
+    repo = SnapshotRepository()
+    engine = db_session_factory.kw["bind"]
+
+    async with db_session_factory() as session:
+        with count_db_roundtrips(engine) as ctr:
+            await repo.upsert_snapshots(session, [])
+
+    assert ctr.statements == 0

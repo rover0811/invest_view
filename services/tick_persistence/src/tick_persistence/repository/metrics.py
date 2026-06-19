@@ -20,20 +20,25 @@ class Metrics5mRepository:
         bucket_end: datetime | None,
         bar: BarState,
     ) -> None:
-        stmt = pg_insert(Symbol5mMetrics).values(
-            symbol=symbol,
-            bucket_start=bucket_start,
-            bucket_end=bucket_end,
-            open=bar.open,
-            high=bar.high,
-            low=bar.low,
-            close=bar.close,
-            volume=bar.volume,
-            vwap=bar.vwap_last,
-            tick_count=bar.tick_count,
-            is_final=bar.is_final,
-            updated_at=func.now(),
-        )
+        await self.upsert_bars(session, [(symbol, bucket_start, bucket_end, bar)])
+
+    async def upsert_bars(
+        self,
+        session: AsyncSession,
+        bars: list[tuple[str, datetime, datetime | None, BarState]],
+    ) -> None:
+        if not bars:
+            return
+
+        deduped: dict[tuple[str, datetime], tuple[str, datetime, datetime | None, BarState]] = {}
+        for symbol, bucket_start, bucket_end, bar in bars:
+            deduped[(symbol, bucket_start)] = (symbol, bucket_start, bucket_end, bar)
+
+        values = [
+            _bar_values_for(symbol, bucket_start, bucket_end, bar)
+            for symbol, bucket_start, bucket_end, bar in deduped.values()
+        ]
+        stmt = pg_insert(Symbol5mMetrics).values(values)
         stmt = stmt.on_conflict_do_update(
             index_elements=["symbol", "bucket_start"],
             set_={
@@ -48,7 +53,7 @@ class Metrics5mRepository:
                 "updated_at": func.now(),
             },
         )
-        await session.execute(stmt)
+        _ = await session.execute(stmt)
 
     async def load_bar_state(
         self, session: AsyncSession, symbol: str, bucket_start: datetime
@@ -78,3 +83,25 @@ class Metrics5mRepository:
             else:
                 bar.add_tick(price=price, volume=volume, vwap=vwap, tick_key=tick_key)
         return bar
+
+
+def _bar_values_for(
+    symbol: str,
+    bucket_start: datetime,
+    bucket_end: datetime | None,
+    bar: BarState,
+) -> dict[str, object]:
+    return {
+        "symbol": symbol,
+        "bucket_start": bucket_start,
+        "bucket_end": bucket_end,
+        "open": bar.open,
+        "high": bar.high,
+        "low": bar.low,
+        "close": bar.close,
+        "volume": bar.volume,
+        "vwap": bar.vwap_last,
+        "tick_count": bar.tick_count,
+        "is_final": bar.is_final,
+        "updated_at": func.now(),
+    }
