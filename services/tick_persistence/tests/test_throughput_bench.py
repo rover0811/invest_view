@@ -49,6 +49,8 @@ from tick_persistence.repository.metrics import Metrics5mRepository
 from tick_persistence.repository.snapshot import SnapshotRepository
 from tick_persistence.repository.tick_history import TickHistoryRepository
 
+from _rtt_harness import count_db_roundtrips  # pyright: ignore[reportImplicitRelativeImport]
+
 pytestmark = pytest.mark.qa
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -673,6 +675,57 @@ async def test_catchup_memory_is_oom_free_and_evicts_finalized_buckets(migrated_
         f"(unbounded would reach symbols x buckets = {len(symbols) * _MEM_BUCKETS})"
     )
     assert hydrated_keys <= len(symbols)
+
+
+async def test_batch_rtt_is_at_most_three_db_executes_when_warm(migrated_url: str) -> None:
+    """RTT gate for the #41 bulk-upsert fix, via Task 1's ``count_db_roundtrips`` harness.
+
+    before: ~83 sequential RTT per 41-symbol batch (1 bronze INSERT + 41 per-symbol snapshot
+            upserts + 41 per-symbol silver upserts — the pre-fix per-item loops).
+    after:  <=3 batched (bronze INSERT 1 + snapshot bulk upsert 1 + silver bulk upsert 1).
+
+    The first ``handle_batch`` seeds the aggregator for all 41 (symbol, bucket) pairs (41 distinct
+    symbols share one 5-minute bucket because ``make_ticks`` keeps ``i // len(symbols) == 0`` at
+    ``09:00:00``). The measured second batch reuses those symbols/bucket with disjoint
+    ``cumulative_base``/``offset_base`` lineage (new event_ids so bronze never short-circuits), so
+    ``_hydrate_once`` short-circuits on ``has_bar()`` with zero SELECTs — leaving exactly
+    bronze+snapshot+silver = 3 executes inside one batched transaction (driver-level BEGIN/COMMIT
+    are not counted as statements).
+    """
+    symbols = tuple(f"{950_000 + index:06d}" for index in range(41))
+    engine = create_engine(migrated_url)
+    session_factory = create_session_factory(engine)
+    try:
+        handler = _build_handler(session_factory)
+        warm = make_ticks(41, symbols, cumulative_base=1_000_000, offset_base=0)
+        measured = make_ticks(41, symbols, cumulative_base=1_000_100, offset_base=100)
+
+        await handler.handle_batch(warm)
+
+        with count_db_roundtrips(engine) as ctr:
+            await handler.handle_batch(measured)
+
+        async with session_factory() as session:
+            bronze = int(await session.scalar(sa.select(sa.func.count()).select_from(TickHistory)) or 0)
+            snapshots = int(await session.scalar(sa.select(sa.func.count()).select_from(SymbolSnapshot)) or 0)
+    finally:
+        await engine.dispose()
+
+    print(
+        f"\nRTT(warm, 41 symbols, 1 batch): statements={ctr.statements} inserts={ctr.inserts} "
+        f"updates={ctr.updates} selects={ctr.selects} begins={ctr.begins} commits={ctr.commits} "
+        f"| before ~83 sequential RTT -> after <=3 batched (bronze 1 + snapshot 1 + silver 1)"
+    )
+
+    assert bronze == 82, f"expected warm(41)+measured(41) distinct bronze rows, got {bronze}"
+    assert snapshots == 41, f"expected one snapshot row per symbol, got {snapshots}"
+    assert ctr.statements <= 3
+    assert ctr.statements == 3
+    assert ctr.inserts == 3
+    assert ctr.updates == 0
+    assert ctr.selects == 0
+    assert ctr.begins == 1
+    assert ctr.commits == 1
 
 
 if __name__ == "__main__":  # pragma: no cover - convenience guard
