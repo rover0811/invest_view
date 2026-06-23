@@ -1,6 +1,6 @@
 """add tick_history symbol event_ts hydration index
 
-Revision ID: 0008_tick_history_symbol_event_ts_index
+Revision ID: 0008_tick_symbol_event_ts_idx
 Revises: 0007_tick_quarantine
 Create Date: 2026-06-23
 
@@ -12,7 +12,7 @@ hours.
 
 from alembic import op
 
-revision = "0008_tick_history_symbol_event_ts_index"
+revision = "0008_tick_symbol_event_ts_idx"
 down_revision = "0007_tick_quarantine"
 branch_labels = None
 depends_on = None
