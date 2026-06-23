@@ -17,6 +17,7 @@ class _MigrationState(TypedDict):
     tables: set[tuple[str, str]]
     silver_columns: set[str]
     constraints: set[str]
+    indexes: set[str]
 
 
 def _asyncpg_url(container: PostgresContainer) -> str:
@@ -105,12 +106,21 @@ async def _fetch_migration_state(url: str) -> _MigrationState:
                 )
             )
         )
+        indexes = set(
+            await conn.scalars(
+                text(
+                    """SELECT indexname FROM pg_indexes
+                    WHERE schemaname IN ('bronze','silver','serving')"""
+                )
+            )
+        )
     await engine.dispose()
     return {
         "schemas": schemas,
         "tables": tables,
         "silver_columns": silver_columns,
         "constraints": constraints,
+        "indexes": indexes,
     }
 
 
@@ -187,6 +197,7 @@ def test_alembic_upgrade_and_downgrade_create_expected_objects(monkeypatch: pyte
         assert "tick_history_dedupe_key_uq" in state["constraints"]
         assert "symbol_5m_metrics_symbol_bucket_uq" in state["constraints"]
         assert "symbol_daily_ohlc_symbol_interval_date_uq" in state["constraints"]
+        assert "ix_tick_history_symbol_event_ts" in state["indexes"]
 
         asyncio.run(_check_intraday_view(url))
 

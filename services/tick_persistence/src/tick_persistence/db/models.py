@@ -35,6 +35,12 @@ class TickHistory(Base):
         UniqueConstraint("tick_dedupe_key", name="tick_history_dedupe_key_uq"),
         UniqueConstraint("event_id", name="tick_history_event_id_uq"),
         Index("ix_tick_history_symbol_persisted", "symbol", text("persisted_at DESC")),
+        Index(
+            "ix_tick_history_symbol_event_ts",
+            "symbol",
+            "event_ts",
+            postgresql_where=text("event_ts IS NOT NULL"),
+        ),
         {"schema": SCHEMA_BRONZE},
     )
 

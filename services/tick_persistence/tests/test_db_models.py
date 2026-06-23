@@ -34,6 +34,13 @@ def _unique_column_sets(model):
     }
 
 
+def _index_column_sets(model):
+    return {
+        index.name: tuple(getattr(expr, "name", str(expr)) for expr in index.expressions)
+        for index in model.__table__.indexes
+    }
+
+
 def test_kis_field_set_is_49():
     assert len(KIS_FIELDS) == 49
 
@@ -100,6 +107,11 @@ def test_tick_history_dedupe_unique_and_nullability():
     assert "tick_dedupe_key" in not_null
     assert TickHistory.__table__.columns["price"].nullable is True
     assert TickHistory.__table__.columns["vwap"].nullable is True
+
+
+def test_tick_history_has_symbol_event_ts_hydration_index():
+    indexes = _index_column_sets(TickHistory)
+    assert indexes["ix_tick_history_symbol_event_ts"] == ("symbol", "event_ts")
 
 
 def test_symbol_5m_metrics_is_final_and_unique():
