@@ -8,17 +8,18 @@
 ## TL;DR
 
 > **Quick Summary**: 바이브코딩된 MarketAnalystAgent의 암묵 정책을 자연어 계약으로 확정하고,
-> arXiv:2605.18747 "Code as Agent Harness" 프레임에 따라 **결정론적 센서 기반 평가 하니스**를 구축해
-> recall/precision/grounding 등 측정 가능한 베이스라인 스코어(Result)를 산출한다. 풀 7-컴포넌트 하니스.
+> arXiv:2605.18747 "Code as Agent Harness"의 **harness 렌즈를 prose(자연어) 생성 agent에 적용**해
+> **결정론적 센서 기반 평가 하니스**를 구축, 측정 가능한 **결정론적 사실 충족도(factual adequacy) baseline**(Result)을 산출한다.
+> ⚠️ **범위 한정**: 이 baseline은 "숫자/사실/tool 사용의 정확성"을 측정한다. 숫자 없는 서사적 환각·인과 정확성·유용성·기간정합 등 주관/질적 차원은 측정하지 않으며, 그 한계를 명시한다. 논문은 본래 *코드 생성·실행 검증* 대상이므로 여기선 용어/구조를 차용하되 "직접 구현"이라 주장하지 않는다.
 >
 > **Deliverables**:
-> - `docs/design/17-agent-policy-contract.md` — 정책 자연어 계약 + **"좋은 답변" 정의** (Situation/Task)
+> - `docs/design/17-agent-policy-contract.md` — 정책 자연어 계약 + **factual adequacy 정의 + 측정 한계 명시** (Situation/Task)
 > - `services/alert_service/src/alert_service/agent/eval/` — 평가 하니스 (sensors, runner, dataset, labels)
 > - tool-call trace 캡처 인프라 (측정 전제조건)
 > - 수치 추출기 + tool-output 레지스트리 (grounding/fact 측정)
 > - **dataset 라벨링 파이프라인**: 프롬프트셋 → **실 agent 실행/출력 수집** → LLM 초안 → 사용자 확정 게이트 → 검증기 (golden answer + 구조화 fact set)
 > - 확정 UC(A~E,G) × 실데이터 grounded eval dataset (20~30, confirmed) + FORBIDDEN_PROMPTS(15)
-> - **핵심(Wave1~3)**: deterministic sensors / 3D oracle-adequacy / baseline runner
+> - **핵심(Wave1~3)**: deterministic sensors / canonical reference retrieval(순환참조 차단) / failure taxonomy / evidence bundle / baseline runner
 > - **선택(Wave4, baseline 후 개선용)**: telemetry / semantic gate / regression CI gate / HITL audit log
 > - **베이스라인 스코어 리포트** (= 핵심 종점/Result): tool-selection recall, **fact recall, answer precision**, grounding precision, guardrail compliance, freshness disclosure rate, coverage-note precision, oracle-adequacy 3D
 >
@@ -42,7 +43,7 @@
 - STAR 의미: Situation(바이브코딩 현 상태) / Task(정책 자연어 확정) / Action(하니스+지표 구현) / **Result(측정 가능한 스코어)**
 - 범위: 풀 하니스 재설계 (논문 7개 개선 액션 전부)
 - 측정 방식: 결정론적 센서 우선 (LLM-as-judge 없이 코드 기반)
-- **"좋은 답변" 정의**: golden answer + 구조화 fact rubric `{kind,value/range,source_tool}`. 라벨링은 LLM 초안→사용자 확정(HUMAN LABELING GATE).
+- **"factual adequacy" 정의**: golden answer + 구조화 fact rubric `{kind,value/range,source_tool}` (사실 충족도, 답변 품질 전반 아님). 라벨링은 canonical fact + LLM 초안→사용자 확정(HUMAN LABELING GATE).
 - **평가 대상 UC (실동작 기준 확정)**: UC-A 실시간시세 / UC-B 재무제표 / UC-C 투자지표 / UC-D 리포트·목표주가 / UC-E 차트 / UC-G 가드레일(횡단). 미구현(scan/strategy/alert)은 gap 문서화·평가 제외.
 - eval dataset: 확정 UC × 실 DB grounded 20~30 + 기존 FORBIDDEN_PROMPTS 15
 
@@ -61,7 +62,7 @@
 |---|---|---|
 | §3.4.4 | Deterministic Sensors | Tool-selection Recall, Tool-sequence Correctness |
 | §3.3.3/§3.5.1 | Verification-Driven Tool Use + Telemetry | Telemetry Coverage |
-| §5.2.1 | Oracle Adequacy ("beyond final task success") | 3D 분리 스코어 (모델/툴/하니스) |
+| §5.2.1 | Oracle Adequacy ("beyond final task success") | 실패 분류 taxonomy (모델/툴데이터/하니스-오라클커버리지/정책) + claim coverage |
 | §5.2.2 | Semantic Verification | Grounding Precision, Evidence Bundle Completeness |
 | §5.2.3 | Regression-Free Improvement | Regression CI gate |
 | §5.2.5 | HITL Safety as State | Guardrail Compliance + audit log |
@@ -76,13 +77,21 @@
 - 재사용 패턴: `chart_sink` side-channel queue가 이미 존재 → tool-trace도 동일 패턴으로 캡처.
 - Gemini 비결정성 → eval flakiness: temperature=0 고정 + 다회 실행 집계 + 결정론 센서는 trace 위에서만 동작.
 
+### Oracle 리뷰 반영 (논문 초록 관점 비판, 확정)
+- **R1 순환참조 (최우선 결함)**: fact.value를 agent 자신의 tool 출력에서만 채우면 "현재 동작=정답"이 되어 grounding/recall이 무의미하게 높아짐. → **UC별 독립 canonical retrieval path**(agent와 무관한 직접 repository 쿼리)에서 기대 fact/tool 도출(신규 Task 4e). agent recording은 초안 보조로만.
+- **R2 과대표현 톤다운**: "풀 7 적용"/"좋은 답변 정의" 표현 금지. 이건 **prose 생성 agent에 harness 렌즈를 적용한 결정론적 사실 충족도(factual adequacy) baseline**이다. 숫자 없는 서사적 환각/인과/유용성/기간정합은 측정 못 함을 명시.
+- **R3 evidence bundle must-have 승격**: Task 18을 Wave 3 핵심으로(경량). §5.2.2 정직 적용.
+- **R4 3D→failure taxonomy**: Task 14를 가중 3D 점수 대신 진단용 실패 분류(모델/툴데이터/하니스-오라클커버리지/정책)로. composite는 보조 필드.
+- **R5 pilot 명시**: dataset 20~30 = pilot baseline. per-UC는 일화적(N 표기). claim coverage 지표 추가. freshness 정확성 비교. Task 7c 계산 수정. temperature=0은 채점/리플레이 결정론이지 live agent 아님.
+
 ---
 
 ## Work Objectives
 
 ### Core Objective
 바이브코딩된 agent의 정책을 검증 가능한 계약으로 확정하고, 결정론적 센서 기반 평가 하니스로
-측정 가능한 베이스라인 성과지표(Result)를 산출한다.
+측정 가능한 **결정론적 사실 충족도(factual adequacy) baseline**(Result)을 산출한다.
+이 baseline은 "올바른 tool로 올바른 사실을 환각 없이 냈나"를 측정하는 것이지 "답변이 좋은가" 전반을 판정하지 않는다(한계 명시).
 
 ### Concrete Deliverables
 - 정책 계약 문서 (자연어 → 명시적 contract)
@@ -95,19 +104,22 @@
 ### Definition of Done
 - [ ] 20~30 dataset이 **사용자 검토·확정(confirmed)** 상태 — 라벨 검증기 통과
 - [ ] `uv run pytest -m eval` 로 전체 평가 스위트 실행 → 베이스라인 스코어 JSON 생성 (확정 라벨 기반)
-- [ ] 정책 계약 문서가 현 프롬프트/가드레일과 1:1 매핑 + "좋은 답변" 정의 포함
+- [ ] 정책 계약 문서가 현 프롬프트/가드레일과 1:1 매핑 + factual adequacy 정의 + 측정 한계 명시 포함
 - [ ] 모든 지표가 결정론적으로 재계산 가능 (동일 trace+라벨 → 동일 스코어)
 - [ ] 미확정 라벨 존재 시 runner가 명시적 실패
 
 ### Must Have (= Wave 1~3, 핵심 종점 = baseline 산출)
-- 정책 자연어 계약 문서 + **"좋은 답변" 정의 (golden answer + 구조화 fact rubric)**
+- 정책 자연어 계약 문서 + **factual adequacy 정의 (golden answer + 구조화 fact rubric) + 측정 한계 명시**
 - tool-call trace 캡처 (측정 전제)
-- **dataset 라벨링 파이프라인** (프롬프트셋 → 실행/수집 → LLM 초안 → 사용자 확정 게이트 → 검증기)
-- 결정론적 센서: **tool-selection recall / fact recall / answer precision** / grounding / guardrail / freshness / coverage / SQL contract
-- baseline 스코어 산출 + 리포트 (확정 라벨 기반) ← **이 plan의 핵심 종점/Result**
+- **UC별 독립 canonical reference retrieval** (순환참조 차단 — Oracle R1)
+- **dataset 라벨링 파이프라인** (프롬프트셋 → 실행/수집 → canonical fact → LLM 초안 → 사용자 확정 게이트 → 검증기)
+- 결정론적 센서: **tool-selection recall / fact recall / answer precision** / grounding / guardrail / freshness(정확성) / coverage / SQL contract
+- **claim coverage** (오라클이 검증한 claim 비율 + unverified narrative 카운트 — Oracle R5)
+- **Evidence Bundle (경량)** — tools_run/checks/unchecked claims/assumptions/risks (Oracle R3, §5.2.2)
+- baseline 스코어 리포트 (확정 라벨 기반, **pilot 명시**) ← **이 plan의 핵심 종점/Result**
 
 ### 선택 (Wave 4 — baseline 본 뒤 개선 반복용, Must Have 아님)
-- Telemetry(+Langfuse) / Semantic Gate / Regression CI gate / HITL Audit Log
+- Telemetry(+Langfuse) / Regression CI gate / HITL Audit Log
 - baseline을 보고 "어디를 깎을지" 정한 뒤 의미가 생긴다. baseline 없이 선구현 불필요.
 
 ### Must NOT Have (Guardrails)
@@ -152,7 +164,7 @@
 
 ### Parallel Execution Waves
 
-> **핵심 원칙**: "좋은 답변"은 사용자가 검토·확정한 **golden answer + 구조화 fact set**으로 정의된다.
+> **핵심 원칙**: 평가 기준("factual adequacy")은 사용자가 검토·확정한 **golden answer + 구조화 fact set**으로 정의된다. (이는 "사실 충족도"이지 답변 품질 전반이 아니다 — 한계는 Task 1에 명시)
 > 측정 메커니즘(센서)은 이 ground truth에 대해서만 의미를 가지므로, **HUMAN LABELING GATE**(사용자 라벨 확정)가
 > Wave 2 이후 모든 측정의 차단점이다. 라벨 미확정 시 runner는 명시적으로 실패한다.
 
@@ -189,13 +201,13 @@ Wave 2 (결정론적 센서 — 확정 라벨에 의존):
 └── Task 13: Formal SQL Contract 센서 [quick]
 
 Wave 3 (집계 + Result 산출 — 핵심 Deliverable):
-├── Task 14: 3D Oracle-Adequacy 집계기 (모델/툴/하니스 분리) [ultrabrain]
+├── Task 14: 실패 분류 taxonomy 집계기 (모델/툴데이터/하니스-오라클커버리지/정책) [ultrabrain]
 ├── Task 15: eval runner (라벨 게이트 검사 → 실행 → trace → 센서 → 스코어) [deep]
-└── Task 16: 베이스라인 스코어 리포트 (Fact Recall 등 포함) [unspecified-high]
+├── Task 16: 베이스라인 스코어 리포트 (pilot 명시 + claim coverage 포함) [unspecified-high]
+└── Task 18: Evidence Bundle (경량 — tools_run/checks/unchecked/assumptions/risks) [deep]  ★must-have 승격
 
 Wave 4 (★ 선택 — baseline 본 뒤 개선 반복용. Must Have 아님):
 ├── Task 17: Deep Telemetry 번들 (+ Langfuse OTEL 옵션) [unspecified-high]
-├── Task 18: Semantic Verification Gate + Evidence Bundle [deep]
 ├── Task 19: Regression CI gate [unspecified-high]
 └── Task 20: HITL Audit Log (human = 운영자) [deep]
 
@@ -217,28 +229,29 @@ Max Concurrent: 7 (Wave 1)
 - **3**: deps - | blocks 7b,7c,9,18 (수치 추출 + kind enum)
 - **4**: deps - | blocks 4c,7,7b,7c,15,16 (스키마 = 정답 구조)
 - **4a**: deps - | blocks 4b (프롬프트셋)
-- **4b** (실행→trace/출력 수집): deps 2,4a | blocks 4c (실 출력 = 라벨 근거)
-- **4c** (LLM 라벨 초안): deps 4,4b | blocks 4d, GATE
+- **4b** (실행→trace/출력 수집): deps 2,4a | blocks 4c (실 출력 = 라벨 보조 근거)
+- **4e** (★canonical reference retrieval, 순환참조 차단): deps 4 | blocks 4c(우선출처), 7
+- **4c** (LLM 라벨 초안): deps 4,4b,4e | blocks 4d, GATE (canonical 우선, recording 보조)
 - **4d** (라벨 검증기): deps 4,4c | blocks GATE, 15
 - **5**: deps - | blocks 10,15
 - **6**: deps - | blocks 7-16 (모듈 골격)
 - **★ GATE (HUMAN LABELING, 운영자/개발자)**: deps 4c,4d | blocks 7,7b,7c (확정 라벨 없이 측정 무효)
-- **7,7b,7c,8-13**: deps (각 References) + GATE | blocks 14,15
-- **14**: deps 7,7b,7c,8-13 | blocks 16
+- **7,7b,7c,8-13**: deps (각 References) + 4e + GATE | blocks 14,15,18
+- **14** (failure taxonomy): deps 7,7b,7c,8-13 | blocks 16
 - **15**: deps 2,4,4d,6,7-13 + GATE | blocks 16,19
-- **16** (= 핵심 종점/Result): deps 14,15 | blocks 19
+- **18** (evidence bundle, ★must-have): deps 3,9,7b | blocks 16
+- **16** (= 핵심 종점/Result): deps 14,15,18 | blocks 19
 - **17** (선택): deps 2 | blocks -
-- **18** (선택): deps 1,3,9 | blocks -
 - **19** (선택): deps 15,16 | blocks -
 - **20** (선택): deps 1,10 | blocks -
 
 ### Agent Dispatch Summary
 - **Wave 1**: 7 — T1→writing, T2→deep, T3→deep, T4→unspecified-high, T4a→unspecified-high, T5→quick, T6→quick
-- **Wave 1.5**: 3 — T4b→deep(실행/수집), T4c→deep(LLM 초안), T4d→unspecified-high(검증기)
-- **★ HUMAN LABELING GATE**: 운영자/개발자가 실 출력 근거로 초안 검토·확정 → T4d validate 통과
+- **Wave 1.5**: 4 — T4b→deep(실행/수집), T4e→ultrabrain(canonical), T4c→deep(LLM 초안), T4d→unspecified-high(검증기)
+- **★ HUMAN LABELING GATE**: 운영자/개발자가 canonical+실출력 근거로 초안 검토·확정 → T4d validate 통과
 - **Wave 2**: 10 — T7→deep, T7b→ultrabrain, T7c→ultrabrain, T8→unspecified-high, T9→ultrabrain, T10→unspecified-high, T11→quick, T12→quick, T13→quick
-- **Wave 3 (핵심 종점)**: 3 — T14→ultrabrain, T15→deep, T16→unspecified-high
-- **Wave 4 (선택)**: 4 — T17→unspecified-high, T18→deep, T19→unspecified-high, T20→deep
+- **Wave 3 (핵심 종점)**: 4 — T14→ultrabrain(taxonomy), T15→deep, T18→deep(evidence bundle), T16→unspecified-high
+- **Wave 4 (선택)**: 3 — T17→unspecified-high, T19→unspecified-high, T20→deep
 - **FINAL**: 4 — F1→oracle, F2→unspecified-high, F3→unspecified-high, F4→deep
 
 ---
@@ -264,7 +277,8 @@ Max Concurrent: 7 (Wave 1)
     - **이 UC↔tool 표는 라벨링 가이드(참고)일 뿐 정답 출처가 아니다.** 실제 ground truth는 사용자가 확정한 fact set의 source_tool에서 나온다.
   - **"proposal에 있으나 미구현" gap 섹션** 추가: 실시간 스캔(scan_live_symbols), 전략 적합도(score_strategy_fit), 알림 히스토리(list_recent_alerts) — agent tool 미연결. 평가 제외, 향후 로드맵.
   - db_guard의 8-table allowlist + SELECT-only를 "불변식 계약(Invariant Contract)"으로 명문화.
-  - "좋은 답변"의 정의 섹션 추가: golden answer 대조 + fact-coverage rubric. fact 입자 = {kind, value/range, source_tool}.
+  - **"factual adequacy(사실 충족도)"의 정의 섹션** 추가: golden answer 대조 + fact-coverage rubric. fact 입자 = {kind, value/range, source_tool}.
+  - **측정 한계 명시 섹션** 추가 (Oracle R2): 이 평가가 측정하지 *못하는* 것 — 숫자 없는 서사적 환각, 인과 정확성, 유용성/관련성, 기간 정합, cherry-picking, 질적 리포트 해석. "factual adequacy ≠ overall answer quality"를 못 박는다.
 
   **Must NOT do**:
   - 정책 내용을 새로 발명하지 말 것 — 현 프롬프트/가드레일을 충실히 옮기고 구조화만 한다.
@@ -552,17 +566,19 @@ Max Concurrent: 7 (Wave 1)
 - [ ] 4c. LLM 라벨 초안 생성 (수집 출력 기반)
 
   **What to do**:
-  - Task 4b recordings(실 trace+tool 출력)를 **별도 LLM**(eval 대상 agent와 분리 — 예: Gemini Flash 등 경량 모델)에 입력해 각 프롬프트의 `golden_answer` 초안 + `required_facts` 초안 생성.
-  - fact의 value/source_tool은 **실제 tool 출력에서 채움**(환각 최소화). kind는 Task 3 kind enum(tool 출력 필드 자동추출)에서 선택.
+  - **우선 출처 = Task 4e canonical fact** (agent와 독립). 각 프롬프트의 `required_facts`는 canonical retrieval 결과를 1차로 채운다.
+  - Task 4b recordings(실 trace+tool 출력)는 **보조**(golden_answer 서술 표현, 누락 fact 후보)로만 사용 — 순환참조 방지.
+  - **별도 LLM**(eval 대상 agent와 분리 — 예: Gemini Flash 등 경량 모델)으로 golden_answer 초안 생성.
+  - fact.value는 canonical에서, kind는 Task 3 kind enum에서 선택. source_tool은 canonical 정의 기준.
   - 결과 `status=draft` + 각 fact 옆 `[REVIEW]` 마커. 사용자 검토 입력.
 
   **Must NOT do**: eval 대상 agent로 정답 생성 금지(자기참조 편향). draft를 confirmed로 표기 금지.
 
   **Recommended Agent Profile**: `deep`. Skills: []
-  **Parallelization**: YES — Wave 1.5. Blocks: 4d, GATE. Blocked By: 4,4b.
+  **Parallelization**: YES — Wave 1.5. Blocks: 4d, GATE. Blocked By: 4,4b,4e.
 
   **References**:
-  - Task 4b recordings, Task 3 kind enum, Task 4 Fact 모델
+  - Task 4e canonical fact (우선 출처), Task 4b recordings(보조), Task 3 kind enum, Task 4 Fact 모델
   - `services/alert_service/src/alert_service/agent/model.py` — 별도 LLM 호출 패턴
   **WHY**: 라벨링 공수 절감. 실 출력 근거라 초안 품질 ↑. 사용자는 검토·수정만.
 
@@ -624,6 +640,49 @@ Max Concurrent: 7 (Wave 1)
     Evidence: .sisyphus/evidence/task-4d-db-consistency.txt
   ```
   **Commit**: YES — `feat(agent-eval): label review workflow + validator (partial-confirm)`
+
+- [ ] 4e. UC별 독립 canonical reference retrieval (★ 순환참조 차단 — Oracle R1)
+
+  **What to do**:
+  - **핵심 결함 해결**: 기대 fact/tool을 agent의 trace에서 도출하면 "현재 동작=정답"이 되어 측정이 무의미해진다.
+    → 각 UC별로 **agent와 무관한 독립 retrieval 함수**를 구현해 ground-truth fact를 직접 산출.
+  - 예: UC-C(투자지표) → repository를 직접 호출(또는 정의된 공식으로 PER/PBR 계산)해 canonical {kind,value} 산출.
+    UC-B(재무제표) → reference.financial_metrics 직접 쿼리. UC-A(시세) → serving.symbol_snapshot 직접.
+  - `expected_tools`도 canonical 정의에서 도출(이 UC를 답하려면 어떤 tool이 *필요한가*를 정책 기준으로 정의 — agent가 실제로 뭘 불렀는지와 독립).
+  - Task 4c LLM 초안은 이 canonical fact를 **우선 출처**로, agent recording은 보조(서술/표현 참고)로만 사용.
+  - 모든 쿼리는 db_guard 통과(SELECT-only + allowlist).
+
+  **Must NOT do**:
+  - 기대 fact를 agent trace에서만 가져오는 경로 금지(순환). canonical path가 1차 출처.
+  - generic SQL/write 금지. db_guard 우회 금지.
+
+  **Recommended Agent Profile**: `ultrabrain` — UC별 정답 retrieval 설계가 평가 타당성의 핵심. Skills: []
+  **Parallelization**: YES — Wave 1.5. Blocks: 4c(우선출처), 7. Blocked By: 4.
+
+  **References**:
+  - `services/alert_service/src/alert_service/agent/repository.py` — 직접 쿼리(guard 통과) 패턴
+  - `services/alert_service/src/alert_service/agent/tools/indicators.py` — PER/PBR 계산 공식(canonical 재현용)
+  - `services/alert_service/tests/test_repository_agent.py` — 삼성 005930 실데이터(canonical 검증 앵커)
+  - arXiv:2605.18747 §5.2.1 Oracle Adequacy — 평가자 독립성
+  **WHY**: **Oracle 리뷰 최우선 결함(순환참조) 차단.** 정답이 agent 동작과 독립이어야 "올바른 tool/사실을 냈나"를 진짜로 측정할 수 있다.
+
+  **Acceptance Criteria**:
+  - [ ] UC-A~E 각각 canonical retrieval 함수 존재, agent trace 미참조
+  - [ ] expected_tools가 canonical 정의(정책 기준)에서 도출
+  - [ ] canonical fact value가 prod DB 실데이터와 일치(삼성 005930 앵커 검증)
+
+  **QA Scenarios**:
+  ```
+  Scenario: canonical fact가 agent trace 없이 산출
+    Tool: Bash (uv run pytest -m qa)
+    Steps:
+      1. UC-C canonical retrieval 호출 (agent 미실행)
+      2. {per, pbr, roe} 값이 prod DB 기반으로 반환됨
+      3. agent trace 입력 없이 동작 확인
+    Expected Result: canonical fact 산출, trace 의존 0
+    Evidence: .sisyphus/evidence/task-4e-canonical.txt
+  ```
+  **Commit**: YES — `feat(agent-eval): UC canonical reference retrieval (break circularity)`
 
 - [ ] 5. FORBIDDEN_PROMPTS 통합 + 거절 라벨 슬라이스
 
@@ -715,11 +774,11 @@ Max Concurrent: 7 (Wave 1)
 - [ ] 7. Tool-selection Recall 센서 (기대 tool = fact.source_tool)
 
   **What to do**:
-  - 입력: trace(Task 2) + dataset_item.expected_tools (= **confirmed fact set의 source_tool 집합**, Task 4 도출).
+  - 입력: trace(Task 2) + dataset_item.expected_tools (= **canonical 정의(Task 4e) 기준 기대 tool**, agent 동작과 독립).
   - 출력: recall = |called ∩ expected| / |expected|. per-item + 집계 평균.
   - **확정 라벨만 대상** (status=confirmed). draft 항목은 측정 제외 (게이트).
 
-  **Must NOT do**: LLM-judge 금지 — trace 파싱만. UC표를 정답으로 쓰지 말 것 (라벨이 정답).
+  **Must NOT do**: LLM-judge 금지 — trace 파싱만. 기대 tool을 agent trace에서 도출 금지(순환). canonical(4e)이 출처.
 
   **Recommended Agent Profile**: `deep`. Skills: []
   **Parallelization**: YES Wave 2. Blocks: 14,15. Blocked By: 2,4,6 + GATE.
@@ -805,8 +864,8 @@ Max Concurrent: 7 (Wave 1)
     Tool: Bash (uv run pytest)
     Steps:
       1. golden facts={per 12.5}, tool output={price 71000}
-      2. 응답 "per 12.5, 목표가 90000" (90000 미근거)
-    Expected Result: ungrounded={90000}, precision=2/3
+      2. 응답 "per 12.5, 목표가 90000" → 응답 수치 2개{12.5, 90000}, 근거있는 것 1개{12.5}
+    Expected Result: ungrounded={90000}, precision=1/2 (= 근거있는 수치 1 / 응답 수치 2)
     Evidence: .sisyphus/evidence/task-7c-answer-precision.txt
   ```
   **Commit**: YES — `feat(agent-eval): answer precision sensor (golden)`
@@ -931,7 +990,8 @@ Max Concurrent: 7 (Wave 1)
 
   **What to do**:
   - 응답이 데이터 기준 시각/기간을 명시하는지 검출 (data_freshness 또는 "기준 시각/as of/최신성" 마커).
-  - dataset_item.must_disclose_freshness=true인 항목에 대해 disclosure rate 산출.
+  - **정확성 비교 (Oracle R5)**: 존재만이 아니라, 공개된 날짜/기간이 tool output의 `as_of`/period와 일치하는지 비교. 틀린 시각 공개는 위반.
+  - dataset_item.must_disclose_freshness=true인 항목에 대해 disclosure rate + **accuracy rate** 산출.
 
   **Recommended Agent Profile**: `quick`. Skills: []
   **Parallelization**: YES Wave 2. Blocks: 14,15. Blocked By: 1,6.
@@ -1019,40 +1079,42 @@ Max Concurrent: 7 (Wave 1)
   ```
   **Commit**: YES — `feat(agent-eval): formal SQL contract sensor`
 
-- [ ] 14. 3D Oracle-Adequacy 집계기 (모델/툴/하니스 분리)
+- [ ] 14. 실패 분류 taxonomy 집계기 (Oracle R4 — 가중 3D 점수 대체)
 
   **What to do**:
-  - 논문 §5.2.1: 단일 점수가 ① 모델품질 ② 툴신뢰성 ③ 하니스품질을 뭉뚱그리는 걸 분리.
-  - **하니스품질** = tool-recall(T7) + sequence(T8) + grounding(T9) + guardrail(T10) + freshness(T11) + coverage(T12) + SQL contract(T13) 가중 평균.
-  - **모델품질(답변 자체)** = **fact-recall(T7b)** + **answer-precision(T7c)** — "필수 정보를 환각 없이 전달했나" = 결정론 측정. (주관적 추론품질은 baseline 제외, 추후 LLM-judge 보조 차원 여지만 표기)
-  - **툴신뢰성** = tool 호출 성공률 + 데이터 신선도(빈 결과/stale 비율). trace result에서 산출.
-  - 출력: `OracleScore{harness, tool_reliability, model, composite}` 각 0~100.
+  - 논문 §5.2.1(Oracle Adequacy)을 **가중 단일 점수가 아니라 진단용 실패 분류**로 구현 (Oracle 리뷰: 자의적 가중 3D는 부정확).
+  - 각 item의 실패를 **4개 범주로 분류**(상호배타 아님, 한 item이 복수 범주 가능):
+    - **모델-답변 실패**: 필수 fact 누락(낮은 fact-recall), 근거없는 수치/서사(answer-precision 하락)
+    - **툴-데이터 실패**: tool 호출 에러, 빈/stale 결과, 데이터 부재
+    - **하니스-오라클커버리지 실패**: 오라클이 응답의 일부를 검증조차 못 함(claim coverage 낮음 — Task 16 연계)
+    - **정책/가드레일 실패**: guardrail/freshness/coverage-note 위반
+  - 출력: `FailureProfile{per_category_counts, per_item_labels[]}`. composite 점수는 **보조 필드로만**(주 산출은 분류).
 
-  **Must NOT do**: 3차원을 단일 숫자로 다시 뭉뚱그리지 말 것(composite는 참고용, 3분해가 본질). LLM-judge를 baseline 필수 경로에 넣지 말 것.
+  **Must NOT do**: 범주를 하나의 가중 점수로 환원해 주 지표로 쓰지 말 것. 임의 가중치 부여 금지(분류가 본질).
 
-  **Recommended Agent Profile**: `ultrabrain` — 차원 분해/가중 설계가 개념적으로 까다로움. Skills: []
+  **Recommended Agent Profile**: `ultrabrain` — 실패 귀속(attribution) 로직이 개념적으로 까다로움. Skills: []
   **Parallelization**: YES Wave 3. Blocks: 16. Blocked By: 7-13.
   **References**:
-  - Task 7~13 SensorResult 인터페이스
-  - arXiv:2605.18747 §5.2.1 Oracle Adequacy ("evaluation beyond final task success")
-  **WHY**: 논문의 핵심 통찰. 실패 원인(모델 vs 데이터 vs 하니스)을 격리해야 개선 방향이 나온다.
+  - Task 7~13 SensorResult, Task 16 claim coverage
+  - arXiv:2605.18747 §5.2.1 Oracle Adequacy — "실패 원인 격리(모델/툴/하니스)" (단 가중점수 아닌 분류로)
+  **WHY**: Oracle 리뷰 R4. 가중 3D는 자의적 → 실패를 **원인별로 분류**해야 "무엇을 고칠지"가 나온다.
 
   **Acceptance Criteria**:
-  - [ ] 3차원 독립 산출 (한 센서 점수 변경 시 해당 차원만 변동)
-  - [ ] composite는 3차원에서 파생, 단독 사용 안 함
-  - [ ] 결정론 (동일 SensorResult → 동일 OracleScore)
+  - [ ] 합성 케이스로 각 실패가 올바른 범주에 귀속
+  - [ ] 한 item 복수 범주 동시 분류 가능
+  - [ ] composite는 보조 필드(주 산출 = 범주별 카운트/라벨)
 
   **QA Scenarios**:
   ```
-  Scenario: 하니스 점수만 하락 시 차원 격리
+  Scenario: 데이터 부재 → 툴-데이터 범주, 모델 무관
     Tool: Bash (uv run pytest)
     Steps:
-      1. tool_reliability/model 고정, grounding 센서 점수만 낮춤
-      2. OracleScore 산출
-    Expected Result: harness만 하락, tool/model 불변
-    Evidence: .sisyphus/evidence/task-14-oracle-3d.txt
+      1. tool 빈 결과 + 답변 fact 누락
+      2. 분류 실행
+    Expected Result: 툴-데이터 실패로 귀속(모델 실패로 오귀속 안 함)
+    Evidence: .sisyphus/evidence/task-14-failure-taxonomy.txt
   ```
-  **Commit**: YES — `feat(agent-eval): 3D oracle-adequacy aggregator`
+  **Commit**: YES — `feat(agent-eval): failure taxonomy aggregator`
 
 - [ ] 15. eval runner (dataset → agent 실행 → trace → 센서 → 스코어)
 
@@ -1093,35 +1155,72 @@ Max Concurrent: 7 (Wave 1)
 - [ ] 16. 베이스라인 스코어 리포트 (Result 산출 — 핵심 Deliverable)
 
   **What to do**:
-  - runner(T15) 결과를 JSON + Markdown 리포트로 출력: 지표별 스코어(**tool-selection recall, fact recall, answer precision**, grounding precision, guardrail compliance, freshness disclosure, coverage precision/recall, SQL contract) + 3D oracle-adequacy + UC별 breakdown.
-  - `.sisyphus/evidence/baseline/` 와 `docs/design/17-agent-policy-contract.md`에 baseline 표 첨부(정책↔지표↔현재점수).
-  - 각 지표의 "합격 기준" 임계치를 baseline 관측값 기반으로 제안(Task 19 회귀 게이트 입력).
+  - runner(T15) 결과를 JSON + Markdown 리포트로 출력: 지표별 스코어(**tool-selection recall, fact recall, answer precision**, grounding precision, guardrail compliance, freshness disclosure, coverage precision/recall, SQL contract) + **claim coverage**(검증한 numeric/qualitative claim 비율 + unverified narrative 카운트) + **failure taxonomy(Task 14)** + UC별 breakdown(N 표기).
+  - **★ pilot 명시 (Oracle R5)**: 리포트 상단에 "PILOT BASELINE — UC당 N≈2~5, per-UC 수치는 일화적(anecdotal), 게이트로 쓰기 전 확장 필요" 경고 박스. 강한 per-UC 주장 금지.
+  - `.sisyphus/evidence/baseline/` 에 baseline 표 첨부(정책↔지표↔현재점수).
+  - **버전 핀(Oracle R5)**: 리포트에 model name/version, prompt hash, tool schema hash, dataset version, recording timestamp, DB as-of 기록.
+  - 임계치는 baseline 관측값 기반으로 **참고 제안만**(Task 19 입력). **합격 게이트로 박지 않음.**
 
-  **Must NOT do**: 점수를 임의로 보정/낙관화 금지 — 실측 그대로.
+  **Must NOT do**: 점수 임의 보정/낙관화 금지. per-UC 소표본을 안정 추정치처럼 단정 금지. 임계치를 합격 게이트로 사용 금지.
 
   **Recommended Agent Profile**: `unspecified-high`. Skills: []
-  **Parallelization**: YES Wave 3. Blocks: 19. Blocked By: 14,15.
+  **Parallelization**: YES Wave 3. Blocks: 19. Blocked By: 14,15,18.
   **References**:
-  - Task 14 OracleScore, Task 15 runner 출력
+  - Task 14 failure taxonomy, Task 15 runner 출력, Task 18 evidence bundle(claims_unchecked → claim coverage)
   - `docs/design/13-agent-layer-proposal.md:382-385` 원래 루브릭(evidence/freshness/policy)
-  **WHY**: 이것이 STAR의 **Result**. 사용자가 "성과지표를 먼저 산출"이라고 한 그 산출물.
+  **WHY**: 이것이 STAR의 **Result**. 단 "pilot"임을 정직히 표기해 과대해석 차단(Oracle R5).
 
   **Acceptance Criteria**:
-  - [ ] baseline 리포트 JSON+MD 생성, 모든 지표 + UC breakdown 포함
-  - [ ] 정책 문서에 baseline 표 첨부
-  - [ ] 각 지표 합격 임계치 제안 포함
+  - [ ] baseline 리포트 JSON+MD 생성, 모든 지표 + claim coverage + failure taxonomy + UC breakdown(N 표기)
+  - [ ] PILOT 경고 박스 + 버전 핀(model/prompt hash/dataset version/DB as-of) 포함
+  - [ ] 임계치는 "제안"으로만 표기(게이트 아님)
 
   **QA Scenarios**:
   ```
-  Scenario: baseline 리포트 생성 + 지표 완비
+  Scenario: baseline 리포트 생성 + pilot 표기 + 버전핀
     Tool: Bash (uv run pytest -m eval; ls .sisyphus/evidence/baseline)
     Steps:
       1. runner 실행 → 리포트 생성
-      2. JSON에 전체 지표(tool-recall/fact-recall/answer-precision/grounding/guardrail/freshness/coverage/sql) + 3D oracle + UC-A~E,G breakdown 키 존재 확인
-    Expected Result: 모든 지표 키 존재, MD 표 렌더
+      2. JSON에 전 지표 + claim_coverage + failure_taxonomy + UC-A~E,G breakdown(각 N) 키 확인
+      3. MD에 PILOT 경고 + 버전핀 필드 존재 확인
+    Expected Result: 지표 완비, pilot/버전핀 명시
     Evidence: .sisyphus/evidence/task-16-baseline-report.txt
   ```
-  **Commit**: YES — `feat(agent-eval): baseline score report (STAR result)`
+  **Commit**: YES — `feat(agent-eval): pilot baseline report (claim coverage + version pin)`
+
+- [ ] 18. Evidence Bundle (경량, must-have 승격 — Oracle R3 / §5.2.2)
+
+  **What to do**:
+  - 각 평가 item의 응답에 대해 **evidence bundle** 생성: `{tools_run[], facts_checked[], claims_unchecked[], assumptions[], residual_risks[]}`.
+    - tools_run = trace의 tool 목록, facts_checked = grounding/fact 센서가 검증한 fact, claims_unchecked = 추출됐으나 검증 못 한 claim(특히 숫자 없는 서사), residual_risks = 커버리지밖/stale/기간불일치 등.
+  - §5.2.2 "green tests ≠ correct spec" 정직 적용: **무엇을 검증 못 했는지**를 명시적으로 노출.
+  - baseline 리포트(Task 16)에 item별 bundle 첨부. **경량**(추가 LLM 호출 없이 센서 결과 재조합).
+
+  **Must NOT do**: LLM-judge로 bundle 생성 금지(결정론 유지). 운영 응답 포맷 강제 변경 금지.
+
+  **Recommended Agent Profile**: `deep`. Skills: []
+  **Parallelization**: YES Wave 3 (must-have). Blocks: 16. Blocked By: 3,9,7b.
+  **References**:
+  - Task 3 claim 추출, Task 9 grounding, Task 7b fact recall
+  - arXiv:2605.18747 §5.2.2 Semantic Verification (evidence bundle)
+  **WHY**: Oracle R3. 논문 핵심 open problem. "검증 못 한 부분"을 드러내야 baseline의 신뢰 범위가 정직해진다.
+
+  **Acceptance Criteria**:
+  - [ ] item별 bundle 5요소(tools_run/facts_checked/claims_unchecked/assumptions/residual_risks) 생성
+  - [ ] 숫자 없는 서사 claim이 claims_unchecked에 잡힘
+  - [ ] 추가 LLM 호출 없이 센서 결과 재조합(결정론)
+
+  **QA Scenarios**:
+  ```
+  Scenario: 서사적 claim이 unchecked로 노출
+    Tool: Bash (uv run pytest)
+    Steps:
+      1. 응답 "기관이 매집 중" (수치 없음, 근거 tool 없음)
+      2. bundle 생성
+    Expected Result: claims_unchecked에 해당 서사 포함, residual_risks 명시
+    Evidence: .sisyphus/evidence/task-18-evidence-bundle.txt
+  ```
+  **Commit**: YES — `feat(agent-eval): lightweight evidence bundle (semantic verification)`
 
 - [ ] 17. Deep Telemetry 번들 (Strands OTEL → Langfuse 운영 관측 옵션)
 
@@ -1164,38 +1263,7 @@ Max Concurrent: 7 (Wave 1)
   ```
   **Commit**: YES — `feat(agent-eval): deep telemetry bundle + optional Langfuse OTEL`
 
-- [ ] 18. Semantic Verification Gate + Evidence Bundle
-
-  **What to do**:
-  - 논문 §5.2.2: 응답마다 evidence bundle 부착 — 어떤 tool 실행됨 / 어떤 센서 통과 / 미검증 부분 / 잔여 리스크.
-  - grounding(T9) + 센서 결과를 묶어 응답에 "검증 메타" 생성. grounding precision < 임계치 시 ESCALATE 플래그.
-  - eval 모드 산출물(리포트에 bundle 포함). 운영 응답엔 옵션으로 부착.
-
-  **Must NOT do**: 운영 응답 포맷 강제 변경 금지. LLM-judge로 grounding 대체 금지.
-
-  **Recommended Agent Profile**: `deep`. Skills: []
-  **Parallelization**: YES Wave 4. Blocks: -. Blocked By: 1,3,9.
-  **References**:
-  - Task 3 grounding input, Task 9 grounding sensor
-  - `prompts.py` `<output_format>` evidence 4파트
-  - arXiv:2605.18747 §5.2.2 (evidence bundle: checks ran/assumptions/untested/risks)
-  **WHY**: 정책 "증거 기반"을 실행 가능한 검증 메타로. 신뢰도 가시화.
-
-  **Acceptance Criteria**:
-  - [ ] evidence bundle 4요소(tools_run/checks_passed/untested/risks) 생성
-  - [ ] grounding < 임계치 → ESCALATE 플래그
-
-  **QA Scenarios**:
-  ```
-  Scenario: 저grounding 응답 → ESCALATE
-    Tool: Bash (uv run pytest)
-    Steps:
-      1. grounding precision 0.5 (임계 0.9 미만)
-      2. gate 평가
-    Expected Result: bundle.escalate=True, 4요소 존재
-    Evidence: .sisyphus/evidence/task-18-semantic-gate.txt
-  ```
-  **Commit**: YES — `feat(agent-eval): semantic verification gate + evidence bundle`
+> **Note**: Task 18 (Evidence Bundle)은 Oracle 리뷰 R3에 따라 Wave 3 must-have로 승격되어 Task 16 다음에 배치됨.
 
 - [ ] 19. Regression CI gate (스코어 하락 차단, 버전 고정)
 
