@@ -1097,8 +1097,10 @@ news poller
   : news-raw
 document processor (LLM 판정)
   : silver 문서와 판정
+market data job (장 마감 뒤: 지수, 미국 ETF, 지수 안 비중, 베타)
+  : reference, gold.symbol_beta
 price_move_state_job (DAILY)
-  : price-moves, move sink
+  : price-moves, move sink (네 층 분해)
 signal worker (LLM 생성, fallback)
   : gold signal, serving 테이블
 REST 조회
@@ -1106,8 +1108,8 @@ REST 조회
 
 | 항목 | 1차 | 이후 |
 | --- | --- | --- |
-| 수집 | 뉴스, 40종목 | 수급, 투자의견, 지수와 해외 ETF |
-| move | `DAILY` | `INTRADAY_SPIKE` |
+| 수집 | 뉴스, 40종목. 지수와 미국 ETF 일봉, 지수 안 종목 비중 | 수급, 투자의견, 장중 지수 값 |
+| move | `DAILY`, 장 마감 값 기준 네 층 분해 | `INTRADAY_SPIKE`, 장중 분해 |
 | 발행 | outbox 테이블과 임시 relay | Debezium |
 | fallback | 주 모델, 보조 모델, `HIDDEN` | 수급 문구, 분해 문구 추가 |
 | 재시도 | 없음 | `signal_retry` |
@@ -1115,7 +1117,7 @@ REST 조회
 
 1차 다음의 순서는 다음과 같습니다.
 
-1. 수급, 투자의견, 지수와 해외 ETF poller
+1. 수급, 투자의견 poller, 장중 지수 값 수집
 2. 23번 CDC 문서, Debezium, 임시 relay 교체
 3. `INTRADAY_SPIKE`
 4. `signal_retry`와 재시도
@@ -1127,7 +1129,7 @@ REST 조회
 | --- | --- | --- |
 | news, flow, opinion poller | `services/kis_ingestion/src/kis_ingestion/poller/` (`news.py`, `flow.py`, `opinion.py`, `rate_limiter.py`) | `python -m kis_ingestion.poller` |
 | price_move_state_job | `services/stream_detection_java` (`PriceMoveStateJob`) | Flink |
-| 가공, 시그널, 서빙 sink, relay | `services/ai_signal` | MVP에서는 `python -m ai_signal all`로 한 프로세스에서 실행합니다 |
+| 가공, 시그널, 서빙 sink, relay, market data job | `services/ai_signal` | MVP에서는 `python -m ai_signal all`로 한 프로세스에서 실행합니다 |
 | REST, MCP | `services/alert_service` | 기존 FastAPI 앱 |
 
 - 새 서비스 이름은 `ai_signal`입니다. `signal`은 Python 표준 라이브러리 모듈과 이름이 겹칩니다.
@@ -1234,7 +1236,7 @@ services/ai_signal/src/ai_signal/prompts/
 | --- | --- | --- | --- |
 | 수급 poller | `poller/` 패키지, 공유 rate limiter, poller 등록 목록. 1차에는 news poller 하나만 등록합니다 | `flow.py`를 추가하고 등록 목록에 한 줄을 넣습니다 | 실행 명령, rate limiter, 토큰 관리 |
 | 투자의견 poller | 위와 같습니다 | `opinion.py`를 추가하고 등록합니다 | 위와 같습니다 |
-| 지수와 해외 ETF 수집 | 위와 같습니다 | `market_data.py`를 추가합니다. 수집 방법은 결정 64에서 정합니다 | 위와 같습니다 |
+| 장중 지수 값 수집 | 일봉 수집 작업(`market_data`)과 지수 값 테이블. 1차는 장 마감 뒤 일봉만 적재합니다 | 장중 값을 같은 테이블에 적재합니다. 수집 방법은 결정 64에서 정합니다 | 지수 값 테이블, 분해 계산 |
 | 40종목 확장 | poller는 처음부터 `reference`의 종목 목록 전체를 읽습니다 | 없음 | 코드 전체 |
 
 - poller는 공통 인터페이스 하나를 구현합니다. 인터페이스는 조회 주기, 장 운영 시간 조건, 한 번의 조회, 결과 발행으로 구성합니다.
@@ -1260,8 +1262,8 @@ services/ai_signal/src/ai_signal/prompts/
 | `entity` 계열, `entity_alias`, `entity_relation`, `relation_type_def` | 전체 | 관계 수동 시드는 1차에서 넣습니다. 별칭은 1차에서 쓰지 않아도 테이블은 만듭니다 |
 | `document` 계열 | 공통 테이블, `document_kis_news`, `document_revision`, `document_entity`, `document_judgement` | `document_report`는 나중에 추가합니다 |
 | `event`, `event_entity` | 공통 테이블과 연결 테이블 | 1차에는 행이 없습니다. 서브타입 테이블은 2차에서 추가합니다 |
-| `move` | 전체 컬럼 (`move_type`, 네 층 기여, `beta_method`, `dominant_layer`) | 1차 DAILY는 장 마감 값으로 분해합니다. 분해할 수 없으면 기여 컬럼을 비우고 `beta_method`를 비웁니다 |
-| `symbol_beta` | 전체 | 2차 지수 수집 전에는 행이 없습니다 |
+| `move` | 전체 컬럼 (`move_type`, 네 층 기여, `beta_method`, `dominant_layer`) | 1차 DAILY는 장 마감 값으로 분해합니다. 베타가 없으면 `UNIT_4L`로 계산합니다 |
+| `symbol_beta` | 전체 | 없음. 1차부터 장 마감 뒤에 계산합니다 |
 | `signal`, `signal_cause`, `signal_cause_source` | 전체 | `signal_cause_source.source_type`은 1차에 `DOCUMENT`만 들어갑니다 |
 | `signal_retry` | 전체 | 1차는 실패를 기록만 합니다. 아래 "시그널"을 참고합니다 |
 | `serving` 테이블 | 전체 | 없음 |
@@ -1284,7 +1286,7 @@ services/ai_signal/src/ai_signal/prompts/
 | --- | --- | --- | --- |
 | `INTRADAY_SPIKE` | `PriceMoveStateJob`의 move 생성 부분을 move 종류별 규칙으로 나눕니다. 1차에는 DAILY 규칙 하나만 둡니다 | `stock-alerts`를 입력으로 받는 규칙을 추가합니다 | 가격 상태 기계, `price-moves` 스키마, move sink |
 | 후보 범위 | 후보 범위 계산을 move 종류를 받는 함수 하나로 둡니다 | `INTRADAY_SPIKE`의 범위(급변 윈도우 끝에서 60분 뒤)를 추가합니다 | signal worker |
-| 장중 분해 | move sink가 분해를 계산하는 자리를 둡니다. 1차는 장 마감 값만 씁니다 | 장중 지수 값을 받아 같은 자리에서 계산합니다 | move 테이블, 토픽 |
+| 장중 분해 | move sink가 11절의 방식으로 네 층 분해를 계산합니다. 1차는 장 마감 값과 전 거래일까지의 베타를 씁니다. 분해 함수는 실험 코드(`decompose_ols_4l`)를 옮깁니다 | 장중 지수 값을 받아 같은 함수로 계산합니다 | 분해 함수, move 테이블, 토픽 |
 
 #### 시그널
 
