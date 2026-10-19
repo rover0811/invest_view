@@ -90,7 +90,7 @@ System_Boundary(sys, "DooDream v1") {
     Container(batch, "Batch Enrichment", "Airflow + Python", "Loads reports/reference data and writes outbox")
     Container(connect, "Kafka Connect / CDC", "Debezium Source", "Publishes enrichment events from PostgreSQL outbox")
     ContainerDb(kafka, "Kafka", "Topics", "stock-ticks, stock-alerts, stock-patterns, enrichment-events")
-    ContainerDb(pg, "PostgreSQL", "Single database", "bronze/silver/gold/serving/integration")
+    ContainerDb(pg, "PostgreSQL", "Single database", "bronze/silver/gold/serving/integration/outbox")
 }
 
 Rel(user, serving, "Uses", "HTTP / WebSocket")
@@ -320,7 +320,8 @@ erDiagram
 | `bronze` | `tick_history` | custom persistence consumer가 적재하는 append-only tick 저장소. replay 기준 데이터 |
 | `silver` | `symbol_5m_metrics`, `report_artifacts` | 윈도우 지표와 배치 enrichment 결과 |
 | `gold` | `alert_events`, `pattern_events` | 사용자에게 의미 있는 파생 이벤트 저장 |
-| `integration` | `realtime_subscriptions`, `outbox_events` | KIS 등록 상태와 CDC outbox 관리 |
+| `integration` | `realtime_subscriptions` | KIS 등록 상태 관리 (미구현. 현재 구독 상태는 `kis_ingestion`의 메모리와 환경 변수 `KIS_WATCH_SYMBOLS`로 관리합니다) |
+| `outbox` | `events` | CDC(Debezium)가 읽는 outbox. 22번 설계에서 `integration.outbox_events`를 이 위치로 옮겼습니다 |
 
 ### DB schema 설계 원칙
 

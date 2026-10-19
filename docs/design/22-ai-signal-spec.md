@@ -88,19 +88,31 @@ flowchart LR
         KIS_WS[KIS WebSocket producer]
         NEWS_P[news poller]
         FLOW_P[flow poller]
-        RPT[report CronJob]
+        OPN_P[opinion poller]
     end
 
     subgraph Flink
         T_TICK([stock-ticks])
         FLINK[Flink detector]
         T_ALERT([stock-alerts])
-        PX[price state job<br/>DAILY move, 상태 전환, 수익률 분해]
+        PX[price_move_state_job<br/>DAILY move, 상태 전환, 수익률 분해]
+        T_MOVE([price-moves])
     end
 
-    subgraph PROC["정제 (Python consumer)"]
+    subgraph PROC["가공 (Python consumer)"]
         DOC[document processor<br/>중복 제거, 종목 연결, 방향 판정]
         FLW[flow processor<br/>SCD2, z-score]
+        TP[target price processor<br/>목표가 변경 판정]
+        MV[move sink<br/>move 저장]
+    end
+
+    subgraph DBG["PostgreSQL"]
+        DB[(데이터 테이블)]
+        OUTBOX[(outbox)]
+    end
+
+    subgraph CDC["Debezium (23번 문서)"]
+        DBZ[Kafka Connect<br/>Debezium]
     end
 
     subgraph 시그널
@@ -113,34 +125,38 @@ flowchart LR
     subgraph 서빙
         T_UPD([signal-updates<br/>key = symbol])
         SINK[serving sink]
-        API[API, MCP, WebSocket]
+        API[API, MCP]
     end
-
-    DB[(PostgreSQL)]
 
     KIS_WS --> T_TICK --> FLINK --> T_ALERT
     T_TICK --> PX
     T_ALERT --> PX
+    PX --> T_MOVE --> MV
 
     NEWS_P --> T_NEWS([news-raw]) --> DOC
     FLOW_P --> T_FLOW([flow-raw]) --> FLW
-    RPT -->|적재| DB
-    RPT -->|새 후보| T_REQ
+    OPN_P --> T_OPN([opinion-raw]) --> TP
 
-    DOC -->|새 후보| T_REQ
-    FLW -->|후보 추가, 갱신| T_REQ
-    PX -->|상태 전환| T_REQ
-
-    DOC --> DB
+    DOC -->|같은 트랜잭션| DB
+    DOC --> OUTBOX
     FLW --> DB
-    PX --> DB
+    FLW --> OUTBOX
+    TP --> DB
+    TP --> OUTBOX
+    MV --> DB
+    MV --> OUTBOX
+
+    OUTBOX -->|WAL| DBZ
+    DBZ -->|outbox router| T_REQ
+    DBZ -->|outbox router| T_UPD
 
     T_REQ --> SIG
     DB -->|후보 조회| SIG
+    SIG --> DB
+    SIG --> OUTBOX
     SIG <--> RETRY
     SIG -->|반복 실패| T_DLQ
-    SIG --> T_UPD --> SINK --> API
-
+    T_UPD --> SINK --> API
 ```
 
 | 관계 | 의미 |
@@ -179,7 +195,7 @@ entity              entity_id PK, entity_type, name
 ```
 
 - 모든 엔티티는 같은 ID 체계를 사용합니다. 그래서 관계 테이블에서 종류가 다른 엔티티를 연결할 수 있습니다.
-- 섹터 분류는 41종목을 수동으로 정합니다. KIS 주식기본조회의 지수업종 분류는 현재 키(모의투자 키)로 조회되지 않습니다.
+- 섹터 분류는 운영 구독 40종목을 수동으로 정합니다. KIS 주식기본조회의 지수업종 분류는 현재 키(모의투자 키)로 조회되지 않습니다.
 
 ### 4.2 별칭 테이블
 
@@ -224,7 +240,7 @@ relation_type_def
 | `COMPETES_WITH` | symbol, org | symbol, org | 대칭 | 000660, CXMT |
 | `SUPPLIES_TO` | symbol, org | symbol, org | 아님 | 한미반도체가 000660에 공급 |
 | `SUBSIDIARY_OF` | symbol, org | symbol, org | 아님 | 솔리다임이 000660의 자회사 |
-| `PROXIED_BY` | sector | index | 아님 | 반도체 섹터에 대응하는 미국 지표는 SOXX |
+| `PROXIED_BY` | sector | index | 아님 | 반도체 섹터는 SPY에 더해 SOXX를 씁니다 |
 
 ### 5.3 무결성 규칙
 
@@ -234,8 +250,8 @@ relation_type_def
 
 ### 5.4 이번 범위의 데이터
 
-- `BELONGS_TO`: KIS로 수집할 수 있는 41종목을 수동으로 분류해서 넣습니다.
-- `PROXIED_BY`: 섹터마다 미국 ETF를 수동으로 연결합니다. 대응하는 ETF가 없는 섹터는 연결하지 않습니다.
+- `BELONGS_TO`: 운영 구독 40종목을 수동으로 분류해서 넣습니다. 기본은 KOSPI 업종이고, 11.5절의 기준으로 사람이 고칩니다.
+- `PROXIED_BY`: SPY에 더했을 때 설명력이 늘어나는 섹터만 미국 섹터 ETF와 연결합니다. 실험에서는 반도체(SOXX)와 소재(XLB)였습니다. 나머지 섹터는 SPY만 씁니다 (11.3).
 - `COMPETES_WITH`, `SUPPLIES_TO`, `SUBSIDIARY_OF`: 반도체 종목 중심으로 수동 시드 20건에서 30건을 넣습니다.
 - 수동 시드는 `source=MANUAL`로 표시합니다. 나중에 자동 추출 결과를 평가할 때 정답셋으로 사용합니다.
 - 기사에서 LLM으로 관계를 추출하는 작업은 이번 범위에 넣지 않습니다.
@@ -348,7 +364,7 @@ event
 
 | 유형 | ID 생성 방법 |
 | --- | --- |
-| `TARGET_PRICE_CHANGE` | 리포트 1건이 이벤트 1건입니다. `UUIDv5(리포트 document_id)` |
+| `TARGET_PRICE_CHANGE` | KIS 투자의견 1건이 이벤트 1건입니다. `UUIDv5(종목, 증권사, 의견 날짜)` |
 | `FLOW` | `UUIDv5(종목, 주체, 거래일)` |
 
 ### 7.3 서브타입
@@ -362,6 +378,10 @@ event_flow            event_id PK/FK, observation_id, investor_type,
 ```
 
 - 목표가 변경은 같은 증권사의 직전 목표가와 비교해서 결정론적으로 판정합니다. LLM을 사용하지 않습니다.
+- 원천은 KIS 종목투자의견 API(`FHKST663300C0`)입니다. 응답에 직전 의견과 직전 목표가가 함께 옵니다.
+- KIS 투자의견은 40종목 기준으로 2025-12-01부터 2026-10-13까지 2,049건, 24개 증권사입니다.
+- KIS는 의견이나 목표가가 바뀐 경우만 기록하는 것으로 보입니다. 다른 리포트 출처와 비교했을 때, KIS에 없는 리포트의 대부분은 직전 목표가를 유지한 리포트였습니다. 이것은 추정입니다.
+- 본문이 있는 리포트는 나중에 목표가를 바꾼 이유를 설명하는 근거 문서로 붙입니다. 그때 `document_report`를 사용합니다.
 
 ### 7.4 이벤트와 엔티티의 연결
 
@@ -467,15 +487,15 @@ move
   symbol_entity_id
   window_start, window_end, return_pct
   price_state         POSITIVE | NEUTRAL | NEGATIVE
-  contrib_global, contrib_sector, contrib_idio
+  contrib_global, contrib_market, contrib_sector, contrib_idio
   beta_method, beta_as_of
-  dominant_layer      GLOBAL | SECTOR | IDIO
+  dominant_layer      GLOBAL | MARKET | SECTOR | IDIO
   signal_status       SHOWN | HIDDEN | NO_CANDIDATE
   version
 ```
 
 - `INTRADAY_SPIKE`는 Flink의 5분 3% 급변 알림에서 만듭니다.
-- move는 Flink의 price state job이 체결 시각 기준으로 만듭니다.
+- move는 Flink의 price_move_state_job이 체결 시각 기준으로 만듭니다.
 - `DAILY`는 전일 KRX 종가 대비 등락률이 `|1%|`를 처음 넘을 때 만듭니다. (종목, 거래일)당 1개입니다.
 - VI 임박과 거래정지 전환은 시그널 생성 대상에서 제외합니다.
 - 기존 `gold.alert_events`는 수정하지 않습니다.
@@ -493,42 +513,99 @@ move
 
 ## 11. 수익률 분해 [합의]
 
+이 절의 결정은 `experiments/return_decomposition/`의 실험으로 정했습니다. 대상은 40종목이고, 평가 구간은 2025-10-17부터 2026-10-16까지 244거래일입니다. 실험 결과 그림은 같은 폴더의 `figures/`에 있습니다. 방식별 비교는 `3_method_summary.png`, 사례별 층 기여는 `5_cases.png`입니다.
+
+### 11.1 네 층
+
 ```
-r_i = beta_g * r_global + beta_s * r_sector_ex_i + e_i
+r_i = c_global + c_market + c_sector + e_i
 ```
 
-| 항 | 정의 | 수집 |
+| 층 | 요인 | 수집 |
 | --- | --- | --- |
-| `r_global` | 섹터에 대응하는 미국 ETF의 직전 정규장 수익률 | KIS 해외주식 기간별 시세. 예: 반도체 SOXX, 금융 XLF |
-| `r_sector_ex_i` | 같은 섹터에서 종목 i를 뺀 시가총액 가중 바스켓 수익률 | `BELONGS_TO` 관계로 바스켓을 계산합니다 |
-| `e_i` | 나머지 (종목 고유 요인) | |
+| `GLOBAL` | 직전 미국 정규장의 SPY 수익률. `PROXIED_BY`로 연결된 섹터는 SPY로 설명되지 않는 섹터 ETF 수익률을 함께 씁니다 | KIS 해외주식 기간별 시세 |
+| `MARKET` | 종목 i를 뺀 KOSPI 수익률에서 미국 요인으로 설명되는 부분을 뺀 나머지 | KOSPI 지수, KOSPI 안의 종목 비중 |
+| `SECTOR` | 종목 i를 뺀 업종지수 수익률에서 미국 요인과 시장 요인으로 설명되는 부분을 뺀 나머지 | KOSPI 업종지수, 업종 안의 종목 비중 |
+| `IDIO` | 나머지 (종목 고유 요인) | |
 
-- `r_global`은 한국 장보다 먼저 끝난 값입니다. 그래서 한국 시장이 이 값에 영향을 줄 수 없습니다.
-- `r_sector_ex_i`의 비교 기준에는 자기 자신이 들어가지 않습니다.
-- 섹터와 미국 ETF의 대응은 `PROXIED_BY` 관계로 저장합니다.
-- 마감된 날의 ETF 값만 사용합니다.
-- 바스켓의 종목이 1개 이하이면 한 단계 위의 분류를 사용합니다. 그래도 부족하면 시장 전체에서 자기 자신을 뺀 값을 사용합니다.
-- 세 항 중에서 절대 기여도가 가장 큰 항을 지배 층(`dominant_layer`)이라고 부릅니다. 시그널을 생성할 때는 지배 층과 범위가 맞는 원인을 먼저 고려합니다.
-- 이 분해는 통계적 분해입니다.
+- 층마다 앞 층으로 설명되는 부분을 먼저 뺍니다. 그래서 같은 움직임이 두 층에 중복해서 들어가지 않습니다.
+- 각 층의 기여는 베타 곱하기 요인입니다. 네 층의 기여를 더하면 `r_i`가 됩니다.
+- 미국 요인은 한국 장보다 먼저 끝난 값입니다. 한국 시장이 이 값에 영향을 줄 수 없습니다.
+- 시장 층을 둡니다. 큰 움직임의 상당수는 시장 전체 사건이기 때문입니다. 예: 중동 전면전으로 코스피가 12% 하락한 날, 서킷브레이커가 발동한 날. 시장 층이 없으면 이런 날이 업종 요인으로 잡혔습니다.
 
-### 11.1 베타
+### 11.2 자기 자신을 빼는 방법
+
+```
+r_ex_i = (R_index - w_i * r_i) / (1 - w_i)
+```
+
+- `w_i`는 지수 안에서 종목 i가 차지하는 비중입니다. KIS 시가총액 순위 API(`FHPST01740000`)에 지수 코드를 넣어서 받습니다. 로그인이 필요한 KRX 구성 종목 자료는 쓰지 않습니다.
+- 과거 날짜의 비중은 현재 비중을 종목 가격과 지수의 변화로 되돌려 계산합니다. 근사치입니다.
+- 시장 층과 업종 층에 모두 적용합니다. 예: SK하이닉스는 KOSPI의 18%, 전기전자 업종의 33%입니다.
+- 비중이 95% 이상이면 업종 요인을 만들지 않습니다.
+
+### 11.3 미국 요인
+
+- 기본은 SPY입니다. 40종목에서 직전 미국 장과의 상관 중앙값은 SPY 0.26, 섹터 ETF 0.19였습니다.
+- 섹터 ETF는 SPY에 더했을 때 설명력이 늘어나는 섹터에만 `PROXIED_BY`로 연결합니다. 실험에서는 반도체(SOXX)와 소재(XLB)가 해당했습니다. 은행, 통신, 지주회사는 늘어나지 않았습니다.
+- 같은 날 밤의 미국 장(상관 0.04)과 이틀 전 미국 장(0.00)은 쓰지 않습니다.
+
+### 11.4 베타
 
 ```
 symbol_beta
   symbol_entity_id, as_of_date, method
   window_days, n_obs
-  beta_global, beta_sector, r2
+  beta_global, beta_global_sector, beta_market, beta_sector
+  r2
 ```
 
-| method | 내용 | 시기 |
-| --- | --- | --- |
-| `UNIT` | 베타를 1로 둡니다. 크기만 비교합니다 | 이번 범위 |
-| `SECTOR_1F` | statsmodels `RollingOLS`로 업종 바스켓 1개 요인의 베타를 추정합니다 | 다음 단계 |
-| `GLOBAL_SECTOR_2F` | 미국 요인을 먼저 뺀 뒤 업종 요인을 추정합니다 | 다음 단계 |
+| method | 내용 |
+| --- | --- |
+| `OLS_4L` | statsmodels `RollingOLS`로 네 층의 베타를 추정합니다. 기본입니다 |
+| `UNIT_4L` | 베타를 1로 두고 순서대로 뺍니다. 표본이 60일보다 적을 때 씁니다 |
 
-- 회귀 창은 120거래일, 최소 표본은 60일입니다.
-- 표본이 부족하거나 `r2`가 너무 낮으면 `UNIT`을 사용합니다.
+- 회귀 창은 120거래일, 최소 표본은 60일입니다. 표본이 120일보다 적으면 있는 만큼으로 추정합니다.
+- 베타는 전 거래일까지의 데이터로만 추정합니다. 당일 움직임이 그날의 베타에 섞이지 않습니다.
+- 업종 베타는 0 이상으로 제한합니다. 업종 베타가 음수라는 것은 그 종목이 업종을 따라 움직이지 않는다는 뜻이기 때문입니다.
+- 업종 베타가 오래 0에 걸려 있는 종목은 업종 분류를 다시 봅니다. 예: 삼성SDI와 LG전자는 전기전자 업종 베타가 계속 음수였고, 화학 업종과 더 잘 맞았습니다.
 - 베타는 평일 `backfill-ohlc` CronJob 뒤에 계산합니다.
+
+실험 결과 (40종목 중앙값):
+
+| 방식 | 설명 비율 | 업종 층과 고유 층의 상관 |
+| --- | --- | --- |
+| 베타 1, 세 층을 동시에 뺌 | 0.16 | 해당 없음 |
+| 베타 1, 네 층을 순서대로 뺌 | 0.21 | -0.10 |
+| 회귀 베타, 네 층 | 0.41 | 0.03 |
+| 회귀 베타, 네 층, 업종 베타 제한 | 0.41 | 0.02 |
+
+- 업종 층과 고유 층의 상관이 0에서 멀면, 업종 층의 노이즈가 반대 부호로 고유 층에 들어간 것입니다.
+- 세 층을 동시에 빼는 방식은 쓰지 않습니다. 미국 요인이 두 번 빠져서 고유 요인의 부호가 뒤집힌 사례가 있었습니다. 예: 삼성전자 2026-06-08은 -10.2%인데 고유 요인이 +8.1%로 계산되었습니다.
+- 창 250일과 지수 가중 회귀(반감기 60일)도 비교했습니다. 창 250일은 베타가 더 안정적이지만 변화를 늦게 따라갔습니다. 지수 가중은 창 120일과 차이가 작았습니다.
+
+### 11.5 업종 분류
+
+- 기본은 KOSPI 업종입니다. KIS 현재가 조회의 업종명으로 받습니다.
+- 업종 분류를 데이터로 자동 선택하지 않습니다. 실험에서 업종 후보 23개 중 설명력이 가장 큰 업종을 고르게 했더니, 평가 구간에서 개선이 거의 없었습니다. 그리고 근거가 약한 선택이 섞였습니다. 예: 고려아연이 오락문화 업종으로 선택되었습니다.
+- 자동 선택 결과는 사람이 분류를 고칠 때 참고 자료로 씁니다. 실험에서 다음 성격이 함께 잡혔습니다.
+  - 업종: 삼성SDI와 LG전자는 화학, 크래프톤은 오락문화, 금융지주 일부는 증권
+  - 그룹: 현대차, 기아, 현대모비스는 운송창고 업종(현대글로비스 포함)과 맞았습니다. 삼성물산은 보험 업종(삼성생명 포함)과 맞았습니다.
+  - 성격: SK텔레콤은 음식료 업종과 맞았습니다. 시장 변동에 덜 움직이는 방어적 성격이 비슷하기 때문으로 보입니다.
+
+### 11.6 그룹
+
+- 그룹은 분해의 층으로 넣지 않습니다.
+- 실험에서 같은 그룹의 다른 종목 바스켓을 층으로 넣으면, 지주회사와 자회사의 설명 비율이 크게 늘었습니다. 예: 아모레퍼시픽 0.21에서 0.71, LG 0.24에서 0.56, 현대차 0.49에서 0.73. 삼성과 SK는 늘지 않았습니다.
+- 그러나 바스켓이 2종목에서 6종목이라서, 한 계열사의 개별 뉴스가 다른 계열사의 그룹 요인으로 들어갔습니다. 예: 기아 2025-12-04는 +1.4%인데, 그룹 요인이 +6.9%, 고유 요인이 -5.5%로 계산되었습니다.
+- 그래서 그룹 정보는 시그널 후보를 넓히는 데 씁니다. 계열사의 기사와 이벤트를 `SUBSIDIARY_OF` 관계로 찾아서 후보에 넣고, LLM이 판단합니다.
+
+### 11.7 시그널 생성에 넘기는 값
+
+- 네 층의 기여를 모두 넘깁니다. 가장 큰 층 하나만 고르면 틀리는 날이 있기 때문입니다. 예: SK하이닉스 2026-08-20은 시장 층 +5.9%, 고유 층 +5.8%였고, 그날의 기사는 성과급 자사주 지급과 대규모 자사주 매입이었습니다.
+- 절대 기여도가 가장 큰 층은 `dominant_layer`로 함께 기록합니다. 분해 기반 대체 문구를 고를 때 씁니다.
+- 이 분해는 통계적 분해입니다. 원인을 판단하는 근거 중 하나로만 씁니다.
+- 삼성전자와 SK하이닉스는 KOSPI의 43%입니다. 두 종목은 시장 층과 업종 층을 깔끔하게 나누기 어렵습니다. 예: 삼성전자 2026-06-08의 글로벌 반도체 매도는 미국 층과 시장 층으로 나뉘어 잡혔습니다.
 
 ## 12. 시그널 생성 [합의]
 
@@ -549,7 +626,7 @@ symbol_beta
 | 위치 | 내용 |
 | --- | --- |
 | 코드 | 방향 풀, 후보 범위, 완전 중복 제거 |
-| 판단 기준 프롬프트 | 같은 사건 묶기, 지배 층과 범위가 맞는 사건 선호, 출처 신뢰도, 선행 선호, 수급의 z 해석, 원인 순위 |
+| 판단 기준 프롬프트 | 같은 사건 묶기, 기여가 큰 층과 범위가 맞는 사건 선호, 출처 신뢰도, 선행 선호, 수급의 z 해석, 원인 순위 |
 
 LLM은 한 번의 호출로 다음 작업을 합니다.
 
@@ -663,6 +740,7 @@ signal_retry
 | 4 | NXT 거래 시간과 후보 범위의 정확한 경계는 무엇인가? |
 | 5 | OpenRouter의 모델 fallback 기능을 사용할 수 있는가? |
 | 6 | 후보 상한은 몇 건인가? |
+| 7 | 장중 수익률 분해에 쓸 지수와 해외 ETF 값은 어떻게 받는가? (지수 체결 WebSocket 또는 주기적 조회) |
 
 ## 14. 품질 지표의 방향 [메모]
 
@@ -743,19 +821,31 @@ flowchart LR
         KIS_WS[KIS WebSocket producer]
         NEWS_P[news poller]
         FLOW_P[flow poller]
-        RPT[report CronJob]
+        OPN_P[opinion poller]
     end
 
     subgraph Flink
         T_TICK([stock-ticks])
         FLINK[Flink detector]
         T_ALERT([stock-alerts])
-        PX[price state job<br/>DAILY move, 상태 전환, 수익률 분해]
+        PX[price_move_state_job<br/>DAILY move, 상태 전환, 수익률 분해]
+        T_MOVE([price-moves])
     end
 
-    subgraph PROC["정제 (Python consumer)"]
+    subgraph PROC["가공 (Python consumer)"]
         DOC[document processor<br/>중복 제거, 종목 연결, 방향 판정]
         FLW[flow processor<br/>SCD2, z-score]
+        TP[target price processor<br/>목표가 변경 판정]
+        MV[move sink<br/>move 저장]
+    end
+
+    subgraph DBG["PostgreSQL"]
+        DB[(데이터 테이블)]
+        OUTBOX[(outbox)]
+    end
+
+    subgraph CDC["Debezium (23번 문서)"]
+        DBZ[Kafka Connect<br/>Debezium]
     end
 
     subgraph 시그널
@@ -768,33 +858,38 @@ flowchart LR
     subgraph 서빙
         T_UPD([signal-updates<br/>key = symbol])
         SINK[serving sink]
-        API[API, MCP, WebSocket]
+        API[API, MCP]
     end
-
-    DB[(PostgreSQL)]
 
     KIS_WS --> T_TICK --> FLINK --> T_ALERT
     T_TICK --> PX
     T_ALERT --> PX
+    PX --> T_MOVE --> MV
 
     NEWS_P --> T_NEWS([news-raw]) --> DOC
     FLOW_P --> T_FLOW([flow-raw]) --> FLW
-    RPT -->|적재| DB
-    RPT -->|새 후보| T_REQ
+    OPN_P --> T_OPN([opinion-raw]) --> TP
 
-    DOC -->|새 후보| T_REQ
-    FLW -->|후보 추가, 갱신| T_REQ
-    PX -->|상태 전환| T_REQ
-
-    DOC --> DB
+    DOC -->|같은 트랜잭션| DB
+    DOC --> OUTBOX
     FLW --> DB
-    PX --> DB
+    FLW --> OUTBOX
+    TP --> DB
+    TP --> OUTBOX
+    MV --> DB
+    MV --> OUTBOX
+
+    OUTBOX -->|WAL| DBZ
+    DBZ -->|outbox router| T_REQ
+    DBZ -->|outbox router| T_UPD
 
     T_REQ --> SIG
     DB -->|후보 조회| SIG
+    SIG --> DB
+    SIG --> OUTBOX
     SIG <--> RETRY
     SIG -->|반복 실패| T_DLQ
-    SIG --> T_UPD --> SINK --> API
+    T_UPD --> SINK --> API
 ```
 
 ### 16.1 원칙
@@ -809,7 +904,9 @@ flowchart LR
 
 | 구성 요소 | 실행 위치 | 이유 |
 | --- | --- | --- |
-| price state job | Flink | 체결 시각(이벤트 시간) 기준으로 종목별 상태를 유지해야 합니다. 입력이 기존 Flink detector와 같은 `stock-ticks`입니다 |
+| price_move_state_job | Flink | 체결 시각(이벤트 시간) 기준으로 종목별 상태를 유지해야 합니다. 입력이 기존 Flink detector와 같은 `stock-ticks`입니다. 결과는 `price-moves` 토픽으로만 발행합니다 |
+| move sink | Python consumer | `price-moves`를 받아 move를 저장하고, 같은 트랜잭션에서 outbox에 생성 요청을 씁니다 |
+| target price processor | Python consumer | `opinion-raw`를 받아 증권사별 직전 목표가와 비교합니다 |
 | document processor | Python consumer | 주된 작업이 LLM 호출입니다 |
 | flow processor | Python consumer | 값이 하루 5회 정도 들어오고, 유지할 상태가 작습니다 |
 | signal worker | Python consumer | 주된 작업은 수 초씩 걸리는 LLM 호출, 재시도와 백오프, DB 조회입니다. 시그널은 상태 전환이나 새 후보가 생길 때마다 한 번씩 생성합니다 |
@@ -820,18 +917,28 @@ flowchart LR
 
 ### 16.3 producer
 
-- news poller와 flow poller는 Kafka로 직접 발행합니다. 장중에 계속 들어오는 데이터이기 때문입니다.
+- news poller, flow poller, opinion poller는 Kafka로 직접 발행합니다. 장중에 계속 들어오는 데이터이기 때문입니다.
 - 두 poller는 같은 프로세스에서 실행합니다. 같은 앱키의 초당 호출 제한을 공유하기 때문입니다.
-- report CronJob은 리포트를 DB에 적재한 뒤 `signal-requests`에 발행합니다. 원본 토픽은 두지 않습니다.
+- 목표가는 KIS 투자의견 poller에서 받습니다. 리포트 테이블의 CDC(`report-changes`)는 이번 범위에서 쓰지 않습니다.
 
-### 16.4 CDC를 쓰지 않는 이유
+### 16.4 outbox와 CDC
 
-- DB 적재와 Kafka 발행을 따로 하면, 한쪽만 성공하는 이중 쓰기 문제가 생길 수 있습니다. 보통 이 문제는 outbox와 CDC(Debezium)로 막습니다.
-- 이 설계에서 요청 메시지에는 종목과 요청 사유만 담고, 데이터는 DB에서 읽습니다. 그래서 발행이 실패해도 리포트는 DB에 남아 있습니다.
-- 발행이 실패한 리포트는 그 종목의 다음 요청(새 기사, 상태 전환, 장 마감 재생성) 때 후보로 읽힙니다. 이 경우에는 리포트가 시그널에 늦게 반영됩니다.
-- 현재 운영 환경에는 Debezium과 outbox가 배포되어 있지 않습니다. 배포와 운영 비용에 비해 얻는 것이 작아서 CDC를 쓰지 않습니다. 발행이 실패하면 재시도합니다.
+이 설계는 CDC(Debezium)가 있다고 가정합니다. CDC 도입은 23번 문서에서 별도 작업으로 진행합니다.
 
-### 16.5 시장 범위 사건의 전파
+- 가공 단계는 Kafka로 직접 발행하지 않습니다. 데이터 테이블과 outbox 테이블에 같은 트랜잭션으로 씁니다. 그래서 DB 적재와 발행 중 한쪽만 성공하는 이중 쓰기 문제가 생기지 않습니다.
+- Debezium이 WAL에서 outbox 행을 읽고, Outbox Event Router로 `signal-requests`와 `signal-updates`에 발행합니다.
+- Flink는 DB에 쓰지 않고 `price-moves` 토픽으로만 발행합니다. move 저장과 생성 요청은 move sink가 한 트랜잭션으로 처리합니다. 그래서 Flink에도 이중 쓰기가 없습니다.
+- 발행은 최소 한 번입니다. 같은 요청이 두 번 와도 signal worker는 최신 상태로 다시 판단할 뿐이라 결과가 같습니다.
+
+### 16.5 23번 문서와의 접점
+
+| 접점 | 22번(이 문서)이 지킬 것 | 23번이 제공할 것 |
+| --- | --- | --- |
+| outbox 테이블 | Debezium Outbox Event Router 형식으로 만듭니다 | Connector와 라우팅 설정 |
+
+- 23번이 끝나기 전에 개발할 때는, outbox 테이블을 읽어 같은 형식의 메시지를 Kafka로 보내는 임시 relay를 씁니다. 쓰는 쪽 코드는 바꾸지 않습니다 (18.6).
+
+### 16.6 시장 범위 사건의 전파
 
 - 시장 범위 사건이 들어오면, 현재 move가 열려 있는 종목에만 요청을 보냅니다.
 - move가 없는 종목에는 요청을 보내지 않습니다. 사건은 DB에 남아 있습니다.
@@ -856,7 +963,7 @@ flowchart LR
 | 4 | 외부 기업과 기관(CXMT, 연준 등)을 어떻게 저장하는가? | `entity_org`로 저장하고, 이벤트와의 역할은 `actor`로 둡니다 | 4.1, 7.4 |
 | 5 | 엔티티 사이의 관계를 저장하는가? | `entity_relation`에 저장합니다. 관계 유형은 `relation_type_def`에 등록된 값만 씁니다 | 5 |
 | 6 | 섹터 소속은 컬럼인가, 관계인가? | 관계(`BELONGS_TO`)입니다 | 5.1 |
-| 7 | 섹터 분류는 어디서 가져오는가? | 41종목을 수동으로 분류합니다. KIS 지수업종 분류는 모의투자 키로 조회되지 않습니다 | 4.1, 5.4 |
+| 7 | 섹터 분류는 어디서 가져오는가? | 40종목을 수동으로 분류합니다. KIS 지수업종 분류는 모의투자 키로 조회되지 않습니다 | 4.1, 5.4 |
 | 8 | 이번 범위의 관계 데이터는 무엇인가? | 수동 시드입니다. 기사에서 LLM으로 관계를 추출하지 않습니다 | 5.4 |
 
 ### 17.3 문서
@@ -907,10 +1014,12 @@ flowchart LR
 | 30 | `DAILY`는 언제 만드는가? | 전일 KRX 종가 대비 `|1%|`를 처음 넘을 때입니다. (종목, 거래일)당 1개입니다 | 10 |
 | 31 | 가격 상태는 어떻게 나누는가? | `±1%`에서 들어가고 `±0.5%`에서 나옵니다. 중립 상태에서는 중립 풀의 원인을 보여 줍니다 | 10.1, 12.1 |
 | 32 | 등락률이 기준 아래로 돌아오면 문구를 숨기는가? | 숨기지 않습니다. 방향이 바뀌면 즉시 `HIDDEN`을 발행하고 시그널을 다시 생성합니다 | 10.1 |
-| 33 | 시장 요인과 종목 요인을 어떻게 나누는가? | 미국 요인, 자기 자신을 뺀 업종 바스켓 요인, 고유 요인의 3층으로 나눕니다 | 11 |
-| 34 | 베타는 어떻게 추정하는가? | 처음에는 베타 1(`UNIT`)입니다. 다음 단계에서 statsmodels `RollingOLS`를 씁니다 | 11.1 |
-| 35 | 종목마다 비교 기준을 설정하는가? | 설정하지 않습니다. 바스켓은 `BELONGS_TO`에서, 미국 지표는 섹터의 `PROXIED_BY`에서 계산합니다. 바스켓이 작으면 상위 분류를 씁니다 | 11 |
-| 36 | 미국 지표는 무엇인가? | 섹터별 미국 ETF입니다(예: SOXX). KIS 해외주식 시세로 받습니다. 실전투자 키는 받지 않습니다 | 11 |
+| 33 | 시장 요인과 종목 요인을 어떻게 나누는가? | 미국, 시장, 업종, 고유의 4층으로 나눕니다. 층마다 앞 층으로 설명되는 부분을 먼저 뺍니다. 시장과 업종에서는 자기 자신을 뺍니다 | 11.1, 11.2 |
+| 34 | 베타는 어떻게 추정하는가? | statsmodels `RollingOLS`, 창 120거래일, 최소 60일입니다. 업종 베타는 0 이상으로 제한합니다. 표본이 부족하면 베타 1로 순서대로 뺍니다 | 11.4 |
+| 35 | 종목마다 비교 기준을 설정하는가? | 설정하지 않습니다. 업종은 KOSPI 업종, 비중은 KIS 시가총액 순위 API로 정합니다. 업종 분류는 데이터로 자동 선택하지 않고 사람이 고칩니다 | 11.2, 11.5 |
+| 36 | 미국 지표는 무엇인가? | 직전 미국 정규장의 SPY입니다. 설명력이 늘어나는 섹터(반도체, 소재)만 섹터 ETF를 더합니다. KIS 해외주식 시세로 받습니다 | 11.3 |
+| 62 | 그룹을 분해의 층으로 넣는가? | 넣지 않습니다. 바스켓이 작아 계열사의 개별 뉴스가 섞입니다. 그룹 정보는 `SUBSIDIARY_OF`로 시그널 후보를 넓히는 데 씁니다 | 11.6 |
+| 63 | 시그널 생성에 분해 결과를 어떻게 넘기는가? | 네 층의 기여를 모두 넘깁니다. `dominant_layer`는 대체 문구를 고를 때 씁니다 | 11.7 |
 
 ### 17.8 시그널 생성
 
@@ -941,10 +1050,10 @@ flowchart LR
 | 49 | poller는 Kafka로 직접 발행하는가? | 직접 발행합니다 | 16.3 |
 | 50 | 시그널 생성 요청은 어떻게 받는가? | `signal-requests` 하나로 모읍니다. key는 종목입니다 | 16.1 |
 | 51 | 요청 메시지에 후보 데이터를 담는가? | 담지 않습니다. signal worker가 DB에서 후보를 읽습니다 | 16.1 |
-| 52 | 시장 범위 사건은 어느 종목에 전파하는가? | move가 열려 있는 종목에만 요청을 보냅니다. 나중에 열리는 종목은 DB에서 후보로 읽습니다 | 16.5 |
-| 53 | 리포트 발행에 CDC를 쓰는가? | 쓰지 않습니다. DB 적재 뒤 발행하고, 실패하면 재시도합니다 | 16.4 |
-| 54 | price state job은 어디에서 실행하는가? | Flink입니다. 체결 시각 기준으로 종목별 상태를 유지합니다 | 10, 16.2 |
-| 55 | signal worker와 document, flow processor는 어디에서 실행하는가? | Python consumer입니다. 이벤트 시간 기준은 데이터 필드로 지킵니다 | 16.2 |
+| 52 | 시장 범위 사건은 어느 종목에 전파하는가? | move가 열려 있는 종목에만 요청을 보냅니다. 나중에 열리는 종목은 DB에서 후보로 읽습니다 | 16.6 |
+| 53 | DB 적재와 Kafka 발행의 이중 쓰기를 어떻게 막는가? | outbox와 CDC(Debezium)입니다. CDC 도입은 23번 문서에서 별도로 진행합니다. 비고: 처음에는 CDC 없이 커밋 뒤 발행하고 재시도하는 안이었습니다 | 16.4, 16.5 |
+| 54 | price_move_state_job은 어디에서 실행하는가? | Flink입니다. 체결 시각 기준으로 종목별 상태를 유지하고, 결과는 `price-moves` 토픽으로만 발행합니다 | 10, 16.2 |
+| 55 | 나머지 구성 요소는 어디에서 실행하는가? | Python consumer입니다(document, flow, target price processor, move sink, signal worker, serving sink). 이벤트 시간 기준은 데이터 필드로 지킵니다 | 16.2 |
 
 ### 17.11 미정
 
@@ -956,3 +1065,156 @@ flowchart LR
 | 59 | NXT 거래 시간 | 확인 필요 | 13 |
 | 60 | OpenRouter 모델 fallback 기능 | 확인 필요 | 13 |
 | 61 | 후보 상한 | 미정 (제안: 최근 순 50건) | 13 |
+| 64 | 장중 분해에 쓸 지수 값의 수집 방법 | 미정 | 13 |
+
+### 17.12 구현 구성
+
+| 번호 | 질문 | 결정 | 절 |
+| --- | --- | --- | --- |
+| 65 | 무엇부터 구현하는가? | 뉴스, DAILY move, 시그널 생성, REST 조회로 이어지는 최소 경로를 먼저 만듭니다 | 18.1 |
+| 66 | 새 코드는 어디에 두는가? | poller는 `kis_ingestion/poller`, move 상태는 `stream_detection_java`, 나머지는 새 서비스 `ai_signal`, 서빙은 `alert_service`입니다 | 18.2 |
+| 67 | 테이블을 어느 스키마에 두는가? | reference, bronze, silver, gold, serving, outbox로 나눕니다. 마이그레이션은 `ai_signal`의 Alembic이 맡습니다 | 18.3 |
+| 68 | outbox의 payload 형식은 무엇인가? | Schema Registry로 직렬화한 Avro 바이트입니다 | 18.4 |
+| 69 | 목표가 이벤트의 원천은 무엇인가? | KIS 투자의견 API입니다. 본문이 있는 리포트는 나중에 설명 근거 문서로 붙입니다 | 7.3, 16.3 |
+| 70 | 프롬프트를 어떻게 관리하는가? | repo의 버전별 마크다운 파일입니다. 출력 형식은 pydantic 모델에서 생성합니다 | 18.5 |
+| 71 | MCP는 어디에 두고 에이전트는 어떻게 쓰는가? | `alert_service`의 `/mcp`입니다. MarketAnalystAgent도 `MCPClient`로 같은 도구를 씁니다 | 18.7 |
+| 72 | LLM 호출 수를 어떻게 제한하는가? | `signal_enabled` 종목만 LLM 단계를 실행합니다. 나머지 단계는 40종목 전체입니다 | 18.8 |
+
+## 18. 구현 구성 [합의]
+
+이 절은 구현을 시작하기 전에 합의한 파일 구조, 위치, 범위를 기록합니다.
+
+### 18.1 범위와 순서
+
+- 구현 범위는 이 문서의 설계 전체입니다.
+- 끝까지 이어지는 최소 경로를 먼저 만듭니다. 그다음 나머지 구성 요소를 붙입니다. 포트폴리오에 실제로 동작하는 결과를 넣기 위해서입니다.
+
+1차 최소 경로는 다음과 같습니다.
+
+```
+news poller
+  : news-raw
+document processor (LLM 판정)
+  : silver 문서와 판정
+price_move_state_job (DAILY)
+  : price-moves, move sink
+signal worker (LLM 생성, fallback)
+  : gold signal, serving 테이블
+REST 조회
+```
+
+| 항목 | 1차 | 이후 |
+| --- | --- | --- |
+| 수집 | 뉴스, 40종목 | 수급, 투자의견, 지수와 해외 ETF |
+| move | `DAILY` | `INTRADAY_SPIKE` |
+| 발행 | outbox 테이블과 임시 relay | Debezium |
+| fallback | 주 모델, 보조 모델, `HIDDEN` | 수급 문구, 분해 문구 추가 |
+| 재시도 | 없음 | `signal_retry` |
+| 서빙 | REST | MCP, MarketAnalystAgent 연결 |
+
+1차 다음의 순서는 다음과 같습니다.
+
+1. 수급, 투자의견, 지수와 해외 ETF poller
+2. 23번 CDC 문서, Debezium, 임시 relay 교체
+3. `INTRADAY_SPIKE`
+4. `signal_retry`와 재시도
+5. MCP와 MarketAnalystAgent 연결
+
+### 18.2 코드 위치
+
+| 구성 요소 | 위치 | 실행 |
+| --- | --- | --- |
+| news, flow, opinion poller | `services/kis_ingestion/src/kis_ingestion/poller/` (`news.py`, `flow.py`, `opinion.py`, `rate_limiter.py`) | `python -m kis_ingestion.poller` |
+| price_move_state_job | `services/stream_detection_java` (`PriceMoveStateJob`) | Flink |
+| 가공, 시그널, 서빙 sink, relay | `services/ai_signal` | MVP에서는 `python -m ai_signal all`로 한 프로세스에서 실행합니다 |
+| REST, MCP | `services/alert_service` | 기존 FastAPI 앱 |
+
+- 새 서비스 이름은 `ai_signal`입니다. `signal`은 Python 표준 라이브러리 모듈과 이름이 겹칩니다.
+- poller는 기존 `token_manager.py`, `producer.py`, `market_session.py`를 재사용합니다.
+- 세 poller는 같은 프로세스에서 실행하고 하나의 rate limiter를 공유합니다. 같은 앱키의 초당 호출 제한을 함께 쓰기 때문입니다.
+
+### 18.3 DB 스키마 배치
+
+| 스키마 | 테이블 |
+| --- | --- |
+| `reference` | 엔티티, 별칭, 관계, 관계 유형 정의 |
+| `bronze` | `news_title_raw`, `flow_raw`, `opinion_raw` |
+| `silver` | 문서와 서브타입, 문서와 엔티티 연결, 문서 판정, 수급 관측, 수급 기준값 |
+| `gold` | 이벤트와 서브타입, move, `symbol_beta`, 시그널, `signal_retry` |
+| `serving` | `symbol_signal`, `symbol_signal_cause` |
+| `outbox` | `events` |
+
+- 마이그레이션은 `services/ai_signal/alembic`이 맡습니다. 버전 테이블 이름은 `ai_signal_alembic_version`입니다. 다른 서비스의 Alembic과 섞이지 않게 하기 위해서입니다.
+- `outbox` 스키마는 이 설계에서 새로 만듭니다. 11번과 15번 문서의 `integration.outbox_events`를 `outbox.events`로 옮겼습니다.
+- LLM을 호출할 종목은 `reference`의 종목 테이블에 `signal_enabled` 플래그로 표시합니다. 18.8절을 참고합니다.
+
+### 18.4 Kafka 토픽과 Avro
+
+| 토픽 | key | 발행 | 소비 |
+| --- | --- | --- | --- |
+| `news-raw` | 종목 | news poller | document processor |
+| `flow-raw` | 종목 | flow poller | flow processor |
+| `opinion-raw` | 종목 | opinion poller | target price processor |
+| `price-moves` | 종목 | price_move_state_job | move sink |
+| `signal-requests` | 종목 | outbox | signal worker |
+| `signal-updates` | 종목 | outbox | serving sink |
+| `signal-dlq` | 종목 | signal worker | 사람이 확인 |
+
+- 스키마 파일은 기존 관례대로 `schemas/<토픽>.avsc`에 두고, `scripts/register_schemas.py`로 등록합니다. 호환성은 BACKWARD입니다.
+- 네임스페이스는 모두 `com.invest_view.events`입니다. `stock-ticks`의 기존 네임스페이스는 바꾸지 않습니다. 기존 소비자가 깨지기 때문입니다.
+- outbox의 `payload`는 Schema Registry로 직렬화한 Avro 바이트(bytea)입니다. 그래서 outbox를 거쳐 나오는 토픽도 다른 토픽과 같은 data contract를 지킵니다.
+- `signal-dlq`는 `signal-requests`와 같은 스키마를 씁니다. 오류 정보는 Kafka 헤더에 담습니다.
+- Debezium에 스키마 자동 등록을 허용하는 예외는 리포트 테이블 CDC 때문에 정했습니다. 목표가를 KIS 투자의견으로 받기로 해서 이번 범위에서는 필요하지 않습니다.
+
+### 18.5 프롬프트
+
+```
+services/ai_signal/src/ai_signal/prompts/
+  document_judgement/
+    v1.md
+  signal_generation/
+    v1.md
+  registry.py
+```
+
+- 프롬프트 본문은 repo의 마크다운 파일로 관리합니다. 코드 리뷰와 git 이력으로 변경을 추적하기 위해서입니다.
+- 고칠 때는 기존 파일을 바꾸지 않고 새 버전 파일을 만듭니다. 이전 결과를 재현하고 두 버전을 비교하기 위해서입니다.
+- 현재 버전은 환경 변수로 고릅니다. 예: `AI_SIGNAL_PROMPT_SIGNAL_GENERATION=v2`
+- 결과 테이블의 `prompt_version`에 `signal_generation/v1`처럼 기록합니다.
+- 응답 형식은 pydantic 모델로 정의하고, JSON schema는 그 모델에서 생성합니다. 같은 모델로 응답을 다시 검증합니다. 보조 모델이 JSON 모드만 지원하기 때문입니다.
+- Prompty와 Langfuse는 쓰지 않습니다. 모델 선택은 fallback 코드가 하고, 기록은 결과 테이블에 남기기 때문입니다.
+
+### 18.6 임시 relay
+
+- 23번 문서의 Debezium이 준비되기 전에는 `ai_signal` 안의 relay가 `outbox.events`를 읽어 Kafka로 보냅니다.
+- 쓰는 쪽은 처음부터 outbox 테이블에 씁니다. 그래서 Debezium으로 바꿀 때 쓰는 쪽 코드는 바뀌지 않습니다.
+- relay가 보내는 메시지의 토픽, key, 헤더는 Debezium Outbox Event Router의 결과와 같게 만듭니다.
+
+### 18.7 서빙
+
+| 형태 | 위치 |
+| --- | --- |
+| REST | `alert_service`의 FastAPI 라우트 |
+| MCP | 같은 앱의 `/mcp` 경로. MCP Python SDK의 `FastMCP`를 붙입니다 |
+| 조회 로직 | `signal_query.py` 하나에 두고 REST와 MCP가 같은 함수를 부릅니다 |
+
+- 서빙은 `serving` 스키마만 읽습니다.
+- MCP 도구는 현재 시그널 조회와 날짜별 버전 이력 조회 두 개로 시작합니다. 경로와 도구 이름은 구현할 때 15.3절과 맞춰 정합니다.
+- MarketAnalystAgent는 Strands `MCPClient`로 같은 앱의 `/mcp`에 접속해서 도구를 받습니다. 그래서 외부 MCP 클라이언트와 내부 에이전트가 같은 도구 정의를 씁니다. 연결은 앱이 시작할 때 한 번 엽니다.
+- 붙인 MCP 앱의 lifespan은 실행되지 않습니다. 그래서 FastAPI 앱의 lifespan에서 `session_manager.run()`을 실행합니다.
+- MVP에서는 인증을 두지 않습니다. 읽기 전용이고, 로컬 kind와 Tailscale 안에서만 열기 때문입니다.
+- 기존 MarketAnalystAgent의 도구와 `prompts.py`는 이번에 옮기지 않습니다.
+
+### 18.8 LLM 호출 제한
+
+- OpenRouter 키는 무료 등급이고, 무료 모델을 하루 50회까지 부를 수 있습니다.
+- 수집, 수익률 분해, move 생성은 처음부터 40종목 전체로 실행합니다. LLM을 부르지 않는 단계이기 때문입니다.
+- 문서 판정과 시그널 생성은 `signal_enabled`인 종목만 실행합니다. 처음에는 SK하이닉스와 삼성전자입니다. 종목을 늘릴 때는 플래그만 바꿉니다.
+- 주 모델은 추론 토큰을 씁니다. 시험 호출에서 추론 토큰이 `max_tokens`를 모두 써서 응답 본문이 비었습니다. 그래서 추론 토큰 한도를 따로 설정합니다.
+
+### 18.9 환경과 작업 방식
+
+- 개발과 검증은 로컬 kind에서 합니다. 운영 k3s 배포는 기동할 때 운영 장애를 함께 확인하고 진행합니다.
+- 단계마다 이슈 하나, 브랜치 하나, PR 하나로 진행합니다. 브랜치 이름은 기존 관례(`feat/...`, `docs/...`)를 따르고, 이슈에는 `ai-signal` 라벨을 붙입니다.
+- 커밋 메시지는 기존 관례(Conventional Commits, 영어, scope 포함)를 따릅니다.
+- PR 본문은 한국어로 쓰고, 올리기 전에 확인을 받습니다. 각 PR에는 테스트를 포함합니다.
