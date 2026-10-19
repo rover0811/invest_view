@@ -18,7 +18,7 @@ created: 2026-06-02
 
 - **FR-07**: 비실시간 외부 소스는 Airflow에서 PostgreSQL로 직접 적재하고, 사용자 알림이 필요한 경우 outbox에 기록해야 한다.
 - **FR-08**: Debezium은 outbox를 CDC하여 `enrichment-events`를 Kafka에 발행해야 한다.
-- **Outbox Pattern**: 비실시간 데이터 적재와 이벤트 발행 간의 원자성(Atomicity)을 보장하기 위해 `integration.outbox_events` 테이블을 활용한다.
+- **Outbox Pattern**: 비실시간 데이터 적재와 이벤트 발행 간의 원자성(Atomicity)을 보장하기 위해 `outbox.events` 테이블을 활용한다.
 - **Topic Ownership**: `enrichment-events` 토픽의 Producer는 Debezium(Kafka Connect)이며, Primary Consumer는 별도의 bridge consumer다.
 - **WAL Level**: CDC 동작을 위해 PostgreSQL의 `wal_level`은 `logical`로 설정되어야 한다. (→ [[event-driven-stock-pipeline]])
 
@@ -28,7 +28,7 @@ created: 2026-06-02
 
 - **Airflow Orchestration**: 비실시간 외부 소스 데이터를 PostgreSQL에 적재하는 DAG 설계
 - **Data Loading**: `silver.report_artifacts` 테이블에 enrichment 결과물 적재
-- **Outbox Logging**: 사용자 알림이 필요한 시점에 `integration.outbox_events` 기록
+- **Outbox Logging**: 사용자 알림이 필요한 시점에 `outbox.events` 기록
 - **Debezium Source Connector**: PostgreSQL WAL을 읽어 `enrichment-events` 토픽으로 발행
 - **Kafka Topic Contract**: `enrichment-events` 토픽의 Avro 스키마 정의
 - **Bridge Consumer**: `enrichment-events`를 소비하여 `serving.notification_events`에 알림 상태 기록
@@ -61,7 +61,7 @@ Batch Enrichment의 책임은 **비실시간 외부 데이터를 수집하여 DB
 
 - **Orchestrate**: Airflow를 통해 주기적인 데이터 수집 및 가공 워크플로우 관리
 - **Load**: 수집된 데이터를 `silver.report_artifacts` 등 도메인 테이블에 Upsert
-- **Outbox-write**: 데이터 적재와 동일한 트랜잭션 내에서 `integration.outbox_events`에 이벤트 기록
+- **Outbox-write**: 데이터 적재와 동일한 트랜잭션 내에서 `outbox.events`에 이벤트 기록
 - **CDC-publish**: Debezium을 통해 Outbox 이벤트를 `enrichment-events` 토픽으로 발행
 - **Bridge-consume**: 발행된 이벤트를 소비하여 서빙 레이어의 알림 테이블(`serving.notification_events`)에 반영
 
@@ -76,7 +76,7 @@ flowchart TD
     subgraph PostgreSQL
         direction TB
         SA[silver.report_artifacts]
-        OE[integration.outbox_events]
+        OE[outbox.events]
     end
 
     subgraph Kafka_Connect
@@ -108,7 +108,7 @@ flowchart TD
 | Component | Role |
 | --- | --- |
 | `Enrichment DAGs` | 비실시간 외부 소스로부터 데이터를 수집하여 `silver` 스키마에 적재하고 알림 대상을 Outbox에 기록 |
-| `integration.outbox_events` | CDC 대상이 되는 이벤트 로그 테이블. 비즈니스 데이터와 원자적 트랜잭션 보장 |
+| `outbox.events` | CDC 대상이 되는 이벤트 로그 테이블. 비즈니스 데이터와 원자적 트랜잭션 보장 |
 | `Debezium Source` | PostgreSQL의 Logical Replication Slot을 점유하여 Outbox 테이블의 변경분을 Kafka로 전송 |
 | `enrichment-events` | 배치 enrichment 완료 및 알림 트리거를 담은 Avro 기반 Kafka 토픽 |
 | `BatchNotificationBridge` | `enrichment-events`를 소비하여 `alert_service`가 인지할 수 있는 형태로 알림 상태를 DB에 기록하는 전용 컨슈머 |
@@ -120,7 +120,7 @@ flowchart TD
 1. Airflow DAG가 스케줄에 따라 기동된다.
 2. 외부 소스 수집기(Black-box)를 호출하여 최신 리포트 또는 지표 데이터를 가져온다.
 3. `silver.report_artifacts` 테이블에 데이터를 Upsert 한다.
-4. 사용자 알림이 필요한 항목(예: 신규 리포트 도착)에 대해 `integration.outbox_events`에 행을 추가한다.
+4. 사용자 알림이 필요한 항목(예: 신규 리포트 도착)에 대해 `outbox.events`에 행을 추가한다.
 5. 위 3, 4번 과정은 단일 DB 트랜잭션으로 묶여 실행된다.
 
 ### 5-2. Outbox → CDC → publish flow
@@ -168,7 +168,7 @@ config:
   database.password: ${file:/secrets/postgres:password}
   database.dbname: invest_view
   database.server.name: dbserver1
-  table.include.list: integration.outbox_events
+  table.include.list: outbox.events
   plugin.name: pgoutput
   slot.name: debezium_outbox_slot
   transforms: outbox
@@ -198,8 +198,8 @@ config:
 
 ```mermaid
 erDiagram
-    silver_report_artifacts ||--o{ integration_outbox_events : emits
-    integration_outbox_events ||--o{ serving_notification_events : triggers
+    silver_report_artifacts ||--o{ outbox_events : emits
+    outbox_events ||--o{ serving_notification_events : triggers
     
     silver_report_artifacts {
         uuid report_id PK
@@ -209,7 +209,7 @@ erDiagram
         text summary_ref
         timestamptz created_at
     }
-    integration_outbox_events {
+    outbox_events {
         uuid outbox_event_id PK
         text aggregate_type
         text aggregate_id
@@ -236,7 +236,7 @@ erDiagram
 | `summary_ref` | TEXT | NOT NULL |
 | `created_at` | TIMESTAMPTZ | NOT NULL, DEFAULT now() |
 
-### Table: `integration.outbox_events`
+### Table: `outbox.events`
 | Column | Type | Constraints |
 | --- | --- | --- |
 | `outbox_event_id` | UUID | PRIMARY KEY |
@@ -269,7 +269,7 @@ erDiagram
 | D2 | 결정 사유 | v1의 핵심 가치는 알림 파이프라인이며, 전체 데이터 동기화는 복잡도 대비 효용이 낮음. |
 | D3 | Bridge Consumer 필요성 | `alert_service`가 직접 Kafka를 읽는 대신 전용 Bridge를 두어 서빙 레이어의 SRP를 유지한다. |
 | D4 | Outbox 스키마 표준 | Debezium Outbox Event Router SMT가 요구하는 표준 필드 구성을 따른다. |
-| D5 | 데이터 보존 주기 | `outbox_events`는 CDC 완료 후 일정 기간(예: 7일) 뒤 Airflow Cleanup DAG로 삭제한다. |
+| D5 | 데이터 보존 주기 | `outbox.events`는 CDC 완료 후 일정 기간(예: 7일) 뒤 Airflow Cleanup DAG로 삭제한다. |
 
 ## 12. Remaining open questions
 

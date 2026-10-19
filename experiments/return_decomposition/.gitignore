@@ -1,0 +1,7 @@
+.cache/
+data/
+.venv/
+__pycache__/
+figures/*
+!figures/3_method_summary.png
+!figures/5_cases.png
