@@ -1,0 +1,17 @@
+{
+  "namespace": "com.invest_view.events",
+  "type": "record",
+  "name": "OpinionRaw",
+  "doc": "Raw broker opinion contract reserved for the second phase",
+  "fields": [
+    {"name": "raw_id", "type": "string", "doc": "Deterministic broker opinion identity"},
+    {"name": "symbol", "type": "string"},
+    {"name": "broker", "type": "string"},
+    {"name": "opinion_date", "type": {"type": "int", "logicalType": "date"}},
+    {"name": "opinion", "type": ["null", "string"], "default": null},
+    {"name": "previous_opinion", "type": ["null", "string"], "default": null},
+    {"name": "target_price", "type": ["null", "long"], "default": null},
+    {"name": "previous_target_price", "type": ["null", "long"], "default": null},
+    {"name": "received_at", "type": {"type": "long", "logicalType": "timestamp-millis"}}
+  ]
+}

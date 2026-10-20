@@ -150,7 +150,8 @@ schemas:
 	   sleep 4; \
 	   uv run --project services/kis_ingestion python scripts/register_schemas.py --registry-url http://localhost:18081 --subject stock-ticks-value --schema-file schemas/stock-ticks.avsc; \
 	   uv run --project services/kis_ingestion python scripts/register_schemas.py --registry-url http://localhost:18081 --subject stock-alerts-value --schema-file schemas/stock-alerts.avsc; \
-	   uv run --project services/kis_ingestion python scripts/register_schemas.py --registry-url http://localhost:18081 --subject stock-patterns-value --schema-file schemas/stock-patterns.avsc )
+	   uv run --project services/kis_ingestion python scripts/register_schemas.py --registry-url http://localhost:18081 --subject stock-patterns-value --schema-file schemas/stock-patterns.avsc; \
+	   uv run --project services/kis_ingestion python scripts/register_schemas.py --registry-url http://localhost:18081 --all )
 
 wait-kafka:
 	kubectl -n $(KAFKA_NS) wait kafka/invest-kafka --for=condition=Ready --timeout=600s
