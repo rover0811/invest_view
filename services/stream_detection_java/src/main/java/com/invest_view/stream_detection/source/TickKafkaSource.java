@@ -32,10 +32,14 @@ public final class TickKafkaSource {
     }
 
     public static KafkaSource<StockTick> build(String bootstrap, String schemaRegistryUrl) {
+        return build(bootstrap, schemaRegistryUrl, GROUP_ID);
+    }
+
+    public static KafkaSource<StockTick> build(String bootstrap, String schemaRegistryUrl, String groupId) {
         return KafkaSource.<StockTick>builder()
                 .setBootstrapServers(bootstrap)
                 .setTopics(TOPIC)
-                .setGroupId(GROUP_ID)
+                .setGroupId(groupId)
                 .setStartingOffsets(OffsetsInitializer.latest())
                 .setValueOnlyDeserializer(
                         ConfluentRegistryAvroDeserializationSchema.forSpecific(
