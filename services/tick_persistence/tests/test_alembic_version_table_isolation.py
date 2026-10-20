@@ -6,6 +6,7 @@ from pathlib import Path
 import pytest
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import create_async_engine
 from testcontainers.postgres import PostgresContainer
@@ -18,7 +19,6 @@ _EXPECTED_OBJECTS: tuple[str, ...] = (
     "serving.symbol_signal_timeline",
     "serving.symbol_daily_ohlc",
 )
-_HEAD_REVISION = "0007_tick_quarantine"
 
 
 def _asyncpg_url(container: PostgresContainer) -> str:
@@ -49,7 +49,9 @@ async def _seed_shared_db(url: str) -> None:
             )
         )
         await conn.execute(
-            text("INSERT INTO public.alembic_version (version_num) VALUES ('0001_initial')")
+            text(
+                "INSERT INTO public.alembic_version (version_num) VALUES ('0001_initial')"
+            )
         )
         await conn.execute(text("CREATE SCHEMA IF NOT EXISTS alert_service"))
         await conn.execute(
@@ -103,6 +105,7 @@ def test_shared_public_alembic_version_does_not_skip_migration(
 ) -> None:
     service_dir = Path(__file__).resolve().parents[1]
     cfg = _alembic_config(service_dir)
+    head_revision = ScriptDirectory.from_config(cfg).get_current_head()
 
     with PostgresContainer("postgres:16-alpine") as container:
         url = _asyncpg_url(container)
@@ -118,8 +121,8 @@ def test_shared_public_alembic_version_does_not_skip_migration(
             "tick_persistence migrations must run despite public.alembic_version=0001_initial; "
             f"missing objects: {set(_EXPECTED_OBJECTS) - present}"
         )
-        assert version == _HEAD_REVISION, (
-            "tick_persistence_alembic_version must record head, " f"got {version!r}"
+        assert version == head_revision, (
+            f"tick_persistence_alembic_version must record head, got {version!r}"
         )
 
         command.downgrade(cfg, "base")
