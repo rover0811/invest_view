@@ -324,6 +324,7 @@ document_judgement
   scope                           MARKET | SECTOR | SYMBOL
   fail_reason                     LISTING_ONLY | AD | NO_EVIDENCE | null
   decided_by, model_version, prompt_version, probability
+  llm_attempts                    JSONB  [{step, model, error, raw_content}, ...]
 ```
 
 - 기사마다 방향과 범위를 판정합니다. 같은 방향으로 판정된 후보를 모은 것을 방향 풀이라고 부릅니다.
@@ -335,6 +336,7 @@ document_judgement
 - 방향을 숫자로 저장하면, 기사와 가격의 방향이 일치하는지를 부호 비교 하나로 판정할 수 있습니다.
 - `fail_reason`이 있는 기사는 시그널 후보에서 제외합니다. 예: 시세 나열 기사, 광고 기사
 - 판정은 다시 계산할 수 있습니다. 다시 계산하면 `version`을 올립니다.
+- `llm_attempts`는 LLM 호출 이력을 감사 목적으로 저장합니다. migration 0004에서 추가합니다.
 
 ### 6.5 완전 중복 제거
 
@@ -615,7 +617,7 @@ symbol_beta
   - 가격 상태가 `POSITIVE`이면 `direction = 1`
   - 가격 상태가 `NEGATIVE`이면 `direction = -1`
   - 가격 상태가 `NEUTRAL`이면 `direction = 0`
-- 후보 범위는 전 거래일 KRX 종가 시각(15:30)부터 당일 마지막 거래 구간 종료(20:00)까지입니다.
+- 후보 범위는 전 거래일 KRX 종가 시각(15:30)부터 당일 마지막 거래 구간 종료(20:00)까지입니다. 전 거래일은 KIS 휴장일 API 대신 저장된 KOSPI 일봉 행으로 판단합니다. KOSPI 일봉 행이 있는 날이 거래일이고, move sink는 이 기준으로 `window_start`를 전 거래일 15:30 KST로 계산합니다. KIS 휴장일 API는 현재 앱키로 조회되지 않기 때문입니다.
 - `INTRADAY_SPIKE`의 후보 범위 끝은 급변 윈도우 끝에서 60분 뒤입니다.
 - 급변 뒤에 알려진 기사도 후보입니다. 이 경우 `timing = LAGGING`입니다.
 - `fail_reason`이 있는 기사는 제외합니다.
@@ -658,9 +660,13 @@ LLM은 한 번의 호출로 다음 작업을 합니다.
 ```
 signal
   move_id, version              PK
+  status                        SHOWN | HIDDEN | NO_CANDIDATE
+  move_version
+  input_hash
   headline_cause_rank
-  decided_by                    llm | flow_rule | decomposition
+  decided_by                    llm | flow_rule | decomposition  (SHOWN일 때만 필수, nullable)
   model_version, prompt_version, decided_at, probability
+  llm_attempts                  JSONB  [{step, model, error, raw_content}, ...]
 
 signal_cause
   move_id, version, rank        PK
@@ -673,9 +679,13 @@ signal_cause_source
   source_type                   DOCUMENT | EVENT
 ```
 
-- `version`은 시그널을 생성한 회차입니다. `move.version`과 같은 값입니다.
+- `version`은 같은 move 안에서 1씩 증가하는 카운터입니다. 하나의 move_version에서 새 기사 도착이나 재시도로 시그널이 여러 번 생성될 수 있기 때문입니다. 정렬 키는 `(move_version, version)`입니다.
+- `status`는 `SHOWN`, `HIDDEN`, `NO_CANDIDATE` 세 값을 가집니다. `HIDDEN`과 `NO_CANDIDATE`도 행으로 저장하여 version이 계속 증가하도록 합니다.
+- `decided_by`는 `SHOWN`일 때만 필수이고, 그 외에는 null입니다.
+- `input_hash`는 후보 입력의 해시입니다. 새 요청이 들어왔을 때 최신 시그널의 `input_hash`와 같으면 처리를 건너뜁니다.
+- `llm_attempts`는 LLM 호출 이력을 감사 목적으로 저장합니다. 각 원소는 `{step, model, error, raw_content}`입니다. migration 0004에서 추가합니다.
 - 이전 버전은 삭제하지 않습니다.
-- 서빙 테이블은 버전이 더 클 때만 갱신합니다.
+- 서빙 테이블은 `(move_version, version)`이 더 클 때만 갱신합니다.
 - `signal_cause_source`는 어떤 기사와 이벤트를 같은 원인으로 묶었는지 저장합니다. 나중에 오래 유지되는 사건 식별자를 만들 때 이 결과를 사용합니다.
 
 ### 12.4 처리 흐름과 실패 처리
@@ -735,9 +745,9 @@ signal_retry
 | 번호 | 질문 |
 | --- | --- |
 | 1 | 평가셋과 세부 지표는 무엇인가? (방향은 14절에 기록했습니다) |
-| 2 | 문서 판정을 기사마다 호출하는가, 여러 제목을 묶어서 호출하는가? |
+| 2 | 문서 판정을 기사마다 호출하는가, 여러 제목을 묶어서 호출하는가? 1차 경로는 기사마다 호출합니다. 배치 처리는 이후 과제로 남겨 둡니다 (결정 57 참고). |
 | 3 | 추정가집계의 회차별 갱신 시각은 언제인가? |
-| 4 | NXT 거래 시간과 후보 범위의 정확한 경계는 무엇인가? |
+| 4 | NXT 거래 시간과 후보 범위의 정확한 경계는 무엇인가? 1차 경로에서는 DAILY 상태에 KRX 틱만 사용합니다. NXT와 KRX는 005930 기준으로 같은 전일 종가(stck_sdpr)를 기준으로 삼는다는 것을 확인했습니다. 1차 범위에서는 해소된 것으로 봅니다 (결정 59 참고). |
 | 5 | OpenRouter의 모델 fallback 기능을 사용할 수 있는가? |
 | 6 | 후보 상한은 몇 건인가? |
 | 7 | 장중 수익률 분해에 쓸 지수와 해외 ETF 값은 어떻게 받는가? (지수 체결 WebSocket 또는 주기적 조회) |
@@ -778,10 +788,16 @@ AI 수익성 우려로 삼성전자 9.9% 하락
 
 ### 15.2 서빙 테이블
 
+migration 0003에서 `symbol_signal`에 컬럼을 추가하고, migration 0004에서 이력 테이블을 추가합니다.
+
 ```
 serving.symbol_signal
   symbol                PK
   move_id, version
+  move_version
+  move_window_end
+  generation_method     llm | flow_rule | decomposition
+  symbol_name
   status                SHOWN | HIDDEN | NO_CANDIDATE
   headline_label
   updated_at
@@ -790,28 +806,74 @@ serving.symbol_signal_cause
   symbol, rank          PK
   explanation
   source_count
+
+serving.symbol_signal_cause_source
+  symbol, rank, source_document_id   PK
+
+serving.symbol_signal_history
+  move_id, version      PK
+  move_version
+  move_window_end
+  generation_method
+  symbol_name
+  status
+  headline_label
+  updated_at
+
+serving.symbol_signal_history_cause
+  move_id, version, rank   PK
+  explanation
+  source_count
+
+serving.symbol_signal_history_cause_source
+  move_id, version, rank, source_document_id   PK
 ```
 
-- 이 테이블은 종목마다 현재 상태를 1행으로 저장합니다.
-- `version`이 더 클 때만 갱신합니다.
+- `symbol_signal`은 종목마다 현재 상태를 1행으로 저장합니다.
+- 같은 move의 업데이트는 `(move_version, version)`이 더 클 때만 갱신합니다. 다른 move의 업데이트는 `(move_window_end, move_id)`가 더 클 때만 현재 행을 교체합니다.
 - `status`가 `HIDDEN`이면 원인 목록을 비웁니다.
+- `symbol_signal_history`는 `(move_id, version)` 기준으로 모든 버전을 보존합니다. 이력 조회 API가 이 테이블을 읽습니다.
+- `symbol_signal_cause_source`와 `symbol_signal_history_cause_source`는 원인별 근거 문서 ID를 저장합니다.
 
 ### 15.3 API와 Agent 도구
 
 | 형태 | 내용 |
 | --- | --- |
-| API | `GET /stocks/{symbol}/signal`. 등락률은 실시간 시세에서 가져와 헤드라인 템플릿에 넣습니다 |
+| 현재 시그널 | `GET /api/stocks/{symbol}/signal`. 등락률은 `serving.symbol_snapshot`에서 가져와 헤드라인을 조립합니다 |
+| 이력 조회 | `GET /api/stocks/{symbol}/signal/history?date=YYYY-MM-DD`. `date`는 `move_window_end`의 KST 날짜입니다 |
 | Agent 도구 | MCP `why_moved(symbol)`. 같은 서빙 테이블을 읽고, 원인 3개와 근거 문서 ID를 반환합니다 |
+
+현재 시그널 응답에는 `headline_label`, 조립된 헤드라인 문자열, 원인 목록(각 원인에 `source_document_ids` 배열 포함)이 들어갑니다. 이력 조회 응답의 각 항목은 `headline`을 null로 반환합니다. 이력 시점의 등락률로 헤드라인을 조립하면 과거 버전을 잘못 설명할 수 있기 때문입니다.
 
 ### 15.4 문구 규칙
 
-이 규칙은 판단 기준 프롬프트에 넣습니다.
+헤드라인은 서빙 단계에서 코드로 조립합니다. LLM은 `label`만 생성하고, 조사와 등락률은 코드가 붙입니다.
 
-- `label`은 명사구로 씁니다. 예: "AI 수익성 우려"
-- 조사는 `label`의 마지막 글자로 고릅니다. 받침이 없거나 받침이 ㄹ이면 "로", 그 밖의 받침이면 "으로"를 붙입니다. 예: "외국인 매도세로", "업종 전반 상승으로"
-- 조사는 LLM이 쓰지 않습니다. 서빙 단계에서 코드로 붙입니다.
+**조립 규칙**
+
+- 상승 또는 하락: `{label}{조사} {symbol_name} {abs(rate, 소수점 1자리)}% {상승|하락}`
+- 보합(등락률이 소수점 1자리에서 0.0으로 반올림되는 경우): `{label}에도 {symbol_name} 보합`
+
+**조사 선택 규칙**
+
+`label`의 마지막 글자를 기준으로 조사를 고릅니다.
+
+- 받침이 없거나 받침이 ㄹ인 경우: "로"
+- 그 밖의 받침이 있는 경우: "으로"
+- 숫자로 끝나는 경우: 한국어 숫자 이름의 받침 규칙을 따릅니다. 예: 1(일, 받침 ㄹ)은 "로", 3(삼, 받침 ㅁ)은 "으로"
+- 라틴 문자나 그 밖의 문자로 끝나는 경우: "로"
+
+예: "외국인 매도세로", "업종 전반 상승으로", "AI 수익성 우려로"
+
+**등락률 출처**
+
+등락률은 `serving.symbol_snapshot`에서 가져옵니다. LLM은 등락률 숫자를 생성하지 않습니다.
+
+**`label` 작성 규칙**
+
+- 명사구로 씁니다. 예: "AI 수익성 우려"
+- 조사로 끝나지 않습니다. 조사는 코드가 붙입니다.
 - `explanation`은 해요체 1문장입니다. 배경, 원인, 종목에 대한 영향의 순서로 씁니다.
-- 등락률 숫자는 LLM이 쓰지 않습니다. 실시간 값을 템플릿에 넣습니다.
 
 ## 16. 메시지 흐름 [합의]
 
@@ -930,7 +992,28 @@ flowchart LR
 - Flink는 DB에 쓰지 않고 `price-moves` 토픽으로만 발행합니다. move 저장과 생성 요청은 move sink가 한 트랜잭션으로 처리합니다. 그래서 Flink에도 이중 쓰기가 없습니다.
 - 발행은 최소 한 번입니다. 같은 요청이 두 번 와도 signal worker는 최신 상태로 다시 판단할 뿐이라 결과가 같습니다.
 
-### 16.5 23번 문서와의 접점
+### 16.5 signal-updates 계약
+
+`signal-updates` 토픽의 메시지는 다음 필드를 포함합니다.
+
+| 필드 | 설명 |
+| --- | --- |
+| `move_id` | 급변 식별자 |
+| `move_version` | 급변 버전 |
+| `move_window_end` | 급변 윈도우 끝 시각 (이벤트 시간) |
+| `symbol_name` | 종목 이름 (헤드라인 조립에 사용) |
+| `version` | 시그널 버전 |
+| `status` | `SHOWN` \| `HIDDEN` \| `NO_CANDIDATE` |
+| `headline_label` | 헤드라인 원인 문구 |
+| `generation_method` | `llm`, `flow_rule`, `decomposition` 중 하나. `HIDDEN`과 `NO_CANDIDATE`이면 null입니다 |
+| `causes` | 원인 목록. 각 원소에 `source_document_ids` 배열 포함 |
+| `updated_at` | 처리 시각 (정렬에 사용하지 않음) |
+
+serving sink가 같은 move의 업데이트를 적용하는 조건은 `(move_version, version)`이 현재 저장된 값보다 클 때입니다. 다른 move의 업데이트는 `(move_window_end, move_id)`가 더 클 때만 현재 행을 교체합니다. `updated_at`(처리 시각)은 정렬에 사용하지 않습니다. relay, Debezium, at-least-once 재전달은 도착 순서를 보장하지 않습니다. 그래서 정렬 기준은 이벤트 시간으로 둡니다.
+
+원인별 `source_document_ids`는 배열이고, `source_count`는 그 배열의 길이와 같습니다.
+
+### 16.6 23번 문서와의 접점
 
 | 접점 | 22번(이 문서)이 지킬 것 | 23번이 제공할 것 |
 | --- | --- | --- |
@@ -938,7 +1021,7 @@ flowchart LR
 
 - 23번이 끝나기 전에 개발할 때는, outbox 테이블을 읽어 같은 형식의 메시지를 Kafka로 보내는 임시 relay를 씁니다. 쓰는 쪽 코드는 바꾸지 않습니다 (18.6).
 
-### 16.6 시장 범위 사건의 전파
+### 16.7 시장 범위 사건의 전파
 
 - 시장 범위 사건이 들어오면, 현재 move가 열려 있는 종목에만 요청을 보냅니다.
 - move가 없는 종목에는 요청을 보내지 않습니다. 사건은 DB에 남아 있습니다.
@@ -1050,8 +1133,8 @@ flowchart LR
 | 49 | poller는 Kafka로 직접 발행하는가? | 직접 발행합니다 | 16.3 |
 | 50 | 시그널 생성 요청은 어떻게 받는가? | `signal-requests` 하나로 모읍니다. key는 종목입니다 | 16.1 |
 | 51 | 요청 메시지에 후보 데이터를 담는가? | 담지 않습니다. signal worker가 DB에서 후보를 읽습니다 | 16.1 |
-| 52 | 시장 범위 사건은 어느 종목에 전파하는가? | move가 열려 있는 종목에만 요청을 보냅니다. 나중에 열리는 종목은 DB에서 후보로 읽습니다 | 16.6 |
-| 53 | DB 적재와 Kafka 발행의 이중 쓰기를 어떻게 막는가? | outbox와 CDC(Debezium)입니다. CDC 도입은 23번 문서에서 별도로 진행합니다. 비고: 처음에는 CDC 없이 커밋 뒤 발행하고 재시도하는 안이었습니다 | 16.4, 16.5 |
+| 52 | 시장 범위 사건은 어느 종목에 전파하는가? | move가 열려 있는 종목에만 요청을 보냅니다. 나중에 열리는 종목은 DB에서 후보로 읽습니다 | 16.7 |
+| 53 | DB 적재와 Kafka 발행의 이중 쓰기를 어떻게 막는가? | outbox와 CDC(Debezium)입니다. CDC 도입은 23번 문서에서 별도로 진행합니다. 비고: 처음에는 CDC 없이 커밋 뒤 발행하고 재시도하는 안이었습니다 | 16.4, 16.6 |
 | 54 | price_move_state_job은 어디에서 실행하는가? | Flink입니다. 체결 시각 기준으로 종목별 상태를 유지하고, 결과는 `price-moves` 토픽으로만 발행합니다 | 10, 16.2 |
 | 55 | 나머지 구성 요소는 어디에서 실행하는가? | Python consumer입니다(document, flow, target price processor, move sink, signal worker, serving sink). 이벤트 시간 기준은 데이터 필드로 지킵니다 | 16.2 |
 
@@ -1060,9 +1143,9 @@ flowchart LR
 | 번호 | 질문 | 상태 | 절 |
 | --- | --- | --- | --- |
 | 56 | 평가셋과 세부 지표 | 미정 | 13 |
-| 57 | 문서 판정 호출 단위 | 미정 (제안: 20건씩 묶음) | 13 |
+| 57 | 문서 판정 호출 단위 | 1차 경로에서는 기사마다 호출합니다. 배치 처리는 이후 과제로 남겨 둡니다 | 13 |
 | 58 | 추정가집계 회차별 갱신 시각 | 확인 필요 | 13 |
-| 59 | NXT 거래 시간 | 확인 필요 | 13 |
+| 59 | NXT 거래 시간 | 1차 경로에서는 DAILY 상태에 KRX 틱만 사용합니다. NXT와 KRX가 005930 기준으로 같은 전일 종가(stck_sdpr)를 쓴다는 것을 확인했습니다. 1차 범위에서는 해소된 것으로 봅니다 | 13 |
 | 60 | OpenRouter 모델 fallback 기능 | 확인 필요 | 13 |
 | 61 | 후보 상한 | 미정 (제안: 최근 순 50건) | 13 |
 | 64 | 장중 분해에 쓸 지수 값의 수집 방법 | 미정 | 13 |
@@ -1080,6 +1163,23 @@ flowchart LR
 | 71 | MCP는 어디에 두고 에이전트는 어떻게 쓰는가? | `alert_service`의 `/mcp`입니다. MarketAnalystAgent도 `MCPClient`로 같은 도구를 씁니다 | 18.7 |
 | 72 | LLM 호출 수를 어떻게 제한하는가? | `signal_enabled` 종목만 LLM 단계를 실행합니다. 나머지 단계는 40종목 전체입니다 | 18.8 |
 | 73 | 1차 경로는 2차 확장을 어떻게 준비하는가? | 공통 계약은 1차에서 최종 형태로 만듭니다. 2차는 새 파일, 새 테이블, 등록 항목을 추가하는 방식으로만 붙입니다 | 18.10 |
+
+### 17.13 1차 경로 구현에서 확정된 결정
+
+| 번호 | 질문 | 결정 | 절 |
+| --- | --- | --- | --- |
+| 74 | signal `version`은 move `version`과 같은 값인가? | 다릅니다. `version`은 같은 move 안에서 1씩 증가하는 카운터입니다. 하나의 move_version에서 새 기사 도착이나 재시도로 시그널이 여러 번 생성될 수 있습니다. 정렬 키는 `(move_version, version)`입니다 | 12.3 |
+| 75 | `gold.signal`에 어떤 필드를 추가했는가? | migration 0002에서 `status`, `move_version`, `input_hash`를 추가했습니다. `decided_by`는 nullable이고 `SHOWN`일 때만 필수입니다. `HIDDEN`과 `NO_CANDIDATE`도 행으로 저장합니다. migration 0004에서 `llm_attempts`(JSONB)를 추가했습니다 | 12.3 |
+| 76 | `silver.document_judgement`에 어떤 필드를 추가했는가? | migration 0004에서 `llm_attempts`(JSONB)를 추가했습니다. 감사 목적으로 LLM 호출 이력을 저장합니다 | 6.4 |
+| 77 | `signal-updates` 토픽의 정렬 기준은 무엇인가? | 같은 move의 업데이트는 `(move_version, version)`, 다른 move의 업데이트는 `(move_window_end, move_id)`로 비교합니다. `updated_at`(처리 시각)은 정렬에 사용하지 않습니다. relay, Debezium, at-least-once 재전달이 도착 순서를 보장하지 않기 때문입니다 | 16.5 |
+| 78 | `news-raw`의 멱등성 키는 무엇인가? | `kis_news:{symbol}:{source_doc_id}:{sha256(title)}`입니다. `raw_id`는 이 키의 UUIDv5입니다 | 18.4 |
+| 79 | 서빙 테이블에 어떤 변경이 있었는가? | migration 0003에서 `symbol_signal`에 `move_version`, `move_window_end`, `generation_method`를 추가하고, 이력 테이블 `symbol_signal_history`, `symbol_signal_history_cause`를 만들었습니다. migration 0004에서 `symbol_name`과 근거 문서 테이블 `symbol_signal_cause_source`, `symbol_signal_history_cause_source`를 추가했습니다 | 15.2 |
+| 80 | REST API 경로는 무엇인가? | `GET /api/stocks/{symbol}/signal`(현재 시그널)과 `GET /api/stocks/{symbol}/signal/history?date=YYYY-MM-DD`(이력 조회)입니다. `date`는 `move_window_end`의 KST 날짜입니다 | 15.3 |
+| 81 | 헤드라인은 어디에서 조립하는가? | 서빙 단계에서 코드로 조립합니다. 상승/하락: `{label}{조사} {symbol_name} {abs(rate, 1자리)}% 상승/하락`. 보합: `{label}에도 {symbol_name} 보합`. 등락률은 `serving.symbol_snapshot`에서 가져옵니다 | 15.4 |
+| 82 | `signal_generation` 프롬프트의 기본 버전은 무엇인가? | v2입니다. v1은 영어 지시문에 "polite 해요체"를 명시했지만, 실제 입력으로 비교했을 때 원인 문장 6건이 모두 합니다체로 나왔습니다. v2는 한국어로 쓰고 예시를 넣었으며, 같은 입력에서 6건 모두 해요체로 나왔습니다. 비교는 주 모델의 제공자 장애 때문에 같은 계열인 `nvidia/nemotron-3.5-super-vl:free`로 했습니다. `document_judgement`의 기본값은 v1을 유지합니다 | 18.5 |
+| 83 | 보조 LLM 모델은 무엇인가? | `nvidia/nemotron-3.5-super-vl:free`입니다. `google/gemma-4-31b-it:free`는 429 응답이 반복되어 교체했습니다 | 18.8 |
+| 84 | 전 거래일은 어떻게 판단하는가? | 저장된 KOSPI 일봉 행으로 판단합니다. KOSPI 일봉 행이 있는 날이 거래일입니다. KIS 휴장일 API는 현재 앱키로 조회되지 않기 때문입니다 | 12.1 |
+| 85 | 1차 경로의 작업 방식은 무엇인가? | 브랜치 하나(`feat/ai-signal-first-path`)와 PR 하나로 전달했습니다. 18.9절의 단계별 이슈/브랜치/PR 방식은 2차 이후에 적용합니다 | 18.9 |
 
 ## 18. 구현 구성 [합의]
 
@@ -1163,6 +1263,8 @@ REST 조회
 | `signal-updates` | 종목 | outbox | serving sink |
 | `signal-dlq` | 종목 | signal worker | 사람이 확인 |
 
+`news-raw` 메시지의 `idempotency_key`는 `kis_news:{symbol}:{source_doc_id}:{sha256(title)}`입니다. `raw_id`는 이 키의 UUIDv5입니다. 같은 일련번호에서 제목이 바뀐 기사도 별도 행으로 처리됩니다.
+
 - 스키마 파일은 기존 관례대로 `schemas/<토픽>.avsc`에 두고, `scripts/register_schemas.py`로 등록합니다. 호환성은 BACKWARD입니다.
 - 네임스페이스는 모두 `com.invest_view.events`입니다. `stock-ticks`의 기존 네임스페이스는 바꾸지 않습니다. 기존 소비자가 깨지기 때문입니다.
 - outbox의 `payload`는 Schema Registry로 직렬화한 Avro 바이트(bytea)입니다. 그래서 outbox를 거쳐 나오는 토픽도 다른 토픽과 같은 data contract를 지킵니다.
@@ -1177,14 +1279,18 @@ services/ai_signal/src/ai_signal/prompts/
     v1.md
   signal_generation/
     v1.md
+    v2.md
   registry.py
 ```
 
 - 프롬프트 본문은 repo의 마크다운 파일로 관리합니다. 코드 리뷰와 git 이력으로 변경을 추적하기 위해서입니다.
 - 고칠 때는 기존 파일을 바꾸지 않고 새 버전 파일을 만듭니다. 이전 결과를 재현하고 두 버전을 비교하기 위해서입니다.
-- 현재 버전은 환경 변수로 고릅니다. 예: `AI_SIGNAL_PROMPT_SIGNAL_GENERATION=v2`
-- 결과 테이블의 `prompt_version`에 `signal_generation/v1`처럼 기록합니다.
+- 현재 버전은 목적별로 기본값이 다릅니다. `signal_generation`의 기본값은 v2이고, `document_judgement`의 기본값은 v1입니다. 환경 변수로 재정의할 수 있습니다. 예: `AI_SIGNAL_PROMPT_SIGNAL_GENERATION=v2`
+- 결과 테이블의 `prompt_version`에 `signal_generation/v2`처럼 기록합니다.
+- `signal_generation/v2`는 한국어로 작성하고, 좋은 예시와 나쁜 예시, 전체 예시를 포함합니다. v1은 영어 지시문에 "polite 해요체"를 명시했지만, 실제 입력으로 비교했을 때 원인 문장 6건이 모두 합니다체로 나왔습니다. v2에서는 같은 입력의 6건이 모두 해요체로 나왔습니다(17.13절 결정 82).
+- 출력 JSON schema의 각 필드에는 한국어 설명을 붙입니다.
 - 응답 형식은 pydantic 모델로 정의하고, JSON schema는 그 모델에서 생성합니다. 같은 모델로 응답을 다시 검증합니다. 보조 모델이 JSON 모드만 지원하기 때문입니다.
+- 문구 검증기를 두어 LLM 응답을 추가로 검사합니다. `explanation`이 "요."로 끝나지 않거나 `label`이 조사로 끝나면 해당 응답을 거부하고 다음 fallback 단계로 넘깁니다.
 - Prompty와 Langfuse는 쓰지 않습니다. 모델 선택은 fallback 코드가 하고, 기록은 결과 테이블에 남기기 때문입니다.
 
 ### 18.6 임시 relay
@@ -1214,11 +1320,12 @@ services/ai_signal/src/ai_signal/prompts/
 - 수집, 수익률 분해, move 생성은 처음부터 40종목 전체로 실행합니다. LLM을 부르지 않는 단계이기 때문입니다.
 - 문서 판정과 시그널 생성은 `signal_enabled`인 종목만 실행합니다. 처음에는 SK하이닉스와 삼성전자입니다. 종목을 늘릴 때는 플래그만 바꿉니다.
 - 주 모델은 추론 토큰을 씁니다. 시험 호출에서 추론 토큰이 `max_tokens`를 모두 써서 응답 본문이 비었습니다. 그래서 추론 토큰 한도를 따로 설정합니다.
+- 보조 모델은 `nvidia/nemotron-3.5-super-vl:free`입니다. 이전에 검토한 `google/gemma-4-31b-it:free`는 429 응답이 반복되어 교체했습니다. 보조 모델도 structured outputs을 지원합니다.
 
 ### 18.9 환경과 작업 방식
 
 - 개발과 검증은 로컬 kind에서 합니다. 운영 k3s 배포는 기동할 때 운영 장애를 함께 확인하고 진행합니다.
-- 단계마다 이슈 하나, 브랜치 하나, PR 하나로 진행합니다. 브랜치 이름은 기존 관례(`feat/...`, `docs/...`)를 따르고, 이슈에는 `ai-signal` 라벨을 붙입니다.
+- 1차 경로는 브랜치 하나(`feat/ai-signal-first-path`)와 PR 하나로 전달했습니다. 2차 이후부터는 단계마다 이슈 하나, 브랜치 하나, PR 하나로 진행합니다. 브랜치 이름은 기존 관례(`feat/...`, `docs/...`)를 따르고, 이슈에는 `ai-signal` 라벨을 붙입니다.
 - 커밋 메시지는 기존 관례(Conventional Commits, 영어, scope 포함)를 따릅니다.
 - PR 본문은 한국어로 쓰고, 올리기 전에 확인을 받습니다. 각 PR에는 테스트를 포함합니다.
 
@@ -1296,7 +1403,7 @@ services/ai_signal/src/ai_signal/prompts/
 | 그룹과 관계 후보 | 후보 원천이 대상 종목 목록을 받게 합니다. 1차에는 자기 자신만 넣습니다 | `SUBSIDIARY_OF`, `COMPETES_WITH` 관계로 대상 종목을 넓힙니다 (11.6) | 후보 원천 |
 | 수급, 분해 대체 문구 | fallback을 단계 목록으로 구현합니다. 1차 목록은 주 모델, 보조 모델, `HIDDEN`입니다 | 보조 모델과 `HIDDEN` 사이에 수급 문구, 분해 문구 단계를 끼웁니다 | 단계 실행 코드, `decided_by` 값 |
 | `signal_retry` | 실패하면 1차에도 `signal_retry`에 행을 씁니다. 재시도 워커는 빈 구현입니다 | 재시도 워커를 구현합니다 | 실패 기록 코드, 테이블 |
-| 시장 범위 사건 전파 | 요청 발행을 "어떤 종목에 요청을 보낼지" 정하는 함수 하나로 둡니다. 1차는 기사의 종목에만 보냅니다 | 시장 범위 사건이면 move가 열린 종목 전체로 넓힙니다 (16.6) | `signal-requests` 스키마, signal worker |
+| 시장 범위 사건 전파 | 요청 발행을 "어떤 종목에 요청을 보낼지" 정하는 함수 하나로 둡니다. 1차는 기사의 종목에만 보냅니다 | 시장 범위 사건이면 move가 열린 종목 전체로 넓힙니다 (16.7) | `signal-requests` 스키마, signal worker |
 | LLM 호출 수 | 종목별 `signal_enabled`를 문서 판정과 시그널 생성 앞에서 확인합니다. 동시 호출 수 제한도 1차에서 둡니다 | 플래그만 바꿉니다 | 코드 전체 |
 
 - fallback 단계는 모두 같은 입력(move, 후보)을 받고, 같은 출력(시그널 또는 다음 단계로 넘김)을 냅니다. 그래서 단계를 추가해도 단계 실행 코드는 바뀌지 않습니다.
