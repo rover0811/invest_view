@@ -69,6 +69,15 @@ class MarketSessionRouter:
         return old_tick_tr_id, self._active.tick_tr_id
 
 
+TRADING_WINDOW_START = time(8, 0)
+TRADING_WINDOW_END = time(20, 0)
+
+
+def is_trading_window(now: datetime) -> bool:
+    """Weekday 08:00-20:00 KST, the union of the NXT and KRX sessions below."""
+    return now.weekday() < 5 and TRADING_WINDOW_START <= now.time() < TRADING_WINDOW_END
+
+
 class ScheduleBasedSessionSwitcher:
     def determine_initial_market(self, now: datetime | None = None) -> MarketSessionPort:
         if now is None:

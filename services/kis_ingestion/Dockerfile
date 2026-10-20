@@ -28,7 +28,8 @@ RUN uv pip install --system \
     "websockets" \
     "pydantic-settings" \
     "confluent-kafka[avro,schemaregistry]>=2.3" \
-    "fastavro"
+    "fastavro" \
+    "asyncpg"
 
 COPY schemas/ /app/schemas/
 
