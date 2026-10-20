@@ -22,6 +22,7 @@ from alert_service.api.routes import (
     consensus,
     health,
     notifications,
+    signal,
     stock_info,
     stocks,
     tick_detail,
@@ -86,4 +87,5 @@ def create_app(container: Any) -> FastAPI:
     app.include_router(consensus.router)
     app.include_router(tick_detail.router)
     app.include_router(stocks.router)
+    app.include_router(signal.router)
     return app
