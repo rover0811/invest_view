@@ -1,0 +1,35 @@
+{
+  "namespace": "com.invest_view.events",
+  "type": "record",
+  "name": "SignalUpdate",
+  "doc": "Latest generated signal state for the serving sink. Ordering is event time only: a consumer applies an update only if (move_version, version) is greater than the stored pair for the same (symbol, move_id). updated_at is processing time and must not be used for ordering.",
+  "fields": [
+    {"name": "symbol", "type": "string"},
+    {"name": "symbol_name", "type": "string", "doc": "reference entity name of the symbol; the reader assembles the headline with it (15.4)"},
+    {"name": "move_id", "type": "string"},
+    {"name": "version", "type": "int"},
+    {"name": "move_version", "type": "int", "doc": "price-moves version this signal was generated from; primary ordering key"},
+    {"name": "move_window_end", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "window_end of that move version, the event time of the tick that triggered it"},
+    {"name": "status", "type": {"type": "enum", "name": "SignalStatus", "symbols": ["SHOWN", "HIDDEN", "NO_CANDIDATE"]}},
+    {"name": "headline_label", "type": ["null", "string"], "default": null},
+    {"name": "generation_method", "type": ["null", {"type": "enum", "name": "SignalGenerationMethod", "symbols": ["llm", "flow_rule", "decomposition"]}], "default": null},
+    {
+      "name": "causes",
+      "type": {
+        "type": "array",
+        "items": {
+          "type": "record",
+          "name": "SignalUpdateCause",
+          "fields": [
+            {"name": "rank", "type": "int"},
+            {"name": "explanation", "type": "string"},
+            {"name": "source_count", "type": "int", "doc": "always equals the length of source_document_ids"},
+            {"name": "source_document_ids", "type": {"type": "array", "items": "string"}, "doc": "DOCUMENT source ids (gold.signal_cause_source) supporting this cause"}
+          ]
+        }
+      },
+      "default": []
+    },
+    {"name": "updated_at", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "Processing time when the update was produced; informational only, never an ordering key"}
+  ]
+}

@@ -7,7 +7,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 
 
-from kis_ingestion.producer import StockTickProducer
+from kis_ingestion.producer import AvroEventProducer, StockTickProducer
 from kis_ingestion.tick_parser import KISTickParser, ParsedTick
 
 SCHEMA_PATH = str(Path(__file__).resolve().parents[3] / "schemas" / "stock-ticks.avsc")
@@ -150,3 +150,42 @@ def test_on_delivery_logs_debug_on_success(mock_kafka_deps):
         producer._on_delivery(err=None, msg=mock_msg)
         mock_logger.debug.assert_called_once()
         assert "Kafka delivery ok" in mock_logger.debug.call_args.args[0]
+
+
+NEWS_SCHEMA_PATH = str(Path(__file__).resolve().parents[3] / "schemas" / "news-raw.avsc")
+
+
+def test_avro_event_producer_publishes_key_headers_and_value(mock_kafka_deps):
+    producer = AvroEventProducer("localhost:9092", "news-raw", NEWS_SCHEMA_PATH, SR_URL)
+    producer.publish(key="005930", value={"raw_id": "r1"}, headers=[("raw_id", "r1")])
+
+    call_args = mock_kafka_deps["producer"].produce.call_args.kwargs
+    assert call_args["topic"] == "news-raw"
+    assert call_args["key"] == b"005930"
+    assert call_args["headers"] == [("raw_id", b"r1")]
+    assert mock_kafka_deps["serializer"].call_args.args[0] == {"raw_id": "r1"}
+    serializer_kwargs = mock_kafka_deps["serializer_cls"].call_args.kwargs
+    assert serializer_kwargs.get("conf", {}).get("auto.register.schemas") is False
+    producer_config = mock_kafka_deps["producer_factory"].call_args.args[0]
+    assert producer_config["enable.idempotence"] is True
+
+
+def test_avro_event_producer_notifies_only_successful_delivery(mock_kafka_deps):
+    producer = AvroEventProducer("localhost:9092", "news-raw", NEWS_SCHEMA_PATH, SR_URL)
+    delivered: list[str] = []
+    producer.publish(key="005930", value={}, on_delivered=lambda: delivered.append("ok"))
+    on_delivery = mock_kafka_deps["producer"].produce.call_args.kwargs["on_delivery"]
+    msg = MagicMock()
+
+    on_delivery("broker down", msg)
+    assert delivered == []
+    on_delivery(None, msg)
+    assert delivered == ["ok"]
+
+
+def test_avro_event_producer_raises_buffer_error(mock_kafka_deps):
+    mock_kafka_deps["producer"].produce.side_effect = BufferError("full")
+    producer = AvroEventProducer("localhost:9092", "news-raw", NEWS_SCHEMA_PATH, SR_URL)
+
+    with pytest.raises(BufferError):
+        producer.publish(key="005930", value={})

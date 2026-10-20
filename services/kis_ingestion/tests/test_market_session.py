@@ -5,6 +5,7 @@ from kis_ingestion.market_session import (
     NXTSessionAdapter,
     MarketSessionRouter,
     ScheduleBasedSessionSwitcher,
+    is_trading_window,
 )
 
 
@@ -60,3 +61,17 @@ def test_schedule_based_session_switcher(test_time, expected_market):
     now = datetime.combine(datetime.today(), test_time)
     adapter = switcher.determine_initial_market(now)
     assert adapter.market_name == expected_market
+
+
+@pytest.mark.parametrize(
+    "now, expected",
+    [
+        (datetime(2026, 10, 19, 7, 59), False),
+        (datetime(2026, 10, 19, 8, 0), True),
+        (datetime(2026, 10, 19, 19, 59), True),
+        (datetime(2026, 10, 19, 20, 0), False),
+        (datetime(2026, 10, 17, 10, 0), False),
+    ],
+)
+def test_is_trading_window(now, expected):
+    assert is_trading_window(now) is expected

@@ -1,0 +1,10 @@
+{
+  "namespace": "com.invest_view.events",
+  "type": "record",
+  "name": "SignalRequest",
+  "doc": "Request to regenerate the latest signal state for a symbol",
+  "fields": [
+    {"name": "symbol", "type": "string"},
+    {"name": "reason", "type": {"type": "enum", "name": "SignalRequestReason", "symbols": ["PRICE_STATE_CHANGE", "NEW_DOCUMENT", "FLOW_UPDATE", "TARGET_PRICE_UPDATE", "MARKET_CLOSE"]}}
+  ]
+}
