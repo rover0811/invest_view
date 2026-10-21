@@ -154,6 +154,27 @@ export interface ReplayOverlayKey {
   labelOnLeft: boolean;
 }
 
+export type ReplayKeyEventKind = 'state' | 'signal' | 'keep';
+
+export interface ReplayKeyEvent {
+  id: string;
+  at: string;
+  kind: ReplayKeyEventKind;
+  label: string;
+  headline?: string;
+}
+
+export interface ReplayPlaybackAdvance {
+  nextMs: number;
+  fastForwarding: boolean;
+}
+
+export interface ReplayPlaybackPlan {
+  startMs: number;
+  endMs: number;
+  windows: Array<{ startMs: number; endMs: number }>;
+}
+
 export type ReplayFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -496,6 +517,129 @@ export function buildReplayEvents(data: ReplayData): string[] {
   data.signals.forEach((item) => moments.add(item.at));
   data.log.forEach((item) => moments.add(item.t));
   return [...moments].toSorted((a, b) => Date.parse(a) - Date.parse(b));
+}
+
+export function buildReplayKeyEvents(data: ReplayData): ReplayKeyEvent[] {
+  const stateEvents = data.states.map((state) => ({
+    id: `state-${state.t}-${state.state}-${state.move_version}`,
+    at: state.t,
+    kind: 'state' as const,
+    label: state.state === 'POSITIVE'
+      ? '긍정 진입'
+      : state.state === 'NEGATIVE' ? '부정 진입' : '중립 전환',
+  }));
+  const signalEvents = data.signals
+    .filter((signal) => signal.status === 'SHOWN' || signal.status === 'HIDDEN')
+    .map((signal) => ({
+      id: `signal-${signal.at}-${signal.version}-${signal.status}`,
+      at: signal.at,
+      kind: 'signal' as const,
+      label: `시그널 v${signal.version}`,
+      ...(signal.status === 'SHOWN' && signal.headline_label
+        ? { headline: signal.headline_label }
+        : {}),
+    }));
+  const keepEvents = data.log.flatMap((entry, index): ReplayKeyEvent[] => {
+    const prefix = '기존 문구 유지:';
+    if (entry.kind !== 'signal' || !entry.text.startsWith(prefix)) return [];
+    const headline = entry.text.slice(prefix.length).trim();
+    return [{
+      id: `keep-${entry.t}-${index}`,
+      at: entry.t,
+      kind: 'keep',
+      label: '문구 유지',
+      ...(headline ? { headline } : {}),
+    }];
+  });
+
+  return [...stateEvents, ...signalEvents, ...keepEvents]
+    .toSorted((left, right) => Date.parse(left.at) - Date.parse(right.at));
+}
+
+const KEY_EVENT_LEAD_MS = 5 * 60_000;
+const KEY_EVENT_TRAIL_MS = 10 * 60_000;
+const IDLE_TARGET_WALL_MS = 2_500;
+
+export function buildReplayPlaybackPlan(
+  events: ReplayKeyEvent[],
+  startMs: number,
+  endMs: number,
+): ReplayPlaybackPlan {
+  const windows: Array<{ startMs: number; endMs: number }> = [];
+  const eventTimes = [...new Set(events.map((event) => Date.parse(event.at)))]
+    .filter((time) => time >= startMs && time <= endMs)
+    .toSorted((left, right) => left - right);
+
+  for (const eventTime of eventTimes) {
+    const window = {
+      startMs: Math.max(startMs, eventTime - KEY_EVENT_LEAD_MS),
+      endMs: Math.min(endMs, eventTime + KEY_EVENT_TRAIL_MS),
+    };
+    const previous = windows.at(-1);
+    if (previous && window.startMs <= previous.endMs) {
+      previous.endMs = Math.max(previous.endMs, window.endMs);
+    } else {
+      windows.push(window);
+    }
+  }
+  return { startMs, endMs, windows };
+}
+
+export function advanceReplayPlayhead(
+  currentMs: number,
+  elapsedWallMs: number,
+  selectedSpeed: number,
+  plan: ReplayPlaybackPlan,
+  skipIdle: boolean,
+): ReplayPlaybackAdvance {
+  const clampedCurrent = Math.max(plan.startMs, Math.min(plan.endMs, currentMs));
+  const normalRate = Math.max(0, selectedSpeed) * 60;
+  if (!skipIdle || clampedCurrent >= plan.endMs || elapsedWallMs <= 0) {
+    return {
+      nextMs: Math.min(plan.endMs, clampedCurrent + Math.max(0, elapsedWallMs) * normalRate),
+      fastForwarding: false,
+    };
+  }
+
+  let nextMs = clampedCurrent;
+  let remainingWallMs = elapsedWallMs;
+  let fastForwarding = false;
+
+  while (remainingWallMs > 0 && nextMs < plan.endMs) {
+    const activeWindow = plan.windows.find((window) => (
+      nextMs >= window.startMs && nextMs < window.endMs
+    ));
+    let segmentEndMs: number;
+    let rate: number;
+
+    if (activeWindow) {
+      segmentEndMs = activeWindow.endMs;
+      rate = normalRate;
+      fastForwarding = false;
+    } else {
+      const previousWindow = plan.windows.findLast((window) => window.endMs <= nextMs);
+      const nextWindow = plan.windows.find((window) => window.startMs > nextMs);
+      const idleStartMs = previousWindow?.endMs ?? plan.startMs;
+      segmentEndMs = nextWindow?.startMs ?? plan.endMs;
+      rate = Math.max(normalRate, (segmentEndMs - idleStartMs) / IDLE_TARGET_WALL_MS);
+      fastForwarding = rate > normalRate;
+    }
+
+    if (rate <= 0) break;
+    const wallTimeToBoundary = (segmentEndMs - nextMs) / rate;
+    if (remainingWallMs <= wallTimeToBoundary) {
+      nextMs += remainingWallMs * rate;
+      remainingWallMs = 0;
+    } else {
+      nextMs = segmentEndMs;
+      remainingWallMs -= wallTimeToBoundary;
+    }
+  }
+
+  return {
+    nextMs: Math.min(plan.endMs, nextMs),
+    fastForwarding,
+  };
 }
 
 const SESSION_END_POSITION = 82;

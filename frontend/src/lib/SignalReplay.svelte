@@ -3,9 +3,12 @@
   import { fmtPrice } from './format';
   import ReplayChart from './ReplayChart.svelte';
   import {
+    advanceReplayPlayhead,
     assembleHeadline,
     buildReplayDensity,
     buildReplayEvents,
+    buildReplayKeyEvents,
+    buildReplayPlaybackPlan,
     buildReplayTimeline,
     buildScrubberTicks,
     clusterByPixelDistance,
@@ -18,6 +21,7 @@
     type PriceState,
     type ReplayData,
     type ReplayDocument,
+    type ReplayKeyEvent,
   } from './replay';
 
   let { symbol, date }: { symbol: string; date: string } = $props();
@@ -29,12 +33,15 @@
   let playheadMs = $state(0);
   let playing = $state(false);
   let speed = $state(4);
+  let skipIdle = $state(true);
+  let fastForwarding = $state(false);
   let animatedPlayheadMs = 0;
   let driveChartPlayhead = (_playheadMs: number) => {};
   let laneTrackElement = $state<HTMLDivElement>();
   let laneTrackWidth = $state(0);
   let markerDistance = $state(0);
   let premarketReserve = $state(0);
+  let keyEventListElement = $state<HTMLOListElement>();
 
   const timeline = $derived(data ? buildReplayTimeline(data) : null);
   const startMs = $derived(timeline?.startMs ?? 0);
@@ -43,6 +50,16 @@
   const events = $derived(data && timeline
     ? buildReplayEvents(data).filter((event) => Date.parse(event) >= timeline.startMs)
     : []);
+  const keyEvents = $derived(data && timeline
+    ? buildReplayKeyEvents(data).filter((event) => {
+        const time = Date.parse(event.at);
+        return time >= timeline.startMs && time <= timeline.endMs;
+      })
+    : []);
+  const currentKeyEventId = $derived(
+    keyEvents.findLast((event) => Date.parse(event.at) <= playheadMs)?.id ?? null,
+  );
+  const playbackPlan = $derived(buildReplayPlaybackPlan(keyEvents, startMs, endMs));
   const scrubberTicks = $derived(data && timeline ? buildScrubberTicks(data, timeline) : []);
   const density = $derived(data && timeline ? buildReplayDensity(data, timeline) : []);
   const playhead = $derived(new Date(playheadMs || startMs).toISOString());
@@ -107,6 +124,17 @@
     return timeline ? replayTimeToPosition(timeline, Date.parse(event)) : 0;
   }
 
+  function keyEventClass(event: ReplayKeyEvent): string {
+    if (event.kind !== 'state') return event.kind;
+    if (event.label === '긍정 진입') return 'positive';
+    if (event.label === '부정 진입') return 'negative';
+    return 'neutral';
+  }
+
+  function keyEventAriaLabel(event: ReplayKeyEvent): string {
+    return [formatTime(event.at), event.label, event.headline].filter(Boolean).join(' ');
+  }
+
   function causeRank(documentId: string): number | undefined {
     return shownSignal?.causes.find((cause) => cause.source_document_ids.includes(documentId))?.rank;
   }
@@ -146,6 +174,23 @@
     const observer = new ResizeObserver(measure);
     observer.observe(track);
     return () => observer.disconnect();
+  });
+
+  $effect(() => {
+    const currentId = currentKeyEventId;
+    if (!keyEventListElement || !currentId) return;
+    const list = keyEventListElement;
+    const frame = requestAnimationFrame(() => {
+      const current = list.querySelector<HTMLElement>('[aria-current="true"]');
+      if (!current) return;
+      const itemLeft = current.offsetLeft;
+      const itemRight = itemLeft + current.offsetWidth;
+      if (itemLeft < list.scrollLeft) list.scrollLeft = itemLeft;
+      else if (itemRight > list.scrollLeft + list.clientWidth) {
+        list.scrollLeft = itemRight - list.clientWidth;
+      }
+    });
+    return () => cancelAnimationFrame(frame);
   });
 
   function setPlayhead(nextPlayheadMs: number) {
@@ -235,9 +280,14 @@
   });
 
   $effect(() => {
-    if (!playing || !data || endMs <= startMs) return;
+    if (!playing || !data || endMs <= startMs) {
+      fastForwarding = false;
+      return;
+    }
     const replay = data;
     const playbackSpeed = speed;
+    const skippingIdle = skipIdle;
+    const currentPlaybackPlan = playbackPlan;
     const moments = contentMoments(replay);
     animatedPlayheadMs = Math.max(startMs, Math.min(endMs, untrack(() => animatedPlayheadMs || playheadMs)));
     let committedMomentIndex = latestMomentIndex(moments, animatedPlayheadMs);
@@ -247,7 +297,15 @@
     function tick(now: number) {
       const elapsed = now - previous;
       previous = now;
-      animatedPlayheadMs = Math.min(endMs, animatedPlayheadMs + elapsed * playbackSpeed * 60);
+      const advance = advanceReplayPlayhead(
+        animatedPlayheadMs,
+        elapsed,
+        playbackSpeed,
+        currentPlaybackPlan,
+        skippingIdle,
+      );
+      animatedPlayheadMs = advance.nextMs;
+      fastForwarding = advance.fastForwarding;
       driveChartPlayhead(animatedPlayheadMs);
 
       const nextMomentIndex = latestMomentIndex(moments, animatedPlayheadMs);
@@ -258,6 +316,7 @@
 
       if (animatedPlayheadMs >= endMs) {
         playheadMs = endMs;
+        fastForwarding = false;
         playing = false;
         return;
       }
@@ -265,7 +324,10 @@
     }
 
     animationFrame = requestAnimationFrame(tick);
-    return () => cancelAnimationFrame(animationFrame);
+    return () => {
+      cancelAnimationFrame(animationFrame);
+      fastForwarding = false;
+    };
   });
 
   $effect(() => {
@@ -548,6 +610,35 @@
     </div>
 
     <section class="playback panel" aria-label="재생 제어">
+      <div class="key-events">
+        <div class="key-events-title">
+          <strong>핵심 사건</strong>
+          <span class="tnum">{keyEvents.length}건</span>
+        </div>
+        <ol class="key-event-list" bind:this={keyEventListElement} aria-label="핵심 사건 목록">
+          {#each keyEvents as event (event.id)}
+            <li>
+              <button
+                type="button"
+                class:current={event.id === currentKeyEventId}
+                aria-current={event.id === currentKeyEventId ? 'true' : undefined}
+                aria-label={`${keyEventAriaLabel(event)} 시점으로 이동`}
+                onclick={() => jumpTo(event.at)}
+              >
+                <time class="tnum">{formatTime(event.at)}</time>
+                <span class="key-event-kind {keyEventClass(event)}">{event.label}</span>
+                {#if event.headline}<span class="key-event-headline">{event.headline}</span>{/if}
+              </button>
+            </li>
+          {/each}
+        </ol>
+        <label class="skip-toggle">
+          <input type="checkbox" bind:checked={skipIdle} />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+          <span>빈 구간 건너뛰기</span>
+        </label>
+      </div>
+
       <div class="transport">
         <button type="button" class="icon-button" onclick={() => jump(-1)} aria-label="이전 사건으로 이동">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v12M15 5l-7 5 7 5z" /></svg>
@@ -567,7 +658,9 @@
       <div class="scrubber-wrap">
         <div class="scrubber-meta">
           <time class="tnum current-time">{formatTime(playhead)}{afterClose ? ' 장 마감 뒤' : ''}</time>
-          <span>09:00-15:30 장중, 이후 구간은 압축하여 표시합니다.</span>
+          <span class:fast-forwarding={fastForwarding} aria-live="polite">
+            {fastForwarding ? '다음 사건까지 빠르게 넘기는 중' : '09:00-15:30 장중, 이후 구간은 압축하여 표시합니다.'}
+          </span>
           <time class="tnum">{formatTime(new Date(endMs).toISOString())}</time>
         </div>
         <div class="scrubber" style="--session-end: {timeline?.sessionEndPosition ?? 100}%;">
@@ -1402,6 +1495,166 @@
     background: color-mix(in srgb, var(--surface-body) 96%, transparent);
   }
 
+  .key-events {
+    grid-column: 1 / -1;
+    min-width: 0;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    align-items: center;
+    gap: var(--space-3);
+    padding-bottom: var(--space-2);
+    border-bottom: 1px solid var(--border-subtle);
+  }
+
+  .key-events-title {
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+    white-space: nowrap;
+  }
+
+  .key-events-title strong {
+    color: var(--text-secondary);
+    font-size: 11px;
+  }
+
+  .key-events-title span {
+    color: var(--text-tertiary);
+    font-size: 10px;
+  }
+
+  .key-event-list {
+    min-width: 0;
+    display: flex;
+    gap: var(--space-2);
+    margin: 0;
+    padding: 0 0 var(--space-1);
+    overflow-x: auto;
+    list-style: none;
+    scrollbar-color: var(--surface-raised) transparent;
+    scrollbar-width: thin;
+  }
+
+  .key-event-list li {
+    flex: 0 0 auto;
+  }
+
+  .key-event-list button {
+    max-width: calc(var(--space-8) * 10);
+    min-height: var(--space-8);
+    display: grid;
+    grid-template-columns: auto auto minmax(0, 1fr);
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-2);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--surface-overlay);
+    color: var(--text-secondary);
+    font-family: var(--font-sans);
+    cursor: pointer;
+    transition: background var(--dur-hover) var(--ease-out), border-color var(--dur-hover) var(--ease-out);
+  }
+
+  .key-event-list button:hover,
+  .key-event-list button.current {
+    border-color: var(--border-strong);
+    background: var(--surface-raised);
+  }
+
+  .key-event-list button.current {
+    border-color: var(--brand);
+  }
+
+  .key-event-list button:focus-visible,
+  .skip-toggle input:focus-visible + .toggle-track {
+    outline: 2px solid var(--brand);
+    outline-offset: 2px;
+  }
+
+  .key-event-list time,
+  .key-event-kind,
+  .key-event-headline,
+  .skip-toggle {
+    font-size: 10px;
+  }
+
+  .key-event-list time {
+    color: var(--text-tertiary);
+  }
+
+  .key-event-kind {
+    padding: var(--space-1) var(--space-2);
+    border-radius: var(--radius-sm);
+    background: var(--surface-floor);
+    color: var(--text-secondary);
+    font-weight: 700;
+    white-space: nowrap;
+  }
+
+  .key-event-kind.positive { color: var(--color-positive); }
+  .key-event-kind.negative { color: var(--color-negative); }
+  .key-event-kind.neutral { color: var(--color-flat); }
+  .key-event-kind.signal { color: var(--brand); }
+
+  .key-event-headline {
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .skip-toggle {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    color: var(--text-secondary);
+    cursor: pointer;
+    white-space: nowrap;
+  }
+
+  .skip-toggle input {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .toggle-track {
+    position: relative;
+    width: calc(var(--space-6) + var(--space-1));
+    height: var(--space-4);
+    box-sizing: border-box;
+    border: 1px solid var(--border-strong);
+    border-radius: var(--radius-md);
+    background: var(--surface-raised);
+    transition: background var(--dur-hover) var(--ease-out), border-color var(--dur-hover) var(--ease-out);
+  }
+
+  .toggle-track span {
+    position: absolute;
+    top: 50%;
+    left: var(--space-1);
+    width: var(--space-2);
+    height: var(--space-2);
+    transform: translateY(-50%);
+    border-radius: var(--radius-md);
+    background: var(--text-tertiary);
+    transition: transform var(--dur-hover) var(--ease-out), background var(--dur-hover) var(--ease-out);
+  }
+
+  .skip-toggle input:checked + .toggle-track {
+    border-color: var(--brand);
+    background: color-mix(in srgb, var(--brand) 28%, var(--surface-raised));
+  }
+
+  .skip-toggle input:checked + .toggle-track span {
+    transform: translate(var(--space-3), -50%);
+    background: var(--text-on-brand);
+  }
+
   .transport,
   .speed-group {
     display: flex;
@@ -1478,6 +1731,10 @@
     text-align: center;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+
+  .scrubber-meta span.fast-forwarding {
+    color: var(--text-secondary);
   }
 
   .scrubber {
@@ -1707,19 +1964,32 @@
       padding: var(--space-3);
     }
 
+    .key-events {
+      grid-row: 1;
+      grid-template-columns: minmax(0, 1fr) auto;
+    }
+
+    .key-events-title {
+      display: none;
+    }
+
+    .skip-toggle > span:last-child {
+      display: none;
+    }
+
     .scrubber-wrap {
       grid-column: 1 / -1;
-      grid-row: 1;
+      grid-row: 2;
     }
 
     .transport {
       grid-column: 1;
-      grid-row: 2;
+      grid-row: 3;
     }
 
     .speed-group {
       grid-column: 2;
-      grid-row: 2;
+      grid-row: 3;
     }
 
     .scrubber-meta span {
@@ -1739,6 +2009,12 @@
     .icon-button,
     .play-button,
     .speed-group button {
+      transition: none;
+    }
+
+    .key-event-list button,
+    .toggle-track,
+    .toggle-track span {
       transition: none;
     }
   }
