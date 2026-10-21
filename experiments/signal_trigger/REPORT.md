@@ -408,4 +408,90 @@
 - v4는 알려진 오분류 6건을 모두 고쳤고, CXMT 이야기의 트리거 식별자를 하나로 모았습니다. 트리거 횟수는 조금 늘었지만 늘어난 트리거는 모두 타당합니다.
 - 남은 문제는 세 가지입니다. 행사 종합 기사의 주체가 코스피로 잡히는 경우가 있고, 같은 연설의 일정 예고나 발언 기사가 SCHEDULE이나 OPINION으로 빠지며, FLOW와 OPINION의 경계가 v3와 달라졌습니다.
 - 이번 결과에는 nemotron 판정 11건이 섞여 있습니다. 운영에서는 대체 경로가 판정한 비율을 계속 기록해야 합니다.
+
+## 로컬 모델 (gemma4 12b) 결과
+
+### 실행 조건
+
+- Ollama 0.40.6에 올린 `gemma4:12b-it-qat`를 `ollama:gemma4:12b-it-qat` 경로 하나로만 호출했고, 프롬프트는 v4이며 189건을 모두 판정했습니다. 클라우드 모델은 호출하지 않았습니다.
+- 어댑터는 strict `json_schema` response_format을 그대로 보냅니다. 실제 호출로 확인해 보니 Ollama는 스키마를 제약 디코딩으로 지켰고, enum에 없는 값을 요구하는 프롬프트에도 스키마 안의 값만 돌려주었습니다. 판정 189건에서 스키마 오류는 0건이었습니다.
+- gemma4는 기본적으로 사고 과정을 생성합니다. `/v1` 경로에서는 `think: false`가 무시되었고, `reasoning_effort: "none"`을 보내야 사고 과정이 꺼졌습니다. 그래서 어댑터는 reasoning을 끌 때 `"none"`을 보내고, 이번 실험도 그렇게 실행했습니다.
+- 동시 호출은 1개입니다. Docker 컨테이너에서는 `OLLAMA_BASE_URL=http://host.docker.internal:11434/v1`로 호스트에 접근하며, 리플레이 실행기의 hosts 파일에 `host.docker.internal` 항목이 있어야 합니다.
+
+### 소요 시간
+
+- 189회 호출에 모두 3,072초(약 51분)가 걸렸습니다. 호출 1회는 평균 16.3초, 중앙값 12.4초, p95 25.6초, 최대 46.0초였습니다.
+- 실시간 기사 유입 속도를 감안하면 동시 호출 1개로도 따라갈 수는 있지만, 기사가 몰리는 장 시작 무렵에는 판정이 몇 분씩 밀릴 수 있습니다.
+
+### flash-lite v4와 일치율 (같은 기사 178건)
+
+| 필드 | 일치 |
+|---|---|
+| info_type | 142/178 (80%) |
+| target_relevance | 130/178 (73%) |
+| event_subject | 114/178 (64%) |
+| event_type | 161/178 (90%) |
+| direction | 133/178 (75%) |
+
+info_type 혼동표입니다. 행은 flash-lite, 열은 gemma4입니다.
+
+| | NEW_FACT | PRICE_RECAP | OPINION | FLOW | OTHER |
+|---|---|---|---|---|---|
+| NEW_FACT | 23 | 0 | 1 | 0 | 1 |
+| PRICE_RECAP | 1 | 48 | 4 | 11 | 0 |
+| OPINION | 7 | 0 | 38 | 0 | 1 |
+| FLOW | 0 | 0 | 1 | 17 | 0 |
+| OTHER | 6 | 0 | 1 | 2 | 16 |
+
+- gemma4는 NEW_FACT를 더 넓게 봅니다. NEW_FACT는 39건으로 flash-lite보다 많고, NEW_FACT이면서 DIRECT 또는 COMPETITOR인 기사도 28건으로 flash-lite의 20건보다 많습니다. flash-lite가 OPINION이나 OTHER로 본 기사 13건을 gemma4는 NEW_FACT로 판정했습니다.
+- 시황 기사 11건은 PRICE_RECAP 대신 FLOW로 갔습니다. 트리거에는 영향이 없지만, 수급 기사 경계가 모델마다 다르다는 점은 v4에서 남긴 문제와 같습니다.
+- event_subject 일치율이 64%로 가장 낮습니다. "창장메모리(YMTC)"와 "YMTC"처럼 같은 회사를 다르게 쓰고, 여러 회사를 주체로 나열하는 경우가 있습니다. 그래서 사건 수가 flash-lite의 37개보다 훨씬 많은 73개로 늘었습니다.
+
+### 트리거 후보 기사의 불일치 (어느 한쪽이 NEW_FACT이면서 DIRECT 또는 COMPETITOR인 기사 17건)
+
+| 기사 (요지) | flash-lite | gemma4 |
+|---|---|---|
+| 10/14 08:01 이재용 회장 삼성전자 주식 증여 | OTHER, UNRELATED | NEW_FACT, COMPETITOR, CAPITAL |
+| 10/14 08:07 루빈 투입과 HBM4 성장 기대 | OPINION, DIRECT, OTHER | NEW_FACT, DIRECT, TECH_ANNOUNCEMENT |
+| 10/14 09:00 메모리 중심 차세대 반도체 공동 개발 착수 | NEW_FACT, 주체 SK하이닉스, INVESTMENT | NEW_FACT, 주체 3개사 나열, TECH_ANNOUNCEMENT |
+| 10/14 09:01, 18:42 최태원 회장과 앤디 김 의원 면담 (2건) | NEW_FACT, DIRECT, 주체 SK하이닉스, +1 | NEW_FACT, UNRELATED, 주체 최태원, 0 |
+| 10/14 10:48 두 회사의 자사주 소각 규모 | PRICE_RECAP, SECTOR | NEW_FACT, DIRECT, CAPITAL |
+| 10/14 12:30 안현 사장의 메모리 계층 최적화 발표 | NEW_FACT, TECH_ANNOUNCEMENT | OPINION, TECH_ANNOUNCEMENT |
+| 10/14 12:30 2030년 AI 인프라 20배 전망 | OPINION, OTHER | NEW_FACT, TECH_ANNOUNCEMENT |
+| 10/14 12:30 HBF 최종 규격 발표 예고 | OTHER, SCHEDULE, 0 | NEW_FACT, TECH_ANNOUNCEMENT, +1 |
+| 10/14 14:37 메모리가 AI 핵심이라는 발언 | OPINION, OTHER | NEW_FACT, TECH_ANNOUNCEMENT |
+| 10/14 15:04 CXMT 4F2 D램 도발과 양산 장벽 | OPINION, COMPETITOR | NEW_FACT, COMPETITOR |
+| 10/14 16:47 삼성전자 주거 솔루션 외 소식 모음 | OTHER, UNRELATED | NEW_FACT, COMPETITOR, PRODUCT |
+| 10/14 16:59 YMTC 출하량 3위와 IPO 추진 | 주체 창장메모리(YMTC) | 주체 YMTC |
+| 10/14 17:00 엑시나의 CBO 영입 | NEW_FACT, UNRELATED, 0 | NEW_FACT, COMPETITOR, -1 |
+| 10/14 17:10 SK스퀘어 기업가치와 주주환원 | OPINION | NEW_FACT |
+| 10/14 17:57 삼성전자 CTO의 CXMT 기술 언급 | COMPETITOR, 0 | COMPETITOR, -1 |
+| 10/14 19:11 CXMT 청사진과 양산까지 2년 | OPINION, COMPETITOR, +1 | NEW_FACT, COMPETITOR, -1 |
+
+- v4 프롬프트로 고친 오분류 가운데 일부가 gemma4에서 다시 나타났습니다. 최태원 회장 면담 기사는 대상 종목과 무관한 것으로 판정되었고, 분석 기사와 발언 기사, 일정 예고 기사가 NEW_FACT로 올라왔습니다.
+- 08:07 루빈 기사가 SK하이닉스 TECH_ANNOUNCEMENT로 잡히면서, 같은 식별자를 쓰는 SEDEX 기조연설 기사들이 장 시작 전에 이미 반영된 것으로 처리되었습니다.
+
+### 트리거 시뮬레이션
+
+리플레이 내보내기의 상태 변경 시각이 v4 실행 이후에 바뀌었으므로(09:07 POSITIVE, 14:02 NEUTRAL, 14:45 NEGATIVE), flash-lite 판정도 캐시에서 다시 시뮬레이션해 같은 조건으로 비교했습니다. 이 flash-lite 결과에는 nemotron 판정 11건이 빠져 있습니다.
+
+| 시각 | 사유 | 상태 | flash-lite v4 | gemma4 |
+|---|---|---|---|---|
+| 09:07 | 상태 변경 | POSITIVE | 이전 적격 기사 3건 | 이전 적격 기사 3건 |
+| 12:30 | 새 기사 | POSITIVE | 안현 사장 발표 | 없음 (08:07 루빈 기사로 이미 반영됨) |
+| 14:02 | 상태 변경 | NEUTRAL | 재생성 없음 | 재생성 없음 |
+| 14:45 | 상태 변경 | NEGATIVE | 이전 적격 기사 0건 | 이전 적격 기사 1건 |
+| 15:04 | 새 기사 | NEGATIVE | 없음 | CXMT 도발 분석 기사 |
+| 15:55 | 새 기사 | NEGATIVE | CXMT 차세대 D램 기사 | 없음 (15:04에 반영됨) |
+| 16:59 | 새 기사 | NEGATIVE | YMTC 출하량과 IPO | YMTC 출하량과 IPO |
+| 17:09 | 새 기사 | NEGATIVE | 없음 | 엑시나 CBO 영입 |
+
+- 재생성 횟수는 두 모델 모두 6회(상태 변경 3회와 새 기사 3회)로 같습니다. 그러나 gemma4의 새 기사 트리거 3회 가운데 타당한 것은 YMTC 기사 1회뿐입니다. 15:04 트리거는 분석 기사로 일어났고, 17:09 트리거는 대상 종목과 무관한 스타트업의 인사 기사로 일어났습니다. 상승 상태에서 SEDEX 발표를 반영하는 12:30 트리거는 빠졌습니다.
+
+### 판단과 권장
+
+- 스키마 준수와 안정성에는 문제가 없습니다. 189회 호출이 모두 성공했고, 비용과 호출 한도가 없습니다.
+- 하지만 판정 품질은 아직 첫 번째 경로로 쓰기에 부족합니다. 트리거에 직접 쓰이는 NEW_FACT와 target_relevance 판정이 flash-lite보다 넓고 흔들리며, 주체 이름이 일관되지 않아 사건 묶음이 쪼개지거나 잘못 합쳐집니다. 그 결과 시뮬레이션에서 새 기사 트리거 3회 가운데 2회가 부적절했습니다.
+- 따라서 첫 번째 판정 경로는 계속 `gemini:gemini-3.5-flash-lite`로 두고, gemma4는 Gemini와 OpenRouter가 모두 실패할 때 쓰는 마지막 대체 경로로만 두기를 권장합니다. 대체 경로로 쓸 때도 gemma4가 판정한 기사에는 표시를 남겨서 트리거 결과를 따로 점검해야 합니다.
+- 첫 번째 경로로 올리려면 주체 이름 정규화(종목 사전으로 별칭을 묶는 처리)와 NEW_FACT 판정 예시 보강을 먼저 하고, 같은 189건으로 다시 비교해야 합니다.
 <!-- NOTES:END -->
