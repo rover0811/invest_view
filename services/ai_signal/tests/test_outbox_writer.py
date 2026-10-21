@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import asyncio
 from uuid import UUID
 
@@ -33,7 +35,11 @@ def test_write_inserts_debezium_outbox_row() -> None:
         writer.write(
             topic="signal-requests",
             key="000660",
-            value={"symbol": "000660", "reason": "NEW_DOCUMENT"},
+            value={
+                "symbol": "000660",
+                "reason": "NEW_DOCUMENT",
+                "event_time": "2026-10-20T01:05:00Z",
+            },
             event_id=EVENT_ID,
         )
     )
@@ -46,7 +52,12 @@ def test_write_inserts_debezium_outbox_row() -> None:
     assert params["aggregateid"] == "000660"
     assert params["type"] == "Record<signal-requests>"
     assert params["payload"] == FakeSerializer().serialize(
-        "signal-requests", {"symbol": "000660", "reason": "NEW_DOCUMENT"}
+        "signal-requests",
+        {
+            "symbol": "000660",
+            "reason": "NEW_DOCUMENT",
+            "event_time": "2026-10-20T01:05:00Z",
+        },
     )
     sql = compiled_sql(statement)
     assert "INSERT INTO outbox.events" in sql
@@ -71,7 +82,11 @@ def test_write_generates_distinct_ids_and_accepts_event_type() -> None:
 def test_avro_serializer_round_trip_uses_registered_schema() -> None:
     client = mock_registry("signal-requests")
     serializer = AvroValueSerializer(client)
-    value = {"symbol": "005930", "reason": "PRICE_STATE_CHANGE"}
+    value = {
+        "symbol": "005930",
+        "reason": "PRICE_STATE_CHANGE",
+        "event_time": datetime(2026, 10, 20, 1, 5, tzinfo=UTC),
+    }
 
     payload = serializer.serialize("signal-requests", value)
 
