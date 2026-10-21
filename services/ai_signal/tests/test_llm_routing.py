@@ -16,6 +16,7 @@ from ai_signal.llm import (
     RouteHealth,
     run_fallback,
 )
+from ai_signal.llm.adapters import ADAPTERS
 from ai_signal.llm.adapters.fake import FakeAdapter
 from ai_signal.llm.container import LlmSettings, build_llm
 from ai_signal.llm.routing import next_utc_midnight, parse_routes, routes_from_env
@@ -141,3 +142,16 @@ async def _gemini_quota_falls_through_to_openrouter_and_is_skipped_next_time() -
         "cached": False,
     }
     assert second.failures.attempts[1].adapter == "openrouter"
+
+
+def test_ollama_route_keeps_the_model_tag_and_is_registered() -> None:
+    route = parse_routes("ollama:gemma4:12b-it-qat")
+    assert route == (Route("ollama", "gemma4:12b-it-qat"),)
+    assert "ollama" in ADAPTERS
+    env = {"AI_SIGNAL_LLM_ROUTES_DOCUMENT_JUDGEMENT": "ollama:gemma4:12b-it-qat"}
+    llm = build_llm(
+        LlmSettings(),
+        factories={"ollama": FakeAdapter, "gemini": FakeAdapter, "openrouter": FakeAdapter},
+        environ=env,
+    )
+    assert llm.routes_for("document_judgement") == route
