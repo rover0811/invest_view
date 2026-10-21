@@ -11,6 +11,7 @@ from pydantic import BaseModel, ConfigDict
 
 from ai_signal.llm import CompletionRequest, LlmError, LlmErrorKind, ReasoningEffort
 from ai_signal.llm.adapters.gemini import GeminiAdapter, GeminiSettings
+from ai_signal.llm.adapters.ollama import OllamaAdapter, OllamaSettings
 from ai_signal.llm.adapters.openai_compatible import OpenAICompatibleAdapter
 from ai_signal.llm.adapters.openrouter import OpenRouterAdapter, OpenRouterSettings
 
@@ -34,7 +35,15 @@ def gemini(handler: Handler) -> OpenAICompatibleAdapter:
     return GeminiAdapter(settings, http=http)
 
 
-ADAPTERS = pytest.mark.parametrize("make", [openrouter, gemini], ids=["openrouter", "gemini"])
+def ollama(handler: Handler) -> OpenAICompatibleAdapter:
+    settings = OllamaSettings()
+    http = httpx.AsyncClient(base_url=settings.base_url, transport=httpx.MockTransport(handler))
+    return OllamaAdapter(settings, http=http)
+
+
+ADAPTERS = pytest.mark.parametrize(
+    "make", [openrouter, gemini, ollama], ids=["openrouter", "gemini", "ollama"]
+)
 REQUEST = CompletionRequest(model="m", messages=[{"role": "user", "content": "hi"}])
 
 
@@ -192,3 +201,39 @@ def test_openrouter_key_keeps_the_legacy_env(monkeypatch: pytest.MonkeyPatch) ->
     monkeypatch.setenv("GEMINI_API_KEY", "g")
     assert OpenRouterSettings().api_key == "legacy"
     assert GeminiSettings().api_key == "g"
+
+
+def test_ollama_payload_has_strict_schema_dummy_bearer_and_thinking_off() -> None:
+    asyncio.run(_ollama_payload_has_strict_schema_dummy_bearer_and_no_reasoning())
+
+
+async def _ollama_payload_has_strict_schema_dummy_bearer_and_no_reasoning() -> None:
+    seen: list[dict[str, object]] = []
+    auth: list[str] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        auth.append(request.headers["authorization"])
+        assert str(request.url) == "http://localhost:11434/v1/chat/completions"
+        return capture(seen)(request)
+
+    request = CompletionRequest(model="gemma4:12b-it-qat", messages=[], reasoning=ReasoningEffort.OFF)
+    await ollama(handle).complete(request, Out)
+    body = seen[0]
+    assert auth == ["Bearer ollama"]
+    assert body["reasoning_effort"] == "none"
+    assert "reasoning" not in body and "think" not in body
+    assert body["response_format"] == {
+        "type": "json_schema",
+        "json_schema": {"name": "Out", "strict": True, "schema": Out.model_json_schema()},
+    }
+
+
+def test_ollama_settings_read_the_plain_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OLLAMA_BASE_URL", "http://host.docker.internal:11434/v1")
+    monkeypatch.setenv("OLLAMA_MAX_CONCURRENCY", "3")
+    settings = OllamaSettings()
+    assert (settings.base_url, settings.max_concurrency) == ("http://host.docker.internal:11434/v1", 3)
+    monkeypatch.delenv("OLLAMA_BASE_URL")
+    monkeypatch.delenv("OLLAMA_MAX_CONCURRENCY")
+    defaults = OllamaSettings()
+    assert (defaults.max_concurrency, defaults.timeout_seconds) == (1, 120.0)
