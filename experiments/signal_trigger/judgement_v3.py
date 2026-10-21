@@ -9,6 +9,7 @@
 --routes "gemini:M1,openrouter:M2"(또는 V3_ROUTES)를 주면 라우팅 계층으로 판정한다. QUOTA_EXHAUSTED나
 차단된 경로는 다음 경로로 넘어가고, 결과는 실제로 판정한 모델의 캐시에 adapter 필드와 함께 쓴다.
 분석은 경로 순서대로 각 모델 캐시를 합쳐서 한다. 키는 GEMINI_API_KEY, OPENROUTER_API_KEY 환경 변수로 준다.
+ollama 경로만 주면 API 키 없이 로컬 모델로 판정한다. 호출별 소요 시간은 호출 로그와 캐시의 elapsed_s에 남긴다.
 RATE_LIMIT가 연속 MAX_CONSECUTIVE_RATE_LIMIT회를 넘으면 판정을 멈추고 종료 코드 3을 돌려준다.
 API 키가 없으면 캐시만으로 분석한다. 요약은 /tmp/sigana/v3_summary.md에 쓴다.
 """
@@ -22,6 +23,7 @@ import os
 import random
 import re
 import sys
+import time
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -180,9 +182,10 @@ def messages(doc: Doc, prompt: str) -> list[dict[str, str]]:
     ]
 
 
-def log_call(doc_id: str, status: str, where: str | None = None) -> None:
+def log_call(doc_id: str, status: str, where: str | None = None, elapsed: float | None = None) -> None:
+    took = "" if elapsed is None else f"\t{elapsed:.2f}s"
     with CALL_LOG.open("a") as f:
-        f.write(f"{datetime.now().isoformat()}\t{doc_id}\t{status}\t{where or MODEL}\n")
+        f.write(f"{datetime.now().isoformat()}\t{doc_id}\t{status}\t{where or MODEL}{took}\n")
 
 
 def write_cache(model: str, row: dict[str, Any]) -> None:
@@ -198,10 +201,11 @@ async def judge_routed(llm: Llm, doc: Doc, prompt: str, lock: asyncio.Lock) -> N
             continue
         port = llm.port(route)
         for attempt in range(MAX_ATTEMPTS):
+            started = time.monotonic()
             try:
                 result = await port.complete(llm.request(route, messages(doc, prompt)), V3)
             except LlmError as exc:
-                log_call(doc.id, exc.kind.value, str(route))
+                log_call(doc.id, exc.kind.value, str(route), time.monotonic() - started)
                 llm.health.record_failure(route, exc)
                 if exc.kind == LlmErrorKind.QUOTA_EXHAUSTED or llm.health.blocked(route) is not None:
                     print(f"route {route} {exc.kind.value}; falling through", flush=True)
@@ -216,13 +220,14 @@ async def judge_routed(llm: Llm, doc: Doc, prompt: str, lock: asyncio.Lock) -> N
                 await asyncio.sleep(wait + random.random())
                 continue
             llm.health.record_success(route)
-            log_call(doc.id, "OK", str(route))
+            elapsed = round(time.monotonic() - started, 2)
+            log_call(doc.id, "OK", str(route), elapsed)
             _consecutive_rate_limit = 0
             doc.v3, doc.source = result.output, str(route)
             async with lock:
                 write_cache(route.model, {
                     "id": doc.id, "adapter": route.adapter_name, "model": result.model_version,
-                    "output": result.output.model_dump(),
+                    "output": result.output.model_dump(), "elapsed_s": elapsed,
                 })
             return
     print(f"gave up {doc.id} {doc.title[:40]}", flush=True)
@@ -267,7 +272,8 @@ async def judge_all(docs: list[Doc]) -> None:
     if not todo:
         return
     if ROUTES:
-        if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")):
+        local_only = all(r.adapter_name == "ollama" for r in ROUTES)
+        if not local_only and not (os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")):
             print(f"no API key; {len(todo)} documents stay unjudged")
             return
         os.environ["AI_SIGNAL_LLM_ROUTES_DOCUMENT_JUDGEMENT"] = ",".join(map(str, ROUTES))
