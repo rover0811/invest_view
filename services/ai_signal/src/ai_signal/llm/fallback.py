@@ -43,14 +43,16 @@ class LlmAttempt:
     error: LlmErrorKind | None
     raw_content: str | None
     adapter: str | None = None
+    cached: bool = False
 
-    def as_json(self) -> dict[str, str | None]:
+    def as_json(self) -> dict[str, str | bool | None]:
         return {
             "step": self.step,
             "adapter": self.adapter,
             "model": self.model,
             "error": self.error.value if self.error is not None else None,
             "raw_content": self.raw_content,
+            "cached": self.cached,
         }
 
 
@@ -69,7 +71,12 @@ class StepFailures:
         if self.attempts and self.attempts[-1].step == step:
             last = self.attempts[-1]
             self.attempts[-1] = LlmAttempt(
-                last.step, last.model, kind, last.raw_content, last.adapter
+                last.step,
+                last.model,
+                kind,
+                last.raw_content,
+                last.adapter,
+                last.cached,
             )
 
 
@@ -150,6 +157,7 @@ class ModelStep(Generic[In_, T]):
                 None,
                 completion.raw_content,
                 self.route.adapter_name,
+                completion.cached,
             )
         )
         return StepResult(

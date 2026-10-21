@@ -264,6 +264,7 @@ def test_shown_signal_uses_only_same_direction_documents_in_range(
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": None,
                 "raw_content": output_json([cause(1, ["D1"])]),
+                "cached": False,
             }
         ]
     ]
@@ -341,6 +342,7 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": "RATE_LIMIT",
                 "raw_content": None,
+                "cached": False,
             },
             {
                 "step": "secondary",
@@ -348,6 +350,7 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
                 "model": "nvidia/nemotron-3.5-super-vl:free",
                 "error": "UNAVAILABLE",
                 "raw_content": None,
+                "cached": False,
             },
         ]
     ]
@@ -381,6 +384,7 @@ def test_rule_violating_answers_are_kept_on_hidden_signal(seeded_url: str) -> No
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": "SCHEMA",
                 "raw_content": uncited,
+                "cached": False,
             },
             {
                 "step": "secondary",
@@ -388,6 +392,7 @@ def test_rule_violating_answers_are_kept_on_hidden_signal(seeded_url: str) -> No
                 "model": "nvidia/nemotron-3.5-super-vl:free",
                 "error": "SCHEMA",
                 "raw_content": "not json",
+                "cached": False,
             },
         ]
     ]

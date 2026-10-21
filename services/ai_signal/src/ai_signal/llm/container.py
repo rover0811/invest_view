@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable, Mapping
 from datetime import timedelta
 from functools import lru_cache
+from typing import Literal
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from ai_signal.db import create_engine
 from ai_signal.llm.adapters import ADAPTERS
+from ai_signal.llm.cache import CacheStore, CachingPort, PostgresCacheStore
 from ai_signal.llm.port import LlmPort, ReasoningEffort
 from ai_signal.llm.routing import (
     Llm,
@@ -35,6 +39,7 @@ class LlmSettings(BaseSettings):
     timeout_seconds: float | None = None
     breaker_threshold: int = 3
     breaker_open_seconds: float = 300.0
+    cache: Literal["off", "postgres"] = "off"
 
     def default_routes(self) -> tuple[Route, ...]:
         return (
@@ -48,7 +53,9 @@ def build_llm(
     *,
     factories: Mapping[str, Callable[[], LlmPort]] = ADAPTERS,
     environ: Mapping[str, str] | None = None,
+    cache_store: CacheStore | None = None,
 ) -> Llm:
+    """``AI_SIGNAL_LLM_CACHE=postgres`` wraps every adapter in ``CachingPort``."""
     settings = settings or LlmSettings()
     routes = {
         purpose: routes_from_env(purpose, settings.default_routes(), environ)
@@ -58,8 +65,15 @@ def build_llm(
     unknown = used - factories.keys()
     if unknown:
         raise ValueError(f"unknown LLM adapters in routes: {sorted(unknown)}")
+    adapters = {name: factories[name]() for name in sorted(used)}
+    if settings.cache != "off":
+        store = cache_store or _postgres_store()
+        adapters = {
+            name: CachingPort(inner=port, store=store, adapter_name=name)
+            for name, port in adapters.items()
+        }
     return Llm(
-        adapters={name: factories[name]() for name in sorted(used)},
+        adapters=adapters,
         routes=routes,
         health=RouteHealth(
             breaker_threshold=settings.breaker_threshold,
@@ -71,6 +85,13 @@ def build_llm(
             timeout_seconds=settings.timeout_seconds,
         ),
     )
+
+
+def _postgres_store() -> CacheStore:
+    url = os.environ.get("AI_SIGNAL_DATABASE_URL", "")
+    if not url:
+        raise ValueError("AI_SIGNAL_LLM_CACHE=postgres needs AI_SIGNAL_DATABASE_URL")
+    return PostgresCacheStore(create_engine(url))
 
 
 @lru_cache(maxsize=1)

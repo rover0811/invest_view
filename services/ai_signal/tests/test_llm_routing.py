@@ -138,5 +138,6 @@ async def _gemini_quota_falls_through_to_openrouter_and_is_skipped_next_time() -
         "model": "g",
         "error": "QUOTA_EXHAUSTED",
         "raw_content": None,
+        "cached": False,
     }
     assert second.failures.attempts[1].adapter == "openrouter"
