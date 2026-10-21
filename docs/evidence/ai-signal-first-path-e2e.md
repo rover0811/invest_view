@@ -153,3 +153,30 @@ move 날짜는 2026-10-20으로 정했습니다. 뉴스 후보 구간(2026-10-19
 
 1. zsh에서는 문자열 변수에 담은 `docker run` 명령이 단어 단위로 나뉘지 않아 러너 실행이 실패했습니다. 실행 스크립트를 bash 배열로 바꿔 해결했습니다.
 2. 이전 기록의 미판정 문서 6건 문제는 이번 실행에서 재현되지 않았습니다.
+
+## 10-14 리플레이 재실행 (유지 판단 반영)
+
+2026-10-21 20:55 KST부터 21:30 KST까지 같은 kind 클러스터에서 10-14 리플레이를 다시 실행했습니다. 시그널 생성 프롬프트 v3(KEEP 또는 UPDATE 판단과 원인별 영향 방향 확인)와 마이그레이션 0007(`gold.signal_decision`)이 적용된 코드를 사용했고, 코드는 수정하지 않았습니다.
+
+### 실행 단계
+
+1. `ai-signal:e2e` 이미지를 다시 빌드하고 `alembic upgrade head`로 0007까지 반영했습니다.
+2. 이전 실행과 같은 범위의 serving 시그널, gold move와 시그널, 문서 189건과 그 하위 행, bronze 원문을 삭제했고, 이번에는 `gold.signal_decision`도 함께 삭제했습니다. 상태 파일은 `.bak`으로 옮기고 입력 파일은 유지했습니다.
+3. Flink `price-move-state`의 상태를 초기화하고 RUNNING과 STABLE을 확인한 뒤, consumer group 네 개를 latest로 초기화하고 러너 다섯 개를 띄웠습니다.
+4. driver는 `--max-llm-calls 450`으로 570개 이벤트를 모두 처리했고, 기록된 LLM 호출은 175회였습니다.
+
+### 결과
+
+| 항목 | 이전 실행 | 이번 실행 |
+| --- | --- | --- |
+| 판정된 문서 | 189건 | 72건 (117건 미판정) |
+| 시그널 버전 | 6건 | 3건 (SHOWN 1건, HIDDEN 2건) |
+| `gold.signal_decision` | 해당 없음 | 0건 |
+
+v1(09:08, PRICE_STATE_CHANGE)은 primary가 UNAVAILABLE이어서 gemini-3.5-flash-lite가 생성했고, 판단은 UPDATE였으며 두 원인의 영향 방향은 모두 POSITIVE였습니다. v2(14:02)는 LLM 호출 없이 HIDDEN으로 기록되었습니다. v3(14:45)는 세 라우트가 모두 실패해 HIDDEN으로 기록되었습니다.
+
+### 발견한 문제
+
+1. 실행을 시작한 지 2분 만에 gemini-3.5-flash-lite와 gemini-3-flash-preview의 일일 할당량이 소진되었고, 무료 OpenRouter 모델은 대부분 RATE_LIMIT으로 실패했습니다. 이 때문에 문서 117건이 판정되지 않았습니다.
+2. 미판정 문서가 많아 NEW_DOCUMENT 요청이 생기지 않았고, 그 결과 KEEP 또는 UPDATE 판단 행이 기록되지 않았습니다. 유지 판단의 효과는 할당량이 초기화된 뒤에 다시 확인해야 합니다.
+3. 생성 결과에 담긴 원인별 영향 방향은 `gold.signal_cause`에 컬럼이 없어 LLM 원문에서만 확인할 수 있습니다.
