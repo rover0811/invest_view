@@ -16,7 +16,8 @@ from typing import Generic, Protocol, TypeVar
 
 from pydantic import BaseModel
 
-from ai_signal.llm.client import LlmError, LlmErrorKind, ModelSpec, OpenRouterClient
+from ai_signal.llm.port import LlmError, LlmErrorKind
+from ai_signal.llm.routing import Llm, Route
 
 logger = logging.getLogger(__name__)
 
@@ -41,10 +42,12 @@ class LlmAttempt:
     model: str
     error: LlmErrorKind | None
     raw_content: str | None
+    adapter: str | None = None
 
     def as_json(self) -> dict[str, str | None]:
         return {
             "step": self.step,
+            "adapter": self.adapter,
             "model": self.model,
             "error": self.error.value if self.error is not None else None,
             "raw_content": self.raw_content,
@@ -66,7 +69,7 @@ class StepFailures:
         if self.attempts and self.attempts[-1].step == step:
             last = self.attempts[-1]
             self.attempts[-1] = LlmAttempt(
-                last.step, last.model, kind, last.raw_content
+                last.step, last.model, kind, last.raw_content, last.adapter
             )
 
 
@@ -96,36 +99,58 @@ async def run_fallback(
     return FallbackOutcome(result=None, failures=failures)
 
 
-MessageBuilder = Callable[[In_, ModelSpec], list[dict[str, str]]]
+MessageBuilder = Callable[[In_], list[dict[str, str]]]
+
+
+def route_step_names(routes: Sequence[Route]) -> list[str]:
+    """``primary`` and ``secondary`` keep the audit names of the two-model setup."""
+    names = ["primary", "secondary"]
+    return [names[i] if i < len(names) else f"fallback{i}" for i in range(len(routes))]
 
 
 @dataclass(frozen=True)
 class ModelStep(Generic[In_, T]):
-    """Calls one model; an ``LlmError`` is recorded and the step passes."""
+    """Calls one route; an ``LlmError`` or an unhealthy route is recorded and the step passes."""
 
     name: str
-    client: OpenRouterClient
-    spec: ModelSpec
+    llm: Llm
+    route: Route
     output_type: type[T]
     messages: MessageBuilder[In_]
     decided_by: str = "llm"
 
+    def _fail(self, failures: StepFailures, kind: LlmErrorKind, raw: str | None) -> None:
+        failures.errors.append((self.name, kind))
+        failures.attempts.append(
+            LlmAttempt(self.name, self.route.model, kind, raw, self.route.adapter_name)
+        )
+
     async def attempt(
         self, request: In_, failures: StepFailures
     ) -> StepResult[T] | None:
+        blocked = self.llm.health.blocked(self.route)
+        if blocked is not None:
+            logger.info("%s step skipped: %s is %s", self.name, self.route, blocked)
+            self._fail(failures, blocked, None)
+            return None
         try:
-            completion = await self.client.complete(
-                self.spec, self.messages(request, self.spec), self.output_type
+            completion = await self.llm.port(self.route).complete(
+                self.llm.request(self.route, self.messages(request)), self.output_type
             )
         except LlmError as exc:
             logger.warning("%s step passed: %s", self.name, exc)
-            failures.errors.append((self.name, exc.kind))
-            failures.attempts.append(
-                LlmAttempt(self.name, self.spec.model, exc.kind, exc.raw_content)
-            )
+            self.llm.health.record_failure(self.route, exc)
+            self._fail(failures, exc.kind, exc.raw_content)
             return None
+        self.llm.health.record_success(self.route)
         failures.attempts.append(
-            LlmAttempt(self.name, self.spec.model, None, completion.raw_content)
+            LlmAttempt(
+                self.name,
+                self.route.model,
+                None,
+                completion.raw_content,
+                self.route.adapter_name,
+            )
         )
         return StepResult(
             value=completion.output,

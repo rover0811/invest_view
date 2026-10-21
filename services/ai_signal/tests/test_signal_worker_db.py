@@ -254,6 +254,7 @@ def test_shown_signal_uses_only_same_direction_documents_in_range(
         [
             {
                 "step": "primary",
+                "adapter": "fake",
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": None,
                 "raw_content": output_json([cause(1, ["D1"])]),
@@ -330,14 +331,16 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
         [
             {
                 "step": "primary",
+                "adapter": "fake",
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": "RATE_LIMIT",
                 "raw_content": None,
             },
             {
                 "step": "secondary",
+                "adapter": "fake",
                 "model": "nvidia/nemotron-3.5-super-vl:free",
-                "error": "HTTP",
+                "error": "UNAVAILABLE",
                 "raw_content": None,
             },
         ]
@@ -346,7 +349,7 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
         seeded_url,
         "SELECT target_version, attempts, last_error, next_attempt_at "
         "FROM gold.signal_retry",
-    ) == [(1, 0, "HTTP", NOW + timedelta(seconds=30))]
+    ) == [(1, 0, "UNAVAILABLE", NOW + timedelta(seconds=30))]
     (update,) = _updates(seeded_url)
     assert (update["status"], update["generation_method"]) == ("HIDDEN", None)
 
@@ -368,12 +371,14 @@ def test_rule_violating_answers_are_kept_on_hidden_signal(seeded_url: str) -> No
         [
             {
                 "step": "primary",
+                "adapter": "fake",
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": "SCHEMA",
                 "raw_content": uncited,
             },
             {
                 "step": "secondary",
+                "adapter": "fake",
                 "model": "nvidia/nemotron-3.5-super-vl:free",
                 "error": "SCHEMA",
                 "raw_content": "not json",
