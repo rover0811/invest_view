@@ -99,6 +99,11 @@ export interface ReplayFrame {
   returnPct: number;
 }
 
+export interface ReplaySignalCard {
+  mode: 'shown' | 'pending' | 'empty';
+  signal: ReplaySignal | undefined;
+}
+
 export interface StateBand {
   start: string;
   end: string;
@@ -137,6 +142,7 @@ export interface ReplayPixelRange {
 export interface ReplayAnnotationTagLayout {
   x: number;
   row: number;
+  hidden?: boolean;
 }
 
 export type ReplaySeriesUpdatePlan =
@@ -388,6 +394,28 @@ export function selectReplayFrame(data: ReplayData, playhead: string): ReplayFra
     latestLog: logs.at(-1),
     returnPct,
   };
+}
+
+export function selectReplaySignalCard(data: ReplayData, frame: ReplayFrame): ReplaySignalCard {
+  const signal = frame.signal;
+  if (signal == null) return { mode: frame.state == null ? 'empty' : 'pending', signal };
+
+  const stateChangedAfterSignal = frame.state != null
+    && Date.parse(frame.state.t) > Date.parse(signal.at);
+  if (stateChangedAfterSignal) return { mode: 'pending', signal };
+  if (signal.status !== 'SHOWN') return { mode: 'empty', signal };
+
+  const signalState = data.states.findLast((state) => state.move_version === signal.move_version)
+    ?? latestAtOrBefore(data.states, signal.at, (state) => state.t);
+  const directionMismatch = signalState != null
+    && frame.state != null
+    && signalState.state !== frame.state.state;
+  const signMismatch = signalState?.state === 'POSITIVE'
+    ? frame.returnPct <= 0
+    : signalState?.state === 'NEGATIVE' && frame.returnPct >= 0;
+
+  if (directionMismatch || signMismatch) return { mode: 'pending', signal };
+  return { mode: 'shown', signal };
 }
 
 export function visibleBarsAt(bars: ReplayBar[], playhead: string): ReplayBar[] {
@@ -715,6 +743,7 @@ export function layoutReplayAnnotationTags(
   plotWidth: number,
   gap: number,
   blockedRanges: ReplayPixelRange[] = [],
+  maxRows = Number.POSITIVE_INFINITY,
 ): ReplayAnnotationTagLayout[] {
   const width = Math.max(0, tagWidth);
   const availableWidth = Math.max(0, plotWidth);
@@ -729,9 +758,10 @@ export function layoutReplayAnnotationTags(
     }))
     .filter((range) => range.end > range.start);
   const rows: ReplayPixelRange[][] = [];
+  const rowLimit = Number.isFinite(maxRows) ? Math.max(1, Math.floor(maxRows)) : Number.POSITIVE_INFINITY;
 
   return anchors.map((anchor) => {
-    for (let row = 0; ; row += 1) {
+    for (let row = 0; row < rowLimit; row += 1) {
       const rowBlocked = blocked.filter((range) => range.row == null || range.row === row);
       const occupied = [...rowBlocked, ...(rows[row] ?? [])];
       const anchorX = clampX(anchor);
@@ -760,6 +790,8 @@ export function layoutReplayAnnotationTags(
       rows[row].push({ start: x, end: x + width });
       return { x, row };
     }
+
+    return { x: clampX(anchor), row: Math.max(0, rowLimit - 1), hidden: true };
   });
 }
 
