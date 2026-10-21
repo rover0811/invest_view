@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleHeadline,
   aggregateReplayBars,
+  advanceReplayPlayhead,
   buildReplayDensity,
   buildReplayEvents,
+  buildReplayKeyEvents,
+  buildReplayPlaybackPlan,
   buildReplayTimeline,
   buildScrubberTicks,
   clusterByPixelDistance,
@@ -368,6 +371,121 @@ describe('buildReplayEvents', () => {
     expect(events).toContain('2026-10-20T09:50:00+09:00');
     expect(events.filter((time) => time === '2026-10-20T10:10:00+09:00')).toHaveLength(1);
     expect(events.at(-1)).toBe('2026-10-20T11:53:00+09:00');
+  });
+});
+
+describe('buildReplayKeyEvents', () => {
+  it('lists state changes, visible signal versions, and KEEP decisions without articles', () => {
+    const keyEventReplay: ReplayData = {
+      ...replay,
+      signals: [
+        ...replay.signals,
+        {
+          ...replay.signals[1],
+          at: '2026-10-20T10:20:00+09:00',
+          version: 3,
+          status: 'NO_CANDIDATE',
+        },
+      ],
+      log: [
+        ...replay.log,
+        { t: '2026-10-20T10:30:00+09:00', kind: 'signal', text: '기존 문구 유지: 새 기사가 기존 원인과 같습니다.' },
+      ],
+    };
+
+    expect(buildReplayKeyEvents(keyEventReplay)).toEqual([
+      {
+        id: 'state-2026-10-20T09:24:00+09:00-POSITIVE-1',
+        at: '2026-10-20T09:24:00+09:00',
+        kind: 'state',
+        label: '긍정 진입',
+      },
+      {
+        id: 'signal-2026-10-20T09:24:00+09:00-1-HIDDEN',
+        at: '2026-10-20T09:24:00+09:00',
+        kind: 'signal',
+        label: '시그널 v1',
+      },
+      {
+        id: 'signal-2026-10-20T10:10:00+09:00-2-SHOWN',
+        at: '2026-10-20T10:10:00+09:00',
+        kind: 'signal',
+        label: '시그널 v2',
+        headline: 'HBM 장기 공급 계약',
+      },
+      {
+        id: 'keep-2026-10-20T10:30:00+09:00-2',
+        at: '2026-10-20T10:30:00+09:00',
+        kind: 'keep',
+        label: '문구 유지',
+        headline: '새 기사가 기존 원인과 같습니다.',
+      },
+      {
+        id: 'state-2026-10-20T11:53:00+09:00-NEUTRAL-2',
+        at: '2026-10-20T11:53:00+09:00',
+        kind: 'state',
+        label: '중립 전환',
+      },
+    ]);
+  });
+});
+
+describe('advanceReplayPlayhead', () => {
+  const keyEvents = buildReplayKeyEvents(replay);
+  const startMs = Date.parse('2026-10-20T09:00:00+09:00');
+  const endMs = Date.parse('2026-10-20T11:53:00+09:00');
+  const playbackPlan = buildReplayPlaybackPlan(keyEvents, startMs, endMs);
+
+  it('uses the selected speed from five minutes before through ten minutes after an event', () => {
+    const currentMs = Date.parse('2026-10-20T10:06:00+09:00');
+    const result = advanceReplayPlayhead(currentMs, 1_000, 4, playbackPlan, true);
+
+    expect(result).toEqual({
+      nextMs: Date.parse('2026-10-20T10:10:00+09:00'),
+      fastForwarding: false,
+    });
+  });
+
+  it('compresses a complete idle segment to about two and a half seconds', () => {
+    const idleStartMs = Date.parse('2026-10-20T09:34:00+09:00');
+    const result = advanceReplayPlayhead(idleStartMs, 2_500, 4, playbackPlan, true);
+
+    expect(result).toEqual({
+      nextMs: Date.parse('2026-10-20T10:05:00+09:00'),
+      fastForwarding: true,
+    });
+  });
+
+  it('uses the selected speed throughout when idle skipping is off', () => {
+    const idleStartMs = Date.parse('2026-10-20T09:34:00+09:00');
+    const result = advanceReplayPlayhead(idleStartMs, 1_000, 4, playbackPlan, false);
+
+    expect(result).toEqual({
+      nextMs: Date.parse('2026-10-20T09:38:00+09:00'),
+      fastForwarding: false,
+    });
+  });
+
+  it('consumes remaining wall time after crossing a playback window boundary', () => {
+    const boundaryPlan = buildReplayPlaybackPlan([
+      {
+        id: 'signal-2026-10-20T09:10:00+09:00-1-SHOWN',
+        at: '2026-10-20T09:10:00+09:00',
+        kind: 'signal',
+        label: '시그널 v1',
+      },
+    ], startMs, Date.parse('2026-10-20T10:00:00+09:00'));
+
+    expect(advanceReplayPlayhead(
+      Date.parse('2026-10-20T09:19:00+09:00'),
+      2_000,
+      1,
+      boundaryPlan,
+      true,
+    )).toEqual({
+      nextMs: Date.parse('2026-10-20T09:36:00+09:00'),
+      fastForwarding: true,
+    });
   });
 });
 
