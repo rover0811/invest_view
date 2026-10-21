@@ -18,9 +18,11 @@ import {
   replayTimeToChartCoordinate,
   replayTimeToPosition,
   selectReplayFrame,
+  shouldRecomputeReplayOverlays,
   splitAtSessionOpen,
   visibleBarsAt,
   type ReplayData,
+  type ReplayOverlayKey,
 } from './replay';
 
 const replay: ReplayData = {
@@ -296,6 +298,31 @@ describe('planReplaySeriesUpdate', () => {
     expect(planReplaySeriesUpdate(null, threeMinute).mode).toBe('replace');
     expect(planReplaySeriesUpdate(threeMinute, oneMinute, true).mode).toBe('replace');
     expect(planReplaySeriesUpdate(threeMinute, threeMinute.slice(0, 1)).mode).toBe('replace');
+  });
+});
+
+describe('shouldRecomputeReplayOverlays', () => {
+  it('recomputes only when an overlay input changes', () => {
+    const key: ReplayOverlayKey = {
+      width: 884,
+      height: 360,
+      priceScaleWidth: 74,
+      interval: 3,
+      revealedStateCount: 1,
+      currentBarTime: '2026-10-20T10:10:00+09:00',
+      labelOnLeft: false,
+    };
+
+    expect(shouldRecomputeReplayOverlays(null, key)).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key })).toBe(false);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, currentBarTime: '2026-10-20T10:11:00+09:00' })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, revealedStateCount: 2 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, width: 900 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, height: 400 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, priceScaleWidth: 80 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, interval: 5 })).toBe(true);
+
+    expect(shouldRecomputeReplayOverlays(key, { ...key, labelOnLeft: true })).toBe(true);
   });
 });
 

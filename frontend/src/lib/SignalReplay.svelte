@@ -620,6 +620,7 @@
 
 <style>
   .replay-page {
+    --replay-chart-panel-height: 400px;
     width: 100%;
     max-width: 1320px;
     min-height: 0;
@@ -628,6 +629,7 @@
     flex-direction: column;
     gap: var(--space-3);
     overflow-y: auto;
+    scrollbar-gutter: stable;
     padding-bottom: var(--space-2);
     scrollbar-color: var(--surface-raised) var(--surface-floor);
     scrollbar-width: thin;
@@ -747,6 +749,7 @@
     min-height: 680px;
     display: grid;
     grid-template-columns: minmax(0, 2.1fr) minmax(320px, 1fr);
+    align-items: start;
     gap: var(--space-3);
   }
 
@@ -757,10 +760,12 @@
     display: flex;
     flex-direction: column;
     gap: var(--space-3);
+    align-self: start;
   }
 
   .replay-main :global(.replay-chart) {
-    flex: 1;
+    height: var(--replay-chart-panel-height);
+    flex: 0 0 var(--replay-chart-panel-height);
   }
 
   .section-head {
