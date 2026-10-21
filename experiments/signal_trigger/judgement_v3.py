@@ -1,7 +1,7 @@
 """document_judgement/v3 오프라인 실험: 자유 문장 event 대신 구조화된 사건 필드와 대상 관련성으로 트리거를 줄인다.
 
 입력: 리플레이 내보내기 JSON, document_judgement/v3 프롬프트.
-캐시: /tmp/sigana/v3_<model>.jsonl (모델별, 문서 id 기준).
+캐시: /tmp/sigana/<prompt>_<model>.jsonl (프롬프트 버전과 모델별, 문서 id 기준). --prompt-version으로 프롬프트를 고른다(기본 v3).
 실행:
     AI_SIGNAL_LLM_API_KEY=$(security find-generic-password -s cgv-gemini-api-key -w) \
         services/ai_signal/.venv/bin/python experiments/signal_trigger/judgement_v3.py [--model M] [--compare M2]
@@ -39,17 +39,19 @@ ROOT = Path(__file__).resolve().parents[2]
 EXPORT = ROOT / "frontend/public/replay/000660-2026-10-14.json"
 ENV_FILE = Path("/tmp/replay-state/llm.env")
 STATE_DIRECTION = {"POSITIVE": 1, "NEGATIVE": -1, "NEUTRAL": 0}
-PROMPT = ROOT / "services/ai_signal/src/ai_signal/prompts/document_judgement/v3.md"
+PROMPT_DIR = ROOT / "services/ai_signal/src/ai_signal/prompts/document_judgement"
+PROMPT_VERSION = "v3"
+PROMPT = PROMPT_DIR / f"{PROMPT_VERSION}.md"
 CACHE_DIR = Path("/tmp/sigana")
 MODEL = os.environ.get("V3_MODEL", "gemini-3.5-flash-lite")
-CALL_LOG = CACHE_DIR / "v3_calls.log"
-SUMMARY = CACHE_DIR / "v3_summary.md"
+CALL_LOG = CACHE_DIR / f"{PROMPT_VERSION}_calls.log"
+SUMMARY = CACHE_DIR / f"{PROMPT_VERSION}_summary.md"
 MAX_CONSECUTIVE_RATE_LIMIT = 20
 ROUTES: tuple[Route, ...] = ()
 
 
 def cache_path(model: str) -> Path:
-    return CACHE_DIR / f"v3_{model.replace('/', '_')}.jsonl"
+    return CACHE_DIR / f"{PROMPT_VERSION}_{model.replace('/', '_')}.jsonl"
 
 
 class RateLimitExhausted(RuntimeError):
@@ -447,13 +449,18 @@ def agreement(docs: list[Doc], other_model: str) -> str:
 
 
 def main() -> tuple[dict[str, Any], list[Doc], str | None]:
-    global MODEL, ROUTES
+    global MODEL, ROUTES, PROMPT_VERSION, PROMPT, CALL_LOG, SUMMARY
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--compare", default=None)
     parser.add_argument("--routes", default=os.environ.get("V3_ROUTES", ""))
     parser.add_argument("--no-call", action="store_true")
+    parser.add_argument("--prompt-version", default=PROMPT_VERSION)
     args = parser.parse_args()
+    PROMPT_VERSION = args.prompt_version
+    PROMPT = PROMPT_DIR / f"{PROMPT_VERSION}.md"
+    CALL_LOG = CACHE_DIR / f"{PROMPT_VERSION}_calls.log"
+    SUMMARY = CACHE_DIR / f"{PROMPT_VERSION}_summary.md"
     MODEL = args.model
     if args.routes:
         ROUTES = parse_routes(args.routes)
