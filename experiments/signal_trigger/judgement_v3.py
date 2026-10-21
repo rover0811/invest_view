@@ -6,6 +6,9 @@
     AI_SIGNAL_LLM_API_KEY=$(security find-generic-password -s cgv-gemini-api-key -w) \
         services/ai_signal/.venv/bin/python experiments/signal_trigger/judgement_v3.py [--model M] [--compare M2]
 모델은 --model, 환경 변수 V3_MODEL, 기본값 gemini-3.5-flash-lite 순서로 정한다.
+--routes "gemini:M1,openrouter:M2"(또는 V3_ROUTES)를 주면 라우팅 계층으로 판정한다. QUOTA_EXHAUSTED나
+차단된 경로는 다음 경로로 넘어가고, 결과는 실제로 판정한 모델의 캐시에 adapter 필드와 함께 쓴다.
+분석은 경로 순서대로 각 모델 캐시를 합쳐서 한다. 키는 GEMINI_API_KEY, OPENROUTER_API_KEY 환경 변수로 준다.
 RATE_LIMIT가 연속 MAX_CONSECUTIVE_RATE_LIMIT회를 넘으면 판정을 멈추고 종료 코드 3을 돌려준다.
 API 키가 없으면 캐시만으로 분석한다. 요약은 /tmp/sigana/v3_summary.md에 쓴다.
 """
@@ -30,6 +33,8 @@ from pydantic import BaseModel, ConfigDict, Field
 from ai_signal.llm import CompletionRequest, LlmError, LlmErrorKind
 from ai_signal.llm.adapters.openai_compatible import json_schema_text
 from ai_signal.llm.adapters.openrouter import OpenRouterAdapter, OpenRouterSettings
+from ai_signal.llm.container import build_llm
+from ai_signal.llm.routing import Llm, Route, parse_routes
 ROOT = Path(__file__).resolve().parents[2]
 EXPORT = ROOT / "frontend/public/replay/000660-2026-10-14.json"
 ENV_FILE = Path("/tmp/replay-state/llm.env")
@@ -40,6 +45,7 @@ MODEL = os.environ.get("V3_MODEL", "gemini-3.5-flash-lite")
 CALL_LOG = CACHE_DIR / "v3_calls.log"
 SUMMARY = CACHE_DIR / "v3_summary.md"
 MAX_CONSECUTIVE_RATE_LIMIT = 20
+ROUTES: tuple[Route, ...] = ()
 
 
 def cache_path(model: str) -> Path:
@@ -105,6 +111,7 @@ class Doc:
     published_at: datetime
     v3: V3 | None = None
     event: int | None = None
+    source: str | None = None
 
 
 def load_env() -> None:
@@ -122,6 +129,27 @@ def load_export() -> tuple[dict[str, Any], list[Doc]]:
     ]
     docs.sort(key=lambda d: d.published_at)
     return data, docs
+
+
+def read_cache_rows(model: str) -> dict[str, dict[str, Any]]:
+    path = cache_path(model)
+    rows: dict[str, dict[str, Any]] = {}
+    if path.exists():
+        for line in path.read_text().splitlines():
+            row = json.loads(line)
+            rows[row["id"]] = row
+    return rows
+
+
+def merged_cache() -> dict[str, tuple[V3, str]]:
+    """경로 순서대로 모델 캐시를 합친다. 값은 (판정, adapter:model)."""
+    out: dict[str, tuple[V3, str]] = {}
+    for route in ROUTES or (Route("openrouter", MODEL),):
+        for doc_id, row in read_cache_rows(route.model).items():
+            if doc_id not in out:
+                adapter = row.get("adapter", route.adapter_name if ROUTES else "legacy")
+                out[doc_id] = (V3.model_validate(row["output"]), f"{adapter}:{route.model}")
+    return out
 
 
 def read_cache(model: str) -> dict[str, V3]:
@@ -150,9 +178,52 @@ def messages(doc: Doc, prompt: str) -> list[dict[str, str]]:
     ]
 
 
-def log_call(doc_id: str, status: str) -> None:
+def log_call(doc_id: str, status: str, where: str | None = None) -> None:
     with CALL_LOG.open("a") as f:
-        f.write(f"{datetime.now().isoformat()}\t{doc_id}\t{status}\t{MODEL}\n")
+        f.write(f"{datetime.now().isoformat()}\t{doc_id}\t{status}\t{where or MODEL}\n")
+
+
+def write_cache(model: str, row: dict[str, Any]) -> None:
+    with cache_path(model).open("a") as f:
+        f.write(json.dumps(row, ensure_ascii=False) + "\n")
+
+
+async def judge_routed(llm: Llm, doc: Doc, prompt: str, lock: asyncio.Lock) -> None:
+    """경로를 순서대로 시도한다. RATE_LIMIT는 같은 경로에서 기다렸다가 다시 시도한다."""
+    global _consecutive_rate_limit
+    for route in ROUTES:
+        if llm.health.blocked(route) is not None:
+            continue
+        port = llm.port(route)
+        for attempt in range(MAX_ATTEMPTS):
+            try:
+                result = await port.complete(llm.request(route, messages(doc, prompt)), V3)
+            except LlmError as exc:
+                log_call(doc.id, exc.kind.value, str(route))
+                llm.health.record_failure(route, exc)
+                if exc.kind == LlmErrorKind.QUOTA_EXHAUSTED or llm.health.blocked(route) is not None:
+                    print(f"route {route} {exc.kind.value}; falling through", flush=True)
+                    break
+                if exc.kind == LlmErrorKind.RATE_LIMIT:
+                    _consecutive_rate_limit += 1
+                    if _consecutive_rate_limit > MAX_CONSECUTIVE_RATE_LIMIT:
+                        raise RateLimitExhausted(str(route)) from exc
+                    wait = exc.retry_after or min(120.0, 5.0 * 2**attempt)
+                else:
+                    wait = 2.0 * (attempt + 1)
+                await asyncio.sleep(wait + random.random())
+                continue
+            llm.health.record_success(route)
+            log_call(doc.id, "OK", str(route))
+            _consecutive_rate_limit = 0
+            doc.v3, doc.source = result.output, str(route)
+            async with lock:
+                write_cache(route.model, {
+                    "id": doc.id, "adapter": route.adapter_name, "model": result.model_version,
+                    "output": result.output.model_dump(),
+                })
+            return
+    print(f"gave up {doc.id} {doc.title[:40]}", flush=True)
 
 
 async def judge_one(client: OpenRouterAdapter, doc: Doc, prompt: str, lock: asyncio.Lock) -> None:
@@ -186,11 +257,30 @@ async def judge_one(client: OpenRouterAdapter, doc: Doc, prompt: str, lock: asyn
 
 
 async def judge_all(docs: list[Doc]) -> None:
-    cached = read_cache(MODEL)
+    cached = merged_cache()
     for d in docs:
-        d.v3 = cached.get(d.id)
+        if d.id in cached:
+            d.v3, d.source = cached[d.id]
     todo = [d for d in docs if d.v3 is None]
     if not todo:
+        return
+    if ROUTES:
+        if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("OPENROUTER_API_KEY")):
+            print(f"no API key; {len(todo)} documents stay unjudged")
+            return
+        os.environ["AI_SIGNAL_LLM_ROUTES_DOCUMENT_JUDGEMENT"] = ",".join(map(str, ROUTES))
+        llm = build_llm()
+        prompt = PROMPT.read_text()
+        lock = asyncio.Lock()
+        try:
+            for d in todo:
+                await judge_routed(llm, d, prompt, lock)
+                print(f"judged {sum(x.v3 is not None for x in docs)}/{len(docs)} via {d.source}", flush=True)
+        finally:
+            for port in llm.adapters.values():
+                close = getattr(port, "aclose", None)
+                if close is not None:
+                    await close()
         return
     if not os.environ.get("AI_SIGNAL_LLM_API_KEY"):
         print(f"no API key; {len(todo)} documents stay unjudged")
@@ -308,7 +398,9 @@ def md(text: str) -> str:
 
 def summary(docs: list[Doc], events: list[Event], triggers: list[Trigger]) -> str:
     judged = [d for d in docs if d.v3]
-    out = [f"model {MODEL} judged {len(judged)}/{len(docs)}", ""]
+    sources = Counter(d.source or "unknown" for d in judged)
+    out = [f"model {MODEL} routes {','.join(map(str, ROUTES)) or '-'} judged {len(judged)}/{len(docs)}",
+           "sources: " + ", ".join(f"{k} {n}" for k, n in sources.most_common()), ""]
     for name in ("info_type", "target_relevance", "event_type"):
         c = Counter(str(getattr(d.v3, name)) for d in judged if d.v3)
         out.append(f"{name}: " + ", ".join(f"{k} {n}" for k, n in c.most_common()))
@@ -355,16 +447,22 @@ def agreement(docs: list[Doc], other_model: str) -> str:
 
 
 def main() -> tuple[dict[str, Any], list[Doc], str | None]:
-    global MODEL
+    global MODEL, ROUTES
     parser = argparse.ArgumentParser()
     parser.add_argument("--model", default=MODEL)
     parser.add_argument("--compare", default=None)
+    parser.add_argument("--routes", default=os.environ.get("V3_ROUTES", ""))
     parser.add_argument("--no-call", action="store_true")
     args = parser.parse_args()
     MODEL = args.model
-    load_env()
+    if args.routes:
+        ROUTES = parse_routes(args.routes)
+        MODEL = ROUTES[0].model
+    else:
+        load_env()
     if args.no_call:
-        os.environ.pop("AI_SIGNAL_LLM_API_KEY", None)
+        for key in ("AI_SIGNAL_LLM_API_KEY", "GEMINI_API_KEY", "OPENROUTER_API_KEY"):
+            os.environ.pop(key, None)
     data, docs = load_export()
     try:
         asyncio.run(judge_all(docs))
