@@ -225,5 +225,8 @@ class MoveSink:
             session, RequestTrigger("SYMBOL", (record.symbol,))
         )
         await publish_signal_requests(
-            context.outbox, targets, SignalRequestReason.PRICE_STATE_CHANGE
+            context.outbox,
+            targets,
+            SignalRequestReason.PRICE_STATE_CHANGE,
+            record.window_end,
         )

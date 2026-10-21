@@ -33,7 +33,7 @@ from ai_signal.documents.news import NEWS_RAW_TOPIC, news_idempotency_key
 from ai_signal.documents.processor import DocumentProcessor
 from ai_signal.outbox.relay import OutboxRelay, create_producer
 from alembic import command
-from tests.document_fakes import judgement, news_value, scripted_judge
+from tests.document_fakes import PUBLISHED_AT, judgement, news_value, scripted_judge
 
 ADMIN_URL = os.environ.get("AI_SIGNAL_IT_DATABASE_URL")
 BOOTSTRAP = os.environ.get("AI_SIGNAL_IT_KAFKA_BOOTSTRAP_SERVERS")
@@ -230,4 +230,5 @@ def test_news_raw_to_judgement_outbox_and_signal_request(database_url: str) -> N
     assert AvroValueDeserializer(client).deserialize("signal-requests", payload) == {
         "symbol": "000660",
         "reason": "NEW_DOCUMENT",
+        "event_time": PUBLISHED_AT,
     }

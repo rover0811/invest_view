@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import asyncio
 
 from ai_signal.avro import AvroValueDeserializer, AvroValueSerializer
@@ -12,6 +14,8 @@ from ai_signal.signal_requests import (
     request_targets,
 )
 from tests.fakes import FakeSession, as_session, compiled_params, mock_registry
+
+EVENT_TIME = datetime(2026, 10, 20, 1, 5, tzinfo=UTC)
 
 
 def test_phase1_targets_are_the_trigger_symbols_in_order() -> None:
@@ -27,7 +31,10 @@ def test_publish_writes_one_avro_event_per_symbol() -> None:
 
     ids = asyncio.run(
         publish_signal_requests(
-            writer, ["005930", "005930", "000660"], SignalRequestReason.NEW_DOCUMENT
+            writer,
+            ["005930", "005930", "000660"],
+            SignalRequestReason.NEW_DOCUMENT,
+            EVENT_TIME,
         )
     )
 
@@ -39,4 +46,8 @@ def test_publish_writes_one_avro_event_per_symbol() -> None:
     payload = params[1]["payload"]
     assert isinstance(payload, bytes)
     decoded = AvroValueDeserializer(client).deserialize(SIGNAL_REQUESTS_TOPIC, payload)
-    assert decoded == {"symbol": "000660", "reason": "NEW_DOCUMENT"}
+    assert decoded == {
+        "symbol": "000660",
+        "reason": "NEW_DOCUMENT",
+        "event_time": EVENT_TIME,
+    }

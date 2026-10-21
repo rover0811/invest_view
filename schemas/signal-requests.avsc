@@ -5,6 +5,7 @@
   "doc": "Request to regenerate the latest signal state for a symbol",
   "fields": [
     {"name": "symbol", "type": "string"},
-    {"name": "reason", "type": {"type": "enum", "name": "SignalRequestReason", "symbols": ["PRICE_STATE_CHANGE", "NEW_DOCUMENT", "FLOW_UPDATE", "TARGET_PRICE_UPDATE", "MARKET_CLOSE"]}}
+    {"name": "reason", "type": {"type": "enum", "name": "SignalRequestReason", "symbols": ["PRICE_STATE_CHANGE", "NEW_DOCUMENT", "FLOW_UPDATE", "TARGET_PRICE_UPDATE", "MARKET_CLOSE"]}},
+    {"name": "event_time", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "event time of the trigger: article published_at for NEW_DOCUMENT, move window_end for PRICE_STATE_CHANGE"}
   ]
 }

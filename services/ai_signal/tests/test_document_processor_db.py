@@ -63,10 +63,41 @@ def clean_url(database_url: str) -> str:
         async with engine.begin() as connection:
             for table in reversed(TABLES):
                 _ = await connection.execute(text(f"DELETE FROM {table}"))
+            _ = await connection.execute(text("DELETE FROM gold.move"))
         await engine.dispose()
 
     asyncio.run(truncate())
+    _set_move(database_url, "POSITIVE")
     return database_url
+
+
+def _set_move(url: str, price_state: str | None) -> None:
+    """Latest move state of 000660; ``None`` removes the move."""
+
+    async def run() -> None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        async with engine.begin() as connection:
+            _ = await connection.execute(text("DELETE FROM gold.move"))
+            if price_state is not None:
+                _ = await connection.execute(
+                    text(
+                        """
+                        INSERT INTO gold.move (
+                            move_id, move_type, symbol_entity_id, window_start,
+                            window_end, return_pct, price_state, beta_method,
+                            signal_status, version
+                        )
+                        SELECT gen_random_uuid(), 'DAILY', entity_id,
+                               now() - interval '1 day', now(), 3.1, :state,
+                               'OLS_4L', 'HIDDEN', 1
+                        FROM reference.entity_symbol WHERE ticker = '000660'
+                        """
+                    ),
+                    {"state": price_state},
+                )
+        await engine.dispose()
+
+    asyncio.run(run())
 
 
 def _process(url: str, judge: DocumentJudge, *messages: ConsumedMessage) -> None:
@@ -139,12 +170,11 @@ def test_enabled_symbol_is_judged_and_requests_a_signal(clean_url: str) -> None:
     assert _rows(clean_url, "SELECT aggregatetype, aggregateid FROM outbox.events") == [
         ("signal-requests", "000660")
     ]
-    assert (
-        _rows(clean_url, "SELECT convert_from(payload, 'UTF8') FROM outbox.events")[0][
-            0
-        ]
-        == "signal-requests:[('reason', 'NEW_DOCUMENT'), ('symbol', '000660')]"
-    )
+    payload = _rows(
+        clean_url, "SELECT convert_from(payload, 'UTF8') FROM outbox.events"
+    )[0][0]
+    assert payload.startswith("signal-requests:[('event_time', datetime.datetime(")
+    assert payload.endswith("('reason', 'NEW_DOCUMENT'), ('symbol', '000660')]")
     (request,) = step.requests
     assert request.title == message.value["title"]
     assert [(c.ticker, c.name, c.sectors) for c in request.candidates] == [
@@ -210,7 +240,7 @@ def test_title_change_adds_a_version_and_old_title_replay_is_ignored(
     ]
     counts = _counts(clean_url)
     assert counts["bronze.news_title_raw"] == 2
-    assert counts["outbox.events"] == 2
+    assert counts["outbox.events"] == 1
     assert len(step.requests) == 2
 
 
@@ -228,3 +258,32 @@ def test_same_document_under_two_symbols_links_both(clean_url: str) -> None:
     assert counts["silver.document_judgement"] == 1
     assert [c.ticker for c in step.requests[0].candidates] == ["000660"]
     assert _rows(clean_url, "SELECT aggregateid FROM outbox.events") == [("000660",)]
+
+
+@pytest.mark.parametrize(
+    ("price_state", "direction", "probability", "requested"),
+    [
+        ("POSITIVE", 1, 0.7, True),
+        ("NEGATIVE", -1, 0.9, True),
+        ("POSITIVE", 1, 0.69, False),
+        ("POSITIVE", -1, 0.9, False),
+        ("NEGATIVE", 1, 0.9, False),
+        ("POSITIVE", 0, 0.9, False),
+        ("NEUTRAL", 1, 0.9, False),
+        (None, 1, 0.9, False),
+    ],
+)
+def test_new_document_request_requires_probability_and_move_direction(
+    clean_url: str,
+    price_state: str | None,
+    direction: int,
+    probability: float,
+    requested: bool,
+) -> None:
+    _set_move(clean_url, price_state)
+    judge, _ = scripted_judge([judgement(direction=direction, probability=probability)])
+    _process(clean_url, judge, news_message())
+
+    counts = _counts(clean_url)
+    assert counts["silver.document_judgement"] == 1
+    assert counts["outbox.events"] == (1 if requested else 0)
