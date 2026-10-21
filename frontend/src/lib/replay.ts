@@ -144,6 +144,16 @@ export type ReplaySeriesUpdatePlan =
   | { mode: 'replace'; bars: ReplayBar[] }
   | { mode: 'update'; bars: ReplayBar[] };
 
+export interface ReplayOverlayKey {
+  width: number;
+  height: number;
+  priceScaleWidth: number;
+  interval: ReplayBarInterval;
+  revealedStateCount: number;
+  currentBarTime: string | null;
+  labelOnLeft: boolean;
+}
+
 export type ReplayFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -434,6 +444,20 @@ export function planReplaySeriesUpdate(
   }
 
   return { mode: 'update', bars: next.slice(firstChanged) };
+}
+
+export function shouldRecomputeReplayOverlays(
+  previous: ReplayOverlayKey | null,
+  next: ReplayOverlayKey,
+): boolean {
+  return previous == null
+    || previous.width !== next.width
+    || previous.height !== next.height
+    || previous.priceScaleWidth !== next.priceScaleWidth
+    || previous.interval !== next.interval
+    || previous.revealedStateCount !== next.revealedStateCount
+    || previous.currentBarTime !== next.currentBarTime
+    || previous.labelOnLeft !== next.labelOnLeft;
 }
 
 export function assembleHeadline(signal: ReplaySignal | undefined, name: string, rate: number): string | null {

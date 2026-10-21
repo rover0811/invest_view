@@ -20,14 +20,20 @@
     layoutReplayAnnotationTags,
     planReplaySeriesUpdate,
     replayTimeToChartCoordinate,
+    shouldRecomputeReplayOverlays,
     visibleBarsAt,
     type ReplayBar,
     type ReplayBarInterval,
     type ReplayData,
+    type ReplayOverlayKey,
     type StateBand,
   } from './replay';
 
   type PlayheadFrameDriver = (playheadMs: number) => void;
+  type RenderedBand = StateBand & { key: number; left: number; width: number };
+  type RenderedThreshold = { key: number; label: string; y: number; className: string };
+  type RenderedAnnotation = { key: number; label: string; x: number; y: number; className: string };
+  type RenderedCurrentPrice = { label: string; y: number; className: string };
 
   let {
     data,
@@ -44,10 +50,10 @@
   let futureMaskElement = $state<HTMLDivElement>();
   let updateChart = (_playhead: string, _interval: ReplayBarInterval) => {};
   let priceScaleWidth = $state(0);
-  let renderedBands = $state<Array<StateBand & { left: number; width: number }>>([]);
-  let renderedThresholds = $state<Array<{ label: string; y: number; className: string }>>([]);
-  let renderedAnnotations = $state<Array<{ label: string; x: number; y: number; className: string }>>([]);
-  let renderedCurrentPrice = $state<{ label: string; y: number; className: string } | null>(null);
+  let renderedBands = $state<RenderedBand[]>([]);
+  let renderedThresholds = $state<RenderedThreshold[]>([]);
+  let renderedAnnotations = $state<RenderedAnnotation[]>([]);
+  let renderedCurrentPrice = $state<RenderedCurrentPrice | null>(null);
   let interval = $state<ReplayBarInterval>(3);
   let intervalSelected = false;
 
@@ -118,6 +124,10 @@
     interval = nextInterval;
   }
 
+  function replaceArray<T>(target: T[], next: T[]) {
+    target.splice(0, target.length, ...next);
+  }
+
   $effect(() => {
     const mobile = window.matchMedia('(max-width: 720px)');
     const applyDefault = () => {
@@ -156,6 +166,7 @@
     const annotationRowHeight = space8;
     const playheadLabelFallbackWidth = space8 + space6;
     const thresholdLabelReserve = space8 + space6;
+    const labelSideHysteresis = space3;
 
     const chart = createChart(chartHost, {
       layout: {
@@ -242,12 +253,23 @@
 
     const markerApi = createSeriesMarkers(candleSeries, []);
     const replayBands = computeStateBands(data.states, finalBar.t);
+    const playheadLabelNode = playheadNode.querySelector('span');
+    const playheadLabelWidth = playheadLabelNode?.getBoundingClientRect().width
+      ?? playheadLabelFallbackWidth;
 
     let latestPlayheadMs = Date.parse(untrack(() => playhead));
     let smoothPlayheadMs = latestPlayheadMs;
     let latestInterval = untrack(() => interval);
     let renderedBars: ReplayBar[] | null = null;
     let revealedStateCount = -1;
+    let overlayKey: ReplayOverlayKey | null = null;
+    let latestPriceScaleWidth = 0;
+    let labelOnLeft = playheadNode.classList.contains('label-left');
+    let chartWidth = chartHost.clientWidth;
+    let chartHeight = chartHost.clientHeight;
+    let resizeAnimationFrame = 0;
+    let overlayAnimationFrame = 0;
+    let pendingWidthFit = false;
 
     function setAnchorData(nextInterval: ReplayBarInterval) {
       const anchorData: LineData<UTCTimestamp>[] = [];
@@ -276,15 +298,26 @@
 
     function movePlayhead(nextPlayheadMs: number) {
       smoothPlayheadMs = nextPlayheadMs;
-      const nextPlayheadX = xForTimeMs(nextPlayheadMs);
+      const axisWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
+      const hostWidth = chartHost.clientWidth;
+      const plotRight = Math.max(0, hostWidth - axisWidth);
+      const nextPlayheadX = replayTimeToChartCoordinate(
+        data.bars,
+        new Date(nextPlayheadMs).toISOString(),
+        plotRight,
+      );
+      const labelBoundary = plotRight - playheadLabelWidth - space2;
+      const nextLabelOnLeft = labelOnLeft
+        ? nextPlayheadX >= labelBoundary - labelSideHysteresis
+        : nextPlayheadX > labelBoundary;
       const transform = `translate3d(${nextPlayheadX}px, 0, 0)`;
       playheadNode.style.transform = transform;
       futureMaskNode.style.transform = transform;
-
-      const plotRight = Math.max(0, chartHost.clientWidth - chart.priceScale('right').width());
-      const playheadLabelWidth = playheadNode.querySelector('span')?.getBoundingClientRect().width
-        ?? playheadLabelFallbackWidth;
-      playheadNode.classList.toggle('label-left', nextPlayheadX > plotRight - playheadLabelWidth - space2);
+      if (nextLabelOnLeft !== labelOnLeft) {
+        labelOnLeft = nextLabelOnLeft;
+        playheadNode.classList.toggle('label-left', labelOnLeft);
+        syncOverlays(nextPlayheadMs, revealedStatesAt(nextPlayheadMs));
+      }
     }
 
     function revealedStatesAt(nextPlayheadMs: number) {
@@ -292,18 +325,35 @@
     }
 
     function syncOverlays(nextPlayheadMs: number, revealedStates: ReplayData['states']) {
+      const currentBar = data.bars.findLast((bar) => Date.parse(bar.t) <= nextPlayheadMs);
+      const nextPriceScaleWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
+      const nextOverlayKey: ReplayOverlayKey = {
+        width: chartHost.clientWidth,
+        height: chartHost.clientHeight,
+        priceScaleWidth: nextPriceScaleWidth,
+        interval: latestInterval,
+        revealedStateCount: revealedStates.length,
+        currentBarTime: currentBar?.t ?? null,
+        labelOnLeft,
+      };
+      if (!shouldRecomputeReplayOverlays(overlayKey, nextOverlayKey)) return;
+
+      overlayKey = nextOverlayKey;
       const nextPlayheadX = xForTimeMs(nextPlayheadMs);
-      priceScaleWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
-      const plotRight = Math.max(0, chartHost.clientWidth - priceScaleWidth);
-      renderedBands = replayBands.map((band) => {
+      if (latestPriceScaleWidth !== nextPriceScaleWidth) {
+        latestPriceScaleWidth = nextPriceScaleWidth;
+        priceScaleWidth = nextPriceScaleWidth;
+      }
+      const plotRight = Math.max(0, chartHost.clientWidth - nextPriceScaleWidth);
+      const nextBands = replayBands.map((band, index) => {
         const left = xForTime(band.start);
         const right = xForTime(band.end);
-        return { ...band, left, width: Math.max(0, right - left) };
+        return { ...band, key: index, left, width: Math.max(0, right - left) };
       });
+      replaceArray(renderedBands, nextBands);
 
-      const currentBar = data.bars.findLast((bar) => Date.parse(bar.t) <= nextPlayheadMs);
       const currentPriceY = currentBar ? candleSeries.priceToCoordinate(currentBar.c) : null;
-      renderedCurrentPrice = currentBar && currentPriceY != null
+      const nextCurrentPrice = currentBar && currentPriceY != null
         ? {
             label: fmtPrice(currentBar.c),
             y: Number(currentPriceY),
@@ -312,6 +362,15 @@
               : currentBar.c < data.prev_close ? 'negative' : 'neutral',
           }
         : null;
+      if (nextCurrentPrice == null) {
+        renderedCurrentPrice = null;
+      } else if (renderedCurrentPrice == null) {
+        renderedCurrentPrice = nextCurrentPrice;
+      } else {
+        renderedCurrentPrice.label = nextCurrentPrice.label;
+        renderedCurrentPrice.y = nextCurrentPrice.y;
+        renderedCurrentPrice.className = nextCurrentPrice.className;
+      }
 
       const minimumY = space6 + space2;
       const maximumY = Math.max(minimumY, chartHost.clientHeight - space6 - space6);
@@ -329,22 +388,20 @@
         return { ...threshold, y };
       });
       const overflow = Math.max(0, (nudged.at(-1)?.y ?? maximumY) - maximumY);
-      const nextThresholds = nudged.map((threshold) => ({
+      const nextThresholds = nudged.map((threshold, index) => ({
+        key: index,
         label: threshold.label,
         y: Math.max(minimumY, threshold.y - overflow),
         className: threshold.className,
       }));
-      renderedThresholds = nextThresholds;
+      replaceArray(renderedThresholds, nextThresholds);
 
       const annotationSpecs = revealedStates.map((state) => ({
         label: state.state === 'POSITIVE' ? '긍정 진입' : state.state === 'NEGATIVE' ? '부정 진입' : '중립 전환',
         anchorX: xForTime(state.t),
         className: state.state.toLowerCase(),
       }));
-      const playheadLabelWidth = playheadNode.querySelector('span')?.getBoundingClientRect().width
-        ?? playheadLabelFallbackWidth;
-      const playheadLabelOnLeft = playheadNode.classList.contains('label-left');
-      const playheadLabelRange = playheadLabelOnLeft
+      const playheadLabelRange = labelOnLeft
         ? { start: nextPlayheadX - space2 - playheadLabelWidth, end: nextPlayheadX - space2, row: 0 }
         : { start: nextPlayheadX + space2, end: nextPlayheadX + space2 + playheadLabelWidth, row: 0 };
       const thresholdLabelRanges = Array.from({ length: annotationSpecs.length }, (_, row) => row)
@@ -369,12 +426,14 @@
         ],
       );
 
-      renderedAnnotations = annotationSpecs.map((annotation, index) => ({
+      const nextAnnotations = annotationSpecs.map((annotation, index) => ({
+        key: index,
         label: annotation.label,
         x: annotationLayout[index].x,
         y: space1 + annotationLayout[index].row * annotationRowHeight,
         className: annotation.className,
       }));
+      replaceArray(renderedAnnotations, nextAnnotations);
     }
 
     function syncStateDecorations(nextPlayheadMs: number, aggregatedBars: ReplayBar[], force = false) {
@@ -400,12 +459,24 @@
       syncOverlays(nextPlayheadMs, revealedStates);
     }
 
-    function syncSize() {
-      chart.resize(chartHost.clientWidth, chartHost.clientHeight);
-      setAnchorData(latestInterval);
-      chart.timeScale().fitContent();
-      movePlayhead(smoothPlayheadMs);
-      syncOverlays(latestPlayheadMs, revealedStatesAt(latestPlayheadMs));
+    function syncSize(nextWidth: number, nextHeight: number) {
+      const widthChanged = nextWidth !== chartWidth;
+      const heightChanged = nextHeight !== chartHeight;
+      if (!widthChanged && !heightChanged) return;
+
+      chartWidth = nextWidth;
+      chartHeight = nextHeight;
+      pendingWidthFit ||= widthChanged;
+      cancelAnimationFrame(resizeAnimationFrame);
+      resizeAnimationFrame = requestAnimationFrame(() => {
+        chart.resize(chartWidth, chartHeight);
+        if (pendingWidthFit) {
+          chart.timeScale().fitContent();
+        }
+        pendingWidthFit = false;
+        movePlayhead(smoothPlayheadMs);
+        syncOverlays(latestPlayheadMs, revealedStatesAt(latestPlayheadMs));
+      });
     }
 
     updateChart = (nextPlayhead: string, nextInterval: ReplayBarInterval) => {
@@ -438,14 +509,20 @@
       syncStateDecorations(nextMs, aggregatedBars, initialLoad || intervalChanged);
     };
 
-    const resizeObserver = new ResizeObserver(() => syncSize());
+    const resizeObserver = new ResizeObserver(() => syncSize(chartHost.clientWidth, chartHost.clientHeight));
     resizeObserver.observe(chartHost);
-    updateChart(new Date(latestPlayheadMs).toISOString(), latestInterval);
+    untrack(() => updateChart(new Date(latestPlayheadMs).toISOString(), latestInterval));
     registerPlayheadFrame?.(movePlayhead);
+    overlayAnimationFrame = requestAnimationFrame(() => {
+      movePlayhead(smoothPlayheadMs);
+      syncOverlays(latestPlayheadMs, revealedStatesAt(latestPlayheadMs));
+    });
 
     return () => {
       updateChart = () => {};
       registerPlayheadFrame?.(null);
+      cancelAnimationFrame(resizeAnimationFrame);
+      cancelAnimationFrame(overlayAnimationFrame);
       resizeObserver.disconnect();
       markerApi.detach();
       chart.remove();
@@ -453,7 +530,9 @@
   });
 
   $effect(() => {
-    updateChart(playhead, interval);
+    const nextPlayhead = playhead;
+    const nextInterval = interval;
+    untrack(() => updateChart(nextPlayhead, nextInterval));
   });
 </script>
 
@@ -479,7 +558,7 @@
   </header>
   <div class="chart-stage" class:after-close={afterClose}>
     <div class="band-layer" aria-hidden="true">
-      {#each renderedBands as band}
+      {#each renderedBands as band (band.key)}
         <span
           class="state-band {band.state.toLowerCase()}"
           style="left: {band.left}px; width: {band.width}px;"
@@ -489,7 +568,7 @@
     <div bind:this={host} class="chart-host"></div>
     <div bind:this={futureMaskElement} class="future-mask" aria-hidden="true"></div>
     <div class="after-close-dim" aria-hidden="true"></div>
-    {#each renderedThresholds as threshold}
+    {#each renderedThresholds as threshold (threshold.key)}
       <span
         class="threshold-label {threshold.className}"
         style="top: {threshold.y}px; right: calc({priceScaleWidth}px + var(--space-2));"
@@ -503,7 +582,7 @@
         aria-hidden="true"
       >{renderedCurrentPrice.label}</span>
     {/if}
-    {#each renderedAnnotations as annotation}
+    {#each renderedAnnotations as annotation (annotation.key)}
       <span
         class="state-annotation {annotation.className}"
         style="left: {annotation.x}px; top: {annotation.y}px;"
@@ -521,6 +600,7 @@
 
 <style>
   .replay-chart {
+    box-sizing: border-box;
     min-height: 0;
     display: flex;
     flex-direction: column;
