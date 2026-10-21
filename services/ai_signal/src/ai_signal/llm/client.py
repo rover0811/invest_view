@@ -21,6 +21,8 @@ from pydantic import AliasChoices, BaseModel, Field, ValidationError
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 ResponseMode = Literal["json_schema", "json_object"]
+Provider = Literal["openrouter", "gemini"]
+ReasoningEffort = Literal["low", "medium", "high"]
 T = TypeVar("T", bound=BaseModel)
 
 _FENCE = re.compile(r"^```(?:json)?\s*|\s*```$")
@@ -52,7 +54,11 @@ class LlmError(RuntimeError):
 
 
 class LlmSettings(BaseSettings):
-    """LLM configuration. The API key is read from ``OPENROUTER_API_KEY``."""
+    """LLM configuration. The API key is read from ``OPENROUTER_API_KEY``.
+
+    ``provider`` picks the request dialect: ``gemini`` targets Gemini's
+    OpenAI-compatible endpoint, which rejects OpenRouter's ``reasoning`` object.
+    """
 
     model_config = SettingsConfigDict(
         env_prefix="AI_SIGNAL_LLM_",
@@ -66,42 +72,57 @@ class LlmSettings(BaseSettings):
         repr=False,
         validation_alias=AliasChoices("OPENROUTER_API_KEY", "AI_SIGNAL_LLM_API_KEY"),
     )
+    provider: Provider = "openrouter"
     base_url: str = "https://openrouter.ai/api/v1"
     primary_model: str = "nvidia/nemotron-3-super-120b-a12b:free"
     secondary_model: str = "nvidia/nemotron-3.5-super-vl:free"
     max_tokens: int = 4096
     reasoning_max_tokens: int = 2048
+    gemini_reasoning_effort: ReasoningEffort = "low"
     max_concurrency: int = 2
     timeout_seconds: float = 90.0
 
 
 @dataclass(frozen=True)
 class ModelSpec:
-    """One model endpoint. ``reasoning_max_tokens`` caps thinking separately (18.8)."""
+    """One model endpoint. ``reasoning_max_tokens`` caps thinking separately (18.8).
+
+    OpenRouter takes the cap as a ``reasoning`` object; Gemini takes only
+    ``reasoning_effort``.
+    """
 
     model: str
     response_mode: ResponseMode
     max_tokens: int
     reasoning_max_tokens: int | None = None
     temperature: float = 0.0
+    provider: Provider = "openrouter"
+    reasoning_effort: ReasoningEffort | None = None
+
+
+def _spec(settings: LlmSettings, model: str) -> ModelSpec:
+    if settings.provider == "gemini":
+        return ModelSpec(
+            model=model,
+            response_mode="json_schema",
+            max_tokens=settings.max_tokens,
+            provider="gemini",
+            reasoning_effort=settings.gemini_reasoning_effort,
+        )
+    return ModelSpec(
+        model=model,
+        response_mode="json_schema",
+        max_tokens=settings.max_tokens,
+        reasoning_max_tokens=settings.reasoning_max_tokens,
+    )
 
 
 def primary_spec(settings: LlmSettings) -> ModelSpec:
-    return ModelSpec(
-        model=settings.primary_model,
-        response_mode="json_schema",
-        max_tokens=settings.max_tokens,
-        reasoning_max_tokens=settings.reasoning_max_tokens,
-    )
+    return _spec(settings, settings.primary_model)
 
 
 def secondary_spec(settings: LlmSettings) -> ModelSpec:
-    return ModelSpec(
-        model=settings.secondary_model,
-        response_mode="json_schema",
-        max_tokens=settings.max_tokens,
-        reasoning_max_tokens=settings.reasoning_max_tokens,
-    )
+    return _spec(settings, settings.secondary_model)
 
 
 @dataclass(frozen=True)
@@ -135,7 +156,9 @@ def build_payload(
         }
     else:
         payload["response_format"] = {"type": "json_object"}
-    if spec.reasoning_max_tokens is not None:
+    if spec.reasoning_effort is not None:
+        payload["reasoning_effort"] = spec.reasoning_effort
+    if spec.provider == "openrouter" and spec.reasoning_max_tokens is not None:
         payload["reasoning"] = {
             "max_tokens": spec.reasoning_max_tokens,
             "exclude": True,
