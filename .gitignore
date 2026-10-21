@@ -235,3 +235,6 @@ services/stream_detection/jars/
 /*.jpg
 # Presentation / slide artifacts (binaries, not source)
 docs/slides/
+
+# Replay exports built from real news feeds stay local (regenerate with `python -m ai_signal.replay export`)
+frontend/public/replay/[0-9]*.json
