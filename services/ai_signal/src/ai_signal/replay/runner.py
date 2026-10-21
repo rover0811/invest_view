@@ -39,6 +39,7 @@ SELECT version, price_state, window_end, return_pct, signal_status,
        contrib_global, contrib_market, contrib_sector, contrib_idio, dominant_layer
 FROM gold.move WHERE move_id = $1
 """
+_EXPORT_DECISIONS = "SELECT decision, reason, created_at FROM gold.signal_decision WHERE move_id = $1 ORDER BY id"
 _SIGNALS = "SELECT version, status, decided_by, llm_attempts FROM gold.signal WHERE move_id = $1"
 _JUDGEMENTS = """
 SELECT j.document_id, j.version, j.llm_attempts FROM silver.document_judgement j
@@ -254,6 +255,7 @@ async def _export(symbol: str, day: date, pg_dsn: str) -> dict[str, object]:
         signals = [dict(r) for r in await conn.fetch(_EXPORT_SIGNALS, move_id)]
         causes = [dict(r) for r in await conn.fetch(_EXPORT_CAUSES, move_id)]
         sources = [dict(r) for r in await conn.fetch(_EXPORT_SOURCES, move_id)]
+        decisions = [dict(r) for r in await conn.fetch(_EXPORT_DECISIONS, move_id)]
     finally:
         await conn.close()
     documents.sort(key=lambda d: d["published_at"])
@@ -269,7 +271,10 @@ async def _export(symbol: str, day: date, pg_dsn: str) -> dict[str, object]:
         signals=cluster.build_signal_rows(
             signals, causes, sources, state.observations, lambda at: to_replay_clock(at, state.steps)
         ),
-        log=cluster.observations_to_log(state.observations),
+        log=[
+            *cluster.observations_to_log(state.observations),
+            *cluster.decisions_to_log(decisions, lambda at: to_replay_clock(at, state.steps)),
+        ],
     )
     check_no_lookahead(export)
     return export
