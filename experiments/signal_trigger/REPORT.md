@@ -352,4 +352,60 @@
 - 트리거 조건은 이번 시뮬레이션과 같게 둡니다: NEW_FACT, DIRECT 또는 COMPETITOR, SCHEDULE과 OTHER 제외, 확신도 0.7 이상, 가격 상태와 같은 방향, 상태 안에서 처음 보는 (event_subject, event_type) 식별자, FLOW는 방향 포함, 10분 쿨다운입니다.
 - 판정 모델은 `gemini-3.5-flash-lite`를 첫 경로로 두고 OpenRouter의 무료 모델을 대체 경로로 둡니다. 다만 모델마다 판정 경향이 다르므로, 대체 경로가 판정한 기사의 비율을 기록하고 지켜봐야 합니다.
 - 프롬프트 v4에는 세 가지 규칙을 추가합니다. 공동 주체이면 대상 종목을 주체로 쓰고, 주가 결과를 정리한 기사와 연재 기획 기사는 NEW_FACT로 보지 않으며, 경쟁사의 같은 기술 이야기는 event_type을 TECH_ANNOUNCEMENT로 통일합니다.
+## v4 결과 (189건 전체 판정)
+
+### 실행 조건
+
+- 프롬프트는 `document_judgement/v4.md`이고, 출력 필드는 v3와 같습니다. v4에는 공동 주체이면 대상 종목을 주체로 쓰는 규칙, 시가총액이나 주가 변화가 중심인 기사를 PRICE_RECAP으로 보는 규칙, 연재와 기획, 분석 기사를 OPINION으로 보는 규칙, 같은 회사의 같은 기술 이야기에 event_type을 하나로 쓰는 규칙, 경쟁사 사건의 방향을 대상 종목 기준으로 판단하는 규칙, 서명한 합의가 없는 만남을 CONTRACT로 보지 않는 규칙을 넣었습니다. event_type마다 정의와 예를 붙였고, 분류 예시는 16건입니다.
+- 스크립트에 `--prompt-version` 인자를 추가했습니다(기본값 v3). 캐시는 `/tmp/sigana/<prompt>_<model>.jsonl`이므로 v3 캐시와 섞이지 않습니다.
+- 경로는 v3와 같은 `gemini:gemini-3.5-flash-lite,openrouter:nvidia/nemotron-3.5-super-vl:free`입니다. 호출은 OK 189회, RATE_LIMIT 31회, UNAVAILABLE 7회였습니다. 178건은 flash-lite가, 11건은 Gemini가 UNAVAILABLE을 돌려준 동안 nemotron이 판정했습니다. 따라서 v3와 달리 두 모델의 판정이 섞여 있습니다.
+
+### 분포 비교
+
+| 항목 | v3 | v4 |
+|---|---|---|
+| info_type | PRICE_RECAP 67, OPINION 35, NEW_FACT 33, FLOW 32, OTHER 22 | PRICE_RECAP 68, OPINION 51, NEW_FACT 26, OTHER 25, FLOW 19 |
+| event_type OTHER 비율 | 146/189 (77%) | 147/189 (78%) |
+| NEW_FACT 가운데 event_type OTHER | 3/33 | 0/26 |
+| NEW_FACT이면서 DIRECT 또는 COMPETITOR | 26 | 20 |
+| 사건 수 | 53 | 41 |
+
+- 전체 OTHER 비율은 줄지 않았습니다. NEW_FACT였던 기사가 OPINION과 PRICE_RECAP으로 옮겨 가면서 규칙상 OTHER가 되었기 때문입니다. 트리거에 쓰이는 NEW_FACT 안에서는 OTHER가 3건에서 0건으로 줄었으므로, 의도한 효과는 나타났습니다.
+- FLOW가 32건에서 19건으로 줄고 OPINION이 늘었습니다. 수급을 해석한 기사가 OPINION으로 옮겨 간 것으로 보이며, 수급 기사의 분류 기준은 다음에 따로 점검해야 합니다.
+
+### 알려진 오분류 6건
+
+| 기사 | v3 | v4 | 판단 |
+|---|---|---|---|
+| 10/14 10:00 CXMT 충격에 시총 800조 증발 | NEW_FACT, CXMT, TECH_ANNOUNCEMENT | PRICE_RECAP, 코스피, OTHER | 고쳐졌습니다 |
+| 10/14 09:09 [CXMT 추격②] 물량 공세 | NEW_FACT, PRODUCT | OPINION, OTHER | 고쳐졌습니다. 같은 연재의 ③도 SCHEDULE에서 OPINION으로 바뀌었습니다 |
+| 10/13 17:00 삼성과 하닉의 R&D 거점 합류 | 주체 삼성전자 | 주체 SK하이닉스 | 고쳐졌습니다 |
+| 10/13 18:13 삼성과 AMD 기술 공개 | COMPETITOR, 방향 +1 | COMPETITOR, 방향 -1 | 고쳐졌습니다 |
+| 최태원 회장과 앤디 김 의원 면담 (09:01, 18:42) | POLICY와 CONTRACT로 갈라짐 | 둘 다 POLICY | 고쳐졌습니다. 한 사건으로 묶입니다 |
+| 10/14 16:59 YMTC 출하량 3위와 IPO 추진 | OTHER | CAPITAL | 고쳐졌습니다 |
+
+### 사건 묶음 결과
+
+- CXMT: 제목에 CXMT나 창신이 들어간 기사가 v3에서는 창신메모리 주체의 식별자 4개(OTHER, TECH_ANNOUNCEMENT, PRODUCT, SCHEDULE)로 갈라졌습니다. v4에서는 2개(TECH_ANNOUNCEMENT 4건, OTHER 3건)로 줄었고, OTHER 3건은 모두 OPINION이나 PRICE_RECAP이라서 트리거 대상이 아닙니다. 따라서 트리거에 쓰이는 CXMT 식별자는 TECH_ANNOUNCEMENT 하나뿐입니다. 시가총액 기사를 포함한 시황 기사 5건은 코스피 주체로 갔습니다.
+- SEDEX 기조연설: SK하이닉스 TECH_ANNOUNCEMENT 사건은 v3의 15건에서 v4의 12건으로 줄었습니다. 같은 연설에서 나온 기사 가운데 12:30 HBF 최종 규격 발표 예고 기사는 SCHEDULE로, 14:37 "메모리가 AI 핵심" 기사는 OPINION으로 빠졌습니다. 16:39 SEDEX 종합 기사는 코스피 주체의 TECH_ANNOUNCEMENT로 잡혔는데, 이는 주체 판정이 틀린 것입니다. 다만 트리거 조건을 통과하지 않으므로 이번 결과에는 영향이 없습니다.
+
+### 트리거 시뮬레이션 (v3와 같은 규칙)
+
+| 시각 | 사유 | 상태 | 주체 | 유형 | 대표 기사 (요지) |
+|---|---|---|---|---|---|
+| 09:02 | 상태 변경 | POSITIVE | | | 이전 적격 기사 3건(R&D 거점 합류, 메모리 중심 공동 개발 착수, 최태원 회장 면담)을 반영 |
+| 12:30 | 새 기사 | POSITIVE | SK하이닉스 | TECH_ANNOUNCEMENT | 안현 사장의 메모리 계층 최적화 발표 |
+| 14:11 | 상태 변경 | NEUTRAL | | | 숨김 상태라서 재생성 없음 |
+| 14:37 | 상태 변경 | NEGATIVE | | | 이전 적격 기사 1건(삼성과 AMD 기술 공개)을 반영 |
+| 15:55 | 새 기사 | NEGATIVE | 창신메모리(CXMT) | TECH_ANNOUNCEMENT | CXMT 차세대 D램 기술과 삼성전자의 개발 언급 |
+| 16:59 | 새 기사 | NEGATIVE | 창장메모리(YMTC) | CAPITAL | YMTC 낸드 출하량 3위와 IPO 추진 |
+
+- 새 기사 트리거는 1회에서 3회로 늘었고, 상태 변경까지 합친 재생성은 4회에서 6회가 되었습니다. 늘어난 2회는 모두 오분류를 고친 결과입니다. v3에서는 잘못 NEW_FACT로 판정된 10:00 시총 기사가 CXMT 기술 사건을 미리 반영해 15:55 기사를 막았고, YMTC 기사는 OTHER라서 빠졌습니다. v4에서는 하락 상태에서 처음 나온 경쟁사 사건 두 건이 정상적으로 트리거가 되었습니다.
+- 14:37 NEGATIVE 상태의 이전 반영 기사가 v3의 CXMT 기사 2건(연재 기사와 시총 기사)에서 v4의 삼성과 AMD 기사 1건으로 바뀌었습니다. 하락 상태를 설명하는 근거로는 CXMT 기술 기사가 더 적절하지만, 그 기사가 14:37 이후에 나왔으므로 시간 순서상 맞는 결과입니다.
+
+### 결론
+
+- v4는 알려진 오분류 6건을 모두 고쳤고, CXMT 이야기의 트리거 식별자를 하나로 모았습니다. 트리거 횟수는 조금 늘었지만 늘어난 트리거는 모두 타당합니다.
+- 남은 문제는 세 가지입니다. 행사 종합 기사의 주체가 코스피로 잡히는 경우가 있고, 같은 연설의 일정 예고나 발언 기사가 SCHEDULE이나 OPINION으로 빠지며, FLOW와 OPINION의 경계가 v3와 달라졌습니다.
+- 이번 결과에는 nemotron 판정 11건이 섞여 있습니다. 운영에서는 대체 경로가 판정한 비율을 계속 기록해야 합니다.
 <!-- NOTES:END -->
