@@ -17,6 +17,7 @@
     replayPositionToTime,
     replayTimeToPosition,
     selectReplayFrame,
+    selectReplaySignalCard,
     splitAtSessionOpen,
     type PriceState,
     type ReplayData,
@@ -64,8 +65,9 @@
   const density = $derived(data && timeline ? buildReplayDensity(data, timeline) : []);
   const playhead = $derived(new Date(playheadMs || startMs).toISOString());
   const frame = $derived(data ? selectReplayFrame(data, playhead) : null);
-  const shownSignal = $derived(frame?.shownSignal);
-  const headline = $derived(data && frame ? assembleHeadline(shownSignal, data.name, frame.returnPct) : null);
+  const signalCard = $derived(data && frame ? selectReplaySignalCard(data, frame) : null);
+  const cardSignal = $derived(signalCard?.mode === 'shown' ? signalCard.signal : undefined);
+  const headline = $derived(data && frame ? assembleHeadline(cardSignal, data.name, frame.returnPct) : null);
   const playheadPosition = $derived(timeline ? replayTimeToPosition(timeline, playheadMs) : 0);
   const afterClose = $derived(closeMs > 0 && playheadMs > closeMs);
   const documentGroups = $derived(frame
@@ -136,7 +138,7 @@
   }
 
   function causeRank(documentId: string): number | undefined {
-    return shownSignal?.causes.find((cause) => cause.source_document_ids.includes(documentId))?.rank;
+    return cardSignal?.causes.find((cause) => cause.source_document_ids.includes(documentId))?.rank;
   }
 
   function featuredLaneDocument(documents: ReplayDocument[]): ReplayDocument | undefined {
@@ -497,8 +499,10 @@
               <time class="tnum">{formatTime(playhead)}</time>
               {#if afterClose}<span class="after-close-badge">장 마감 뒤</span>{/if}
             </span>
-            {#if shownSignal}
-              <span class="version-badge tnum">v{shownSignal.version} SHOWN</span>
+            {#if signalCard?.signal}
+              <span class="version-badge tnum">
+                v{signalCard.signal.version} {signalCard.mode === 'pending' ? '재탐색 중' : signalCard.signal.status}
+              </span>
             {:else}
               <span class="version-badge">대기 중</span>
             {/if}
@@ -509,10 +513,10 @@
             <span class="tnum {priceClass(frame.returnPct)}">{frame.returnPct >= 0 ? '+' : ''}{frame.returnPct.toFixed(1)}%</span>
           </div>
 
-          {#if shownSignal && headline}
+          {#if cardSignal && headline}
             <h2>{headline}</h2>
             <ol class="cause-list">
-              {#each shownSignal.causes.toSorted((a, b) => a.rank - b.rank) as cause}
+              {#each cardSignal.causes.toSorted((a, b) => a.rank - b.rank) as cause}
                 {@const sources = sourceDocuments(cause.source_document_ids)}
                 <li>
                   <span class="cause-rank tnum">{cause.rank}</span>
@@ -538,15 +542,20 @@
                 </li>
               {/each}
             </ol>
-          {:else if frame.signal?.status === 'HIDDEN'}
+          {:else if signalCard?.mode === 'pending'}
             <div class="hidden-state">
-              <strong>이전 시그널을 숨겼습니다.</strong>
-              <p>가격 방향이 바뀌어 새 상태의 사건으로 문구를 다시 만드는 중입니다.</p>
+              <strong>가격 상태가 바뀌어 원인을 다시 찾는 중입니다.</strong>
+              <p>새 상태와 일치하는 사건을 확인한 뒤 시그널을 표시합니다.</p>
             </div>
           {:else if barsOnly}
             <div class="hidden-state">
               <strong>이 거래일에는 생성된 시그널이 없습니다.</strong>
               <p>가격 흐름은 차트에서 그대로 확인할 수 있으며, 상태와 기사가 추가되면 시그널도 함께 표시됩니다.</p>
+            </div>
+          {:else if signalCard?.signal}
+            <div class="hidden-state">
+              <strong>표시할 원인이 없습니다.</strong>
+              <p>현재 가격 상태와 연결할 수 있는 사건이 확인되지 않았습니다.</p>
             </div>
           {:else}
             <div class="hidden-state">
@@ -555,12 +564,12 @@
             </div>
           {/if}
 
-          {#if shownSignal}
+          {#if cardSignal}
             <dl class="signal-meta">
-              <div><dt>생성 방식</dt><dd>{shownSignal.decided_by === 'llm' ? 'LLM 판단' : shownSignal.trigger.includes('FALLBACK') ? '대체 규칙' : '상태 규칙'}</dd></div>
-              <div><dt>생성 계기</dt><dd>{shownSignal.trigger}</dd></div>
-              <div><dt>프롬프트</dt><dd>{shownSignal.prompt_version}</dd></div>
-              <div><dt>모델</dt><dd>{shownSignal.model ?? '사용하지 않음'}</dd></div>
+              <div><dt>생성 방식</dt><dd>{cardSignal.decided_by === 'llm' ? 'LLM 판단' : cardSignal.trigger.includes('FALLBACK') ? '대체 규칙' : '상태 규칙'}</dd></div>
+              <div><dt>생성 계기</dt><dd>{cardSignal.trigger}</dd></div>
+              <div><dt>프롬프트</dt><dd>{cardSignal.prompt_version}</dd></div>
+              <div><dt>모델</dt><dd>{cardSignal.model ?? '사용하지 않음'}</dd></div>
             </dl>
           {/if}
         </section>
@@ -713,17 +722,16 @@
 
 <style>
   .replay-page {
-    --replay-chart-panel-height: 400px;
+    --replay-chart-panel-height: calc(var(--space-8) * 11);
+    --replay-main-area-height: calc(var(--replay-chart-panel-height) + var(--space-8) * 7 + var(--space-6));
     width: 100%;
     max-width: 1320px;
     min-height: 0;
     display: flex;
     flex: 1;
     flex-direction: column;
-    gap: var(--space-3);
-    overflow-y: auto;
-    scrollbar-gutter: stable;
-    padding-bottom: var(--space-2);
+    gap: var(--space-2);
+    overflow: hidden;
     scrollbar-color: var(--surface-raised) var(--surface-floor);
     scrollbar-width: thin;
   }
@@ -762,8 +770,8 @@
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
-    gap: var(--space-8);
-    padding: var(--space-2) var(--space-3) var(--space-1);
+    gap: var(--space-6);
+    padding: 0 var(--space-2) var(--space-1);
   }
 
   .header-copy {
@@ -774,9 +782,9 @@
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    margin-bottom: var(--space-2);
+    margin-bottom: var(--space-1);
     color: var(--text-tertiary);
-    font-size: 12px;
+    font-size: 11px;
     font-weight: 600;
   }
 
@@ -801,16 +809,16 @@
     margin: 0;
     max-width: 720px;
     color: var(--text-primary);
-    font-size: 24px;
+    font-size: 20px;
     line-height: 1.25;
     letter-spacing: -0.025em;
   }
 
   .header-copy p {
-    margin: var(--space-2) 0 0;
+    margin: var(--space-1) 0 0;
     color: var(--text-secondary);
-    font-size: 13px;
-    line-height: 1.5;
+    font-size: 12px;
+    line-height: 1.4;
   }
 
   .header-price {
@@ -829,21 +837,22 @@
   }
 
   .header-price strong {
-    font-size: 28px;
+    font-size: 24px;
     line-height: 1;
   }
 
   .header-price span:last-child {
-    font-size: 13px;
+    font-size: 12px;
     font-weight: 700;
   }
 
   .replay-grid {
-    min-height: 680px;
+    height: var(--replay-main-area-height);
+    min-height: 0;
     display: grid;
     grid-template-columns: minmax(0, 2.1fr) minmax(320px, 1fr);
-    align-items: start;
-    gap: var(--space-3);
+    align-items: stretch;
+    gap: var(--space-2);
   }
 
   .replay-main,
@@ -852,8 +861,13 @@
     min-height: 0;
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
-    align-self: start;
+    gap: var(--space-2);
+    align-self: stretch;
+  }
+
+  .replay-aside {
+    height: 100%;
+    overflow: hidden;
   }
 
   .replay-main :global(.replay-chart) {
@@ -865,8 +879,8 @@
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
-    gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -878,7 +892,7 @@
 
   .section-head strong {
     color: var(--text-primary);
-    font-size: 13px;
+    font-size: 12px;
   }
 
   .document-count {
@@ -888,7 +902,8 @@
 
   .lanes {
     overflow: hidden;
-    flex: 0 0 auto;
+    min-height: 0;
+    flex: 1;
   }
 
   .lanes-scroll {
@@ -903,7 +918,7 @@
   .lanes-canvas {
     position: relative;
     min-width: 720px;
-    padding: var(--space-2) var(--space-3) var(--space-3);
+    padding: var(--space-1) var(--space-3) var(--space-2);
   }
 
   .lanes-canvas.empty {
@@ -934,7 +949,7 @@
     display: grid;
     grid-template-columns: 92px minmax(0, 1fr);
     align-items: stretch;
-    min-height: calc(var(--space-8) + var(--space-6));
+    min-height: calc(var(--space-8) + var(--space-3));
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -1187,8 +1202,8 @@
 
   .lane-playhead {
     position: absolute;
-    top: var(--space-2);
-    bottom: var(--space-3);
+    top: var(--space-1);
+    bottom: var(--space-2);
     width: 1px;
     margin-left: 104px;
     background: var(--text-secondary);
@@ -1196,10 +1211,29 @@
   }
 
   .signal-card {
-    padding: var(--space-4);
+    flex: 0 0 auto;
+    max-height: calc(100% - var(--space-8) * 5 - var(--space-2));
+    box-sizing: border-box;
+    padding: var(--space-3);
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
+    overflow-y: auto;
+    scrollbar-color: var(--surface-raised) var(--surface-body);
+    scrollbar-width: thin;
+  }
+
+  .signal-card::-webkit-scrollbar {
+    width: var(--space-2);
+  }
+
+  .signal-card::-webkit-scrollbar-track {
+    background: var(--surface-body);
+  }
+
+  .signal-card::-webkit-scrollbar-thumb {
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
   }
 
   .signal-head,
@@ -1242,10 +1276,10 @@
   }
 
   h2 {
-    margin: var(--space-1) 0 var(--space-2);
+    margin: var(--space-1) 0;
     color: var(--text-primary);
-    font-size: 22px;
-    line-height: 1.35;
+    font-size: 18px;
+    line-height: 1.3;
     letter-spacing: -0.025em;
     word-break: keep-all;
   }
@@ -1260,7 +1294,7 @@
   .cause-list {
     display: flex;
     flex-direction: column;
-    gap: var(--space-3);
+    gap: var(--space-2);
   }
 
   .cause-list > li {
@@ -1289,8 +1323,8 @@
   .hidden-state p {
     margin: var(--space-1) 0;
     color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.55;
+    font-size: 11px;
+    line-height: 1.45;
   }
 
   .source-count {
@@ -1333,7 +1367,7 @@
   }
 
   .hidden-state {
-    padding: var(--space-4);
+    padding: var(--space-3);
     border: 1px solid var(--border-subtle);
     border-radius: var(--radius-sm);
     background: var(--surface-overlay);
@@ -1341,7 +1375,7 @@
 
   .hidden-state strong {
     color: var(--text-primary);
-    font-size: 15px;
+    font-size: 14px;
   }
 
   .signal-meta {
@@ -1349,7 +1383,7 @@
     grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: var(--space-2) var(--space-4);
     margin: var(--space-1) 0 0;
-    padding-top: var(--space-3);
+    padding-top: var(--space-2);
     border-top: 1px solid var(--border-subtle);
   }
 
@@ -1376,7 +1410,7 @@
   .log-panel {
     min-height: 0;
     display: flex;
-    flex: 1;
+    flex: 1 1 0;
     flex-direction: column;
     overflow: hidden;
   }
@@ -1387,6 +1421,7 @@
 
   .log-content {
     min-height: 0;
+    flex: 1;
     overflow-y: auto;
     scrollbar-color: var(--surface-raised) var(--surface-body);
     scrollbar-width: thin;
@@ -1429,7 +1464,7 @@
 
   .log-list {
     min-height: 0;
-    padding: var(--space-2) var(--space-4) var(--space-4);
+    padding: var(--space-1) var(--space-3) var(--space-3);
     scrollbar-color: var(--surface-raised) var(--surface-body);
     scrollbar-width: thin;
   }
@@ -1451,7 +1486,7 @@
     display: grid;
     grid-template-columns: 42px 40px minmax(0, 1fr);
     gap: var(--space-2);
-    padding: var(--space-2) 0;
+    padding: var(--space-1) 0;
     border-bottom: 1px solid var(--border-subtle);
     color: var(--text-tertiary);
   }
@@ -1490,8 +1525,8 @@
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     background: color-mix(in srgb, var(--surface-body) 96%, transparent);
   }
 
@@ -1501,8 +1536,8 @@
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
     align-items: center;
-    gap: var(--space-3);
-    padding-bottom: var(--space-2);
+    gap: var(--space-2);
+    padding-bottom: var(--space-1);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -1892,7 +1927,12 @@
   }
 
   @media (max-width: 900px) {
+    .replay-page {
+      overflow-y: auto;
+    }
+
     .replay-grid {
+      height: auto;
       min-height: auto;
       grid-template-columns: 1fr;
     }

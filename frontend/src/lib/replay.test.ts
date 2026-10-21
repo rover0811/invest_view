@@ -20,6 +20,7 @@ import {
   replayPositionToTime,
   replayTimeToChartCoordinate,
   replayTimeToPosition,
+  selectReplaySignalCard,
   selectReplayFrame,
   shouldRecomputeReplayOverlays,
   splitAtSessionOpen,
@@ -125,6 +126,63 @@ describe('selectReplayFrame', () => {
 
     expect(frame.signal?.status).toBe('SHOWN');
     expect(frame.shownSignal?.version).toBe(2);
+  });
+});
+
+describe('selectReplaySignalCard', () => {
+  it('hides an older SHOWN signal when the latest version is HIDDEN', () => {
+    const hiddenAfterShown: ReplayData = {
+      ...replay,
+      signals: [
+        ...replay.signals,
+        {
+          ...replay.signals[0],
+          at: '2026-10-20T10:20:00+09:00',
+          move_version: 1,
+          version: 3,
+          status: 'HIDDEN',
+        },
+      ],
+    };
+    const frame = selectReplayFrame(hiddenAfterShown, '2026-10-20T10:21:00+09:00');
+
+    expect(selectReplaySignalCard(hiddenAfterShown, frame)).toEqual({
+      mode: 'empty',
+      signal: hiddenAfterShown.signals[2],
+    });
+  });
+
+  it('shows a pending state after the 14:35 state change and before the 14:37 signal', () => {
+    const fixture = JSON.parse(
+      readFileSync(new URL('../../public/replay/000660-2026-10-14.json', import.meta.url), 'utf8'),
+    ) as ReplayData;
+    const frame = selectReplayFrame(fixture, '2026-10-14T14:36:00+09:00');
+
+    expect(selectReplaySignalCard(fixture, frame)).toEqual({
+      mode: 'pending',
+      signal: fixture.signals[2],
+    });
+  });
+
+  it('guards against a live return whose sign disagrees with the signal direction', () => {
+    const frame = {
+      ...selectReplayFrame(replay, '2026-10-20T10:10:00+09:00'),
+      returnPct: -1.2,
+    };
+
+    expect(selectReplaySignalCard(replay, frame)).toEqual({
+      mode: 'pending',
+      signal: replay.signals[1],
+    });
+  });
+
+  it('returns the latest SHOWN signal when state and live return agree', () => {
+    const frame = selectReplayFrame(replay, '2026-10-20T10:10:00+09:00');
+
+    expect(selectReplaySignalCard(replay, frame)).toEqual({
+      mode: 'shown',
+      signal: replay.signals[1],
+    });
   });
 });
 
@@ -255,6 +313,22 @@ describe('layoutReplayAnnotationTags', () => {
     expect(layout).toEqual([
       { x: 60, row: 1 },
       { x: 90, row: 2 },
+    ]);
+  });
+
+  it('hides overflow tags when the chart reserves only two rows', () => {
+    const layout = layoutReplayAnnotationTags(
+      [60, 90],
+      48,
+      160,
+      8,
+      [{ start: 40, end: 152, row: 0 }],
+      2,
+    );
+
+    expect(layout).toEqual([
+      { x: 60, row: 1 },
+      { x: 90, row: 1, hidden: true },
     ]);
   });
 });

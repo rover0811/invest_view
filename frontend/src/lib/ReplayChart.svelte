@@ -35,6 +35,10 @@
   type RenderedAnnotation = { key: number; label: string; x: number; y: number; className: string };
   type RenderedCurrentPrice = { label: string; y: number; className: string };
 
+  const MAX_ANNOTATION_ROWS = 2;
+  const PRICE_PADDING_RATIO = 0.04;
+  const MIN_PRICE_PADDING_RATIO = 0.001;
+
   let {
     data,
     playhead,
@@ -67,16 +71,13 @@
   const lastMs = $derived(Date.parse(lastTime));
   const afterClose = $derived(Date.parse(playhead) > lastMs);
   const priceDomain = $derived.by(() => {
-    const enter = data.thresholds.enter_pct / 100;
-    const exit = data.thresholds.exit_pct / 100;
     const values = data.bars.flatMap((bar) => [bar.l, bar.h]);
-    values.push(
-      data.prev_close * (1 + enter),
-      data.prev_close * (1 + exit),
-      data.prev_close * (1 - exit),
-      data.prev_close * (1 - enter),
+    const dayDomain = computeYDomain(values);
+    const padding = Math.max(
+      (dayDomain.max - dayDomain.min) * PRICE_PADDING_RATIO,
+      data.prev_close * MIN_PRICE_PADDING_RATIO,
     );
-    return computeYDomain(values);
+    return { min: dayDomain.min - padding, max: dayDomain.max + padding };
   });
 
   function toTimestamp(iso: string): UTCTimestamp {
@@ -217,8 +218,8 @@
           maxValue: fullDayDomain.max,
         },
         margins: {
-          above: space8 + space8 + space8,
-          below: space6,
+          above: space8 + space8,
+          below: space3,
         },
       }),
     });
@@ -404,7 +405,7 @@
       const playheadLabelRange = labelOnLeft
         ? { start: nextPlayheadX - space2 - playheadLabelWidth, end: nextPlayheadX - space2, row: 0 }
         : { start: nextPlayheadX + space2, end: nextPlayheadX + space2 + playheadLabelWidth, row: 0 };
-      const thresholdLabelRanges = Array.from({ length: annotationSpecs.length }, (_, row) => row)
+      const thresholdLabelRanges = Array.from({ length: MAX_ANNOTATION_ROWS }, (_, row) => row)
         .flatMap((row) => {
           const tagTop = space1 + row * annotationRowHeight;
           const tagBottom = tagTop + space6;
@@ -424,15 +425,20 @@
           playheadLabelRange,
           ...thresholdLabelRanges,
         ],
+        MAX_ANNOTATION_ROWS,
       );
 
-      const nextAnnotations = annotationSpecs.map((annotation, index) => ({
-        key: index,
-        label: annotation.label,
-        x: annotationLayout[index].x,
-        y: space1 + annotationLayout[index].row * annotationRowHeight,
-        className: annotation.className,
-      }));
+      const nextAnnotations = annotationSpecs.flatMap((annotation, index) => {
+        const layout = annotationLayout[index];
+        if (layout.hidden) return [];
+        return [{
+          key: index,
+          label: annotation.label,
+          x: layout.x,
+          y: space1 + layout.row * annotationRowHeight,
+          className: annotation.className,
+        }];
+      });
       replaceArray(renderedAnnotations, nextAnnotations);
     }
 
@@ -611,8 +617,8 @@
     display: flex;
     align-items: flex-end;
     justify-content: space-between;
-    gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
   }
 
@@ -668,13 +674,13 @@
   }
 
   .chart-head strong {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-primary);
   }
 
   .chart-stage {
     position: relative;
-    min-height: 360px;
+    min-height: 0;
     flex: 1;
     overflow: hidden;
   }
