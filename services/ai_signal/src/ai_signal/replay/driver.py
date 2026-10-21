@@ -200,6 +200,10 @@ CLEANUP_STATEMENTS: tuple[tuple[str, str], ...] = (
         "gold.signal_cause",
         f"DELETE FROM gold.signal_cause WHERE move_id IN ({_STALE_MOVES})",
     ),
+    (
+        "gold.signal_decision",
+        f"DELETE FROM gold.signal_decision WHERE move_id IN ({_STALE_MOVES})",
+    ),
     ("gold.signal", f"DELETE FROM gold.signal WHERE move_id IN ({_STALE_MOVES})"),
     (
         "gold.signal_retry",

@@ -191,6 +191,20 @@ def observations_to_states(
     return rows
 
 
+def decisions_to_log(
+    decisions: Sequence[Mapping[str, Any]], clock: Callable[[datetime], datetime | None]
+) -> list[LogEntry]:
+    """KEEP rows of gold.signal_decision as log lines on the replay clock."""
+    entries: list[LogEntry] = []
+    for row in decisions:
+        if row["decision"] != "KEEP":
+            continue
+        at = clock(row["created_at"])
+        if at is not None:
+            entries.append(LogEntry(at, "signal", f"기존 문구 유지: {row['reason']}"))
+    return entries
+
+
 def observations_to_log(observations: Sequence[Observation]) -> list[LogEntry]:
     log: list[LogEntry] = []
     last_move: MoveSnapshot | None = None
