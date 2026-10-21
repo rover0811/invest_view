@@ -14,10 +14,13 @@ spec:
     high-availability.storageDir: file:///opt/flink/checkpoints/price-move-state/ha
     execution.checkpointing.interval: "60000"
     execution.checkpointing.mode: EXACTLY_ONCE
+    # JM was OOMKilled at 1Gi: non-heap RSS (~0.6Gi) exceeds Flink's default
+    # non-heap budget. Pin heap so the rest of the 2Gi covers native memory.
+    jobmanager.memory.heap.size: "768m"
   serviceAccount: flink
   jobManager:
     resource:
-      memory: "1024m"
+      memory: "2048m"
       cpu: 1
   taskManager:
     resource:
@@ -27,7 +30,7 @@ spec:
     jarURI: local:///opt/flink/usrlib/stream-detection.jar
     entryClass: com.invest_view.stream_detection.PriceMoveStateJob
     parallelism: 1
-    upgradeMode: last-state
+    upgradeMode: stateless
   podTemplate:
     spec:
       containers:
