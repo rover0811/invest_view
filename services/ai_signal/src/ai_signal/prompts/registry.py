@@ -16,7 +16,7 @@ from importlib import resources
 
 FALLBACK_VERSION = "v1"
 DEFAULT_VERSIONS: Mapping[str, str] = {
-    "signal_generation": "v2",
+    "signal_generation": "v3",
     "document_judgement": "v4",
 }
 _VERSION = re.compile(r"^v[0-9]+$")

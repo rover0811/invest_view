@@ -242,7 +242,7 @@ def test_shown_signal_uses_only_same_direction_documents_in_range(
             1,
             "llm",
             "nvidia/nemotron-3-super-120b-a12b:free",
-            "signal_generation/v2",
+            "signal_generation/v3",
             1,
         )
     ]
@@ -501,11 +501,14 @@ def test_new_document_requests_coalesce_in_event_time(seeded_url: str) -> None:
     assert llm.calls == 3
     assert _rows(
         seeded_url, "SELECT version, as_of_event_time FROM gold.signal ORDER BY 1"
-    ) == [
-        (1, NOW),
-        (2, NOW + timedelta(minutes=10)),
-        (3, NOW + timedelta(minutes=11)),
-    ]
+    ) == [(1, NOW), (2, NOW + timedelta(minutes=11))]
+    # The minute-10 answer cites no document newer than v1, so the guard keeps v1.
+    assert _rows(
+        seeded_url,
+        "SELECT move_version, event_time, decision, guard_applied, "
+        "jsonb_array_length(llm_attempts) FROM gold.signal_decision",
+    ) == [(1, NOW + timedelta(minutes=10), "KEEP", True, 1)]
+    assert [u["version"] for u in _updates(seeded_url)] == [1, 2]
 
 
 def test_candidates_are_bounded_by_request_event_time(seeded_url: str) -> None:
