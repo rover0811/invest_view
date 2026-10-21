@@ -445,7 +445,7 @@ class Generation:
     attempts: tuple[LlmAttempt, ...] = ()
 
     @property
-    def llm_attempts(self) -> list[dict[str, str | None]]:
+    def llm_attempts(self) -> list[dict[str, str | bool | None]]:
         return [attempt.as_json() for attempt in self.attempts]
 
     @property

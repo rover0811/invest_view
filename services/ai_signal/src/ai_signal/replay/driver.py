@@ -4,6 +4,11 @@ The pure parts live here: the DAILY move id, the resumable state file and
 the mapping from processing wall time (DB timestamps) to the replay clock
 (event time of the step that caused the row). ``run_replay`` and
 ``export_replay`` live in ``replay.runner`` with the cluster I/O.
+
+Runners (document processor, signal worker) should run with
+``AI_SIGNAL_LLM_CACHE=postgres`` during a replay so identical prompts are
+answered from ``gold.llm_cache``. ``CLEANUP_STATEMENTS`` never touches that
+table, so the cache survives a re-run.
 """
 
 from __future__ import annotations

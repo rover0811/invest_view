@@ -94,7 +94,7 @@ class Judgement:
     attempts: tuple[LlmAttempt, ...] = ()
 
     @property
-    def llm_attempts(self) -> list[dict[str, str | None]] | None:
+    def llm_attempts(self) -> list[dict[str, str | bool | None]] | None:
         return [a.as_json() for a in self.attempts] if self.attempts else None
 
 

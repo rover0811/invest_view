@@ -45,6 +45,7 @@ EXPECTED_TABLES = {
     ("gold", "signal_cause_source"),
     ("gold", "signal_retry"),
     ("gold", "signal_decision"),
+    ("gold", "llm_cache"),
     ("serving", "symbol_signal"),
     ("serving", "symbol_signal_cause"),
     ("serving", "symbol_signal_cause_source"),
