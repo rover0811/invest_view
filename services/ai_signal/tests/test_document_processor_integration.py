@@ -204,7 +204,7 @@ def test_news_raw_to_judgement_outbox_and_signal_request(database_url: str) -> N
         1,
         "source_tag",
         1,
-        "document_judgement/v1",
+        "document_judgement/v3",
         1,
     )
     assert len(step.requests) == 1

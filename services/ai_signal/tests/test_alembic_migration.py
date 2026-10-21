@@ -124,6 +124,9 @@ async def _inspect(url: str) -> MigrationState:
                     """SELECT conname FROM pg_constraint
                     WHERE conname IN (
                         'document_judgement_version_ck',
+                        'document_judgement_info_type_ck',
+                        'document_judgement_event_type_ck',
+                        'document_judgement_target_relevance_ck',
                         'signal_version_ck',
                         'symbol_signal_version_ck'
                     )"""
@@ -202,6 +205,9 @@ def test_upgrade_seeds_and_downgrade(monkeypatch: pytest.MonkeyPatch) -> None:
         }
         assert state["constraints"] == {
             "document_judgement_version_ck",
+            "document_judgement_info_type_ck",
+            "document_judgement_event_type_ck",
+            "document_judgement_target_relevance_ck",
             "signal_version_ck",
             "symbol_signal_version_ck",
         }
