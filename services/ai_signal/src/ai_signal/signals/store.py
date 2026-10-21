@@ -25,18 +25,23 @@ _EVENT_NAMESPACE = uuid5(NAMESPACE_URL, "invest-view/ai-signal/signal-updates")
 class StoredSignal:
     version: int
     input_hash: str | None
+    status: str = "SHOWN"
+    move_version: int = 0
+    as_of_event_time: datetime | None = None
 
 
 async def latest_signal(session: AsyncSession, move_id: UUID) -> StoredSignal | None:
     result = await session.execute(
         text(
-            "SELECT version, input_hash FROM gold.signal WHERE move_id = :id "
-            "ORDER BY version DESC LIMIT 1"
+            "SELECT version, input_hash, status, move_version, as_of_event_time "
+            "FROM gold.signal WHERE move_id = :id ORDER BY version DESC LIMIT 1"
         ),
         {"id": move_id},
     )
     row = result.first()
-    return StoredSignal(int(row[0]), row[1]) if row is not None else None
+    if row is None:
+        return None
+    return StoredSignal(int(row[0]), row[1], str(row[2]), int(row[3]), row[4])
 
 
 async def next_signal_version(session: AsyncSession, move_id: UUID) -> int:
@@ -55,11 +60,11 @@ INSERT_SIGNAL = text(
     INSERT INTO gold.signal (
         move_id, version, status, move_version, headline_cause_rank, decided_by,
         model_version, prompt_version, decided_at, probability, input_hash,
-        llm_attempts
+        llm_attempts, as_of_event_time
     ) VALUES (
         :move_id, :version, :status, :move_version, :headline_cause_rank,
         :decided_by, :model_version, :prompt_version, :decided_at, :probability,
-        :input_hash, CAST(:llm_attempts AS jsonb)
+        :input_hash, CAST(:llm_attempts AS jsonb), :as_of_event_time
     )
     ON CONFLICT (move_id, version) DO NOTHING
     """
@@ -91,6 +96,7 @@ async def insert_signal(
     generation: Generation,
     input_hash: str,
     decided_at: datetime,
+    as_of_event_time: datetime | None = None,
 ) -> None:
     decision = generation.decision
     probability = (
@@ -112,6 +118,7 @@ async def insert_signal(
             "decided_at": decided_at,
             "probability": probability,
             "input_hash": input_hash,
+            "as_of_event_time": as_of_event_time,
             "llm_attempts": (
                 json.dumps(generation.llm_attempts, ensure_ascii=False)
                 if generation.attempts

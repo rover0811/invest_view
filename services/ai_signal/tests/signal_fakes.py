@@ -117,13 +117,18 @@ def candidates(*refs: str) -> CandidateSet:
     return CandidateSet(documents=tuple(document(ref) for ref in refs))
 
 
-def request_message(symbol: str = "000660", offset: int = 1) -> ConsumedMessage:
+def request_message(
+    symbol: str = "000660",
+    offset: int = 1,
+    reason: str = "NEW_DOCUMENT",
+    event_time: datetime = NOW,
+) -> ConsumedMessage:
     return ConsumedMessage(
         topic="signal-requests",
         partition=0,
         offset=offset,
         key=symbol,
-        value={"symbol": symbol, "reason": "NEW_DOCUMENT"},
+        value={"symbol": symbol, "reason": reason, "event_time": event_time},
         headers={},
         timestamp_ms=None,
     )

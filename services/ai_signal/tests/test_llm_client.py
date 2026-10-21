@@ -22,6 +22,7 @@ from ai_signal.llm import (
     run_fallback,
     secondary_spec,
 )
+from ai_signal.llm.client import build_payload
 
 
 class Answer(BaseModel):
@@ -101,6 +102,30 @@ def test_secondary_request_uses_json_schema_with_reasoning_limit() -> None:
     assert isinstance(response_format, dict)
     assert response_format["type"] == "json_schema"
     assert seen[0]["reasoning"] == {"max_tokens": 2048, "exclude": True}
+
+
+def test_openrouter_payload_has_no_reasoning_effort() -> None:
+    spec = primary_spec(_settings())
+    payload = build_payload(spec, MESSAGES, Answer)
+    assert spec.provider == "openrouter"
+    assert payload["reasoning"] == {"max_tokens": 2048, "exclude": True}
+    assert "reasoning_effort" not in payload
+
+
+def test_gemini_payload_drops_reasoning_object(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("AI_SIGNAL_LLM_PROVIDER", "gemini")
+    monkeypatch.setenv("AI_SIGNAL_LLM_PRIMARY_MODEL", "gemini-x-flash")
+    settings = LlmSettings()
+    for spec in (primary_spec(settings), secondary_spec(settings)):
+        payload = build_payload(spec, MESSAGES, Answer)
+        assert spec.provider == "gemini"
+        assert "reasoning" not in payload
+        assert payload["reasoning_effort"] == "low"
+        response_format = payload["response_format"]
+        assert isinstance(response_format, dict)
+        assert response_format["type"] == "json_schema"
+        assert response_format["json_schema"]["strict"] is True
+    assert primary_spec(settings).model == "gemini-x-flash"
 
 
 def test_json_object_mode_revalidates_fenced_body() -> None:

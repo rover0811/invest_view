@@ -5,6 +5,8 @@
   import Home from './lib/Home.svelte';
   // biome-ignore lint/correctness/noUnusedImports: component is consumed by the Svelte template
   import StockDetail from './lib/StockDetail.svelte';
+  // biome-ignore lint/correctness/noUnusedImports: component is consumed by the Svelte template
+  import SignalReplay from './lib/SignalReplay.svelte';
   // biome-ignore lint/correctness/noUnusedImports: state and navigation are consumed by the Svelte template
   import { appState, initRouter, navigate } from './lib/stores.svelte';
 
@@ -13,12 +15,14 @@
   });
 </script>
 
-<div class="app-shell">
+<div class="app-shell" class:replay-route={appState.route.view === 'replay'}>
   <Gnb onNavigate={navigate} />
 
   <main class="content-shell">
     {#if appState.route.view === 'home'}
       <Home onNavigate={navigate} />
+    {:else if appState.route.view === 'replay' && appState.route.symbol != null && appState.route.date != null}
+      <SignalReplay symbol={appState.route.symbol} date={appState.route.date} />
     {:else if appState.route.code != null}
       <StockDetail code={appState.route.code} tab={appState.route.tab ?? 'chart'} />
     {:else}
@@ -44,5 +48,20 @@
     justify-content: center;
     overflow: hidden;
     padding: calc(60px + var(--space-4)) var(--space-6) var(--space-4);
+  }
+
+  @media (max-width: 600px) {
+    .app-shell.replay-route :global(.gnb .menu),
+    .app-shell.replay-route :global(.gnb .right) {
+      display: none;
+    }
+
+    .app-shell.replay-route :global(.gnb-inner) {
+      padding-inline: var(--space-4);
+    }
+
+    .app-shell.replay-route .content-shell {
+      padding-inline: var(--space-3);
+    }
   }
 </style>

@@ -1,8 +1,10 @@
 export type Route = {
-  view: 'home' | 'stock';
+  view: 'home' | 'stock' | 'replay';
   code?: string;
   tab?: string;
   section?: string;
+  symbol?: string;
+  date?: string;
 };
 
 export const appState = $state<{
@@ -21,6 +23,12 @@ function homeRoute(): Route {
   return { view: 'home' };
 }
 
+function isValidDate(value: string): boolean {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 export function parseHash(): Route {
   if (typeof window === 'undefined') {
     return homeRoute();
@@ -37,6 +45,16 @@ export function parseHash(): Route {
     const url = new URL(hashPath.startsWith('/') ? hashPath : `/${hashPath}`, window.location.origin);
 
     if (url.pathname === '/') {
+      return homeRoute();
+    }
+
+    const replayMatch = /^\/replay\/([^/]+)\/(\d{4}-\d{2}-\d{2})$/.exec(url.pathname);
+    if (replayMatch) {
+      const symbol = decodeURIComponent(replayMatch[1]).trim();
+      const date = replayMatch[2];
+      if (/^\d{6}$/.test(symbol) && isValidDate(date)) {
+        return { view: 'replay', symbol, date };
+      }
       return homeRoute();
     }
 
