@@ -39,7 +39,7 @@ from ai_signal.documents.judgement import (
 )
 from ai_signal.documents.linking import ENTITY_SYMBOL, LINK_METHODS, LinkMethod
 from ai_signal.documents.news import DOCUMENT_SOURCE, NewsRecord
-from ai_signal.llm import shared_client
+from ai_signal.llm.container import shared_llm
 from ai_signal.signals.move import DIRECTION_BY_PRICE_STATE, latest_move
 from ai_signal.signal_requests import (
     RequestTrigger,
@@ -372,7 +372,7 @@ async def insert_judgement(
 
 
 def default_judge() -> DocumentJudge:
-    return DocumentJudge.from_client(shared_client())
+    return DocumentJudge.from_llm(shared_llm())
 
 
 class DocumentProcessor:

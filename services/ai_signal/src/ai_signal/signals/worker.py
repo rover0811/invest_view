@@ -26,7 +26,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ai_signal.consumers.frame import ConsumedMessage, HandlerContext
-from ai_signal.llm import shared_client
+from ai_signal.llm.container import shared_llm
 from ai_signal.signal_requests import SignalRequestReason
 from ai_signal.signals.candidates import (
     CANDIDATE_SOURCES,
@@ -90,7 +90,7 @@ class SignalRequest:
 
 
 def default_generator() -> SignalGenerator:
-    return SignalGenerator.from_client(shared_client())
+    return SignalGenerator.from_llm(shared_llm())
 
 
 def utc_now() -> datetime:

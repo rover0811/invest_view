@@ -19,7 +19,7 @@ import os
 import random
 import re
 import sys
-from collections import Counter, defaultdict
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -27,14 +27,9 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from ai_signal.llm.client import (
-    LlmError,
-    LlmErrorKind,
-    LlmSettings,
-    OpenRouterClient,
-    json_schema_text,
-    secondary_spec,
-)
+from ai_signal.llm import CompletionRequest, LlmError, LlmErrorKind
+from ai_signal.llm.adapters.openai_compatible import json_schema_text
+from ai_signal.llm.adapters.openrouter import OpenRouterAdapter, OpenRouterSettings
 ROOT = Path(__file__).resolve().parents[2]
 EXPORT = ROOT / "frontend/public/replay/000660-2026-10-14.json"
 ENV_FILE = Path("/tmp/replay-state/llm.env")
@@ -160,12 +155,14 @@ def log_call(doc_id: str, status: str) -> None:
         f.write(f"{datetime.now().isoformat()}\t{doc_id}\t{status}\t{MODEL}\n")
 
 
-async def judge_one(client: OpenRouterClient, doc: Doc, prompt: str, lock: asyncio.Lock) -> None:
+async def judge_one(client: OpenRouterAdapter, doc: Doc, prompt: str, lock: asyncio.Lock) -> None:
     global _consecutive_rate_limit
-    spec = secondary_spec(client.settings)
+    model = MODEL
     for attempt in range(MAX_ATTEMPTS):
         try:
-            result = await client.complete(spec, messages(doc, prompt), V3)
+            result = await client.complete(
+                CompletionRequest(model=model, messages=messages(doc, prompt)), V3
+            )
         except LlmError as exc:
             log_call(doc.id, exc.kind.value)
             if exc.kind == LlmErrorKind.RATE_LIMIT:
@@ -198,8 +195,7 @@ async def judge_all(docs: list[Doc]) -> None:
     if not os.environ.get("AI_SIGNAL_LLM_API_KEY"):
         print(f"no API key; {len(todo)} documents stay unjudged")
         return
-    settings = LlmSettings(max_concurrency=CONCURRENCY, secondary_model=MODEL)
-    client = OpenRouterClient(settings)
+    client = OpenRouterAdapter(OpenRouterSettings(max_concurrency=CONCURRENCY))
     prompt = PROMPT.read_text()
     lock = asyncio.Lock()
     queue: asyncio.Queue[Doc] = asyncio.Queue()

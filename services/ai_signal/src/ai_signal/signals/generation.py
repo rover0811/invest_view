@@ -14,17 +14,14 @@ from pydantic import BaseModel, ConfigDict, Field
 from ai_signal.llm import (
     FallbackStep,
     LlmAttempt,
+    Llm,
     LlmErrorKind,
-    ModelSpec,
     ModelStep,
-    OpenRouterClient,
     StepFailures,
     StepResult,
-    primary_spec,
+    route_step_names,
     run_fallback,
-    secondary_spec,
 )
-from ai_signal.llm.client import json_schema_text
 from ai_signal.prompts import Prompt, load_prompt
 from ai_signal.signals.candidates import CandidateSet, SignalCandidate
 from ai_signal.signals.move import OpenMove
@@ -232,16 +229,10 @@ def wording_ok(decision: SignalDecision) -> bool:
 
 def signal_messages(
     prompt: Prompt,
-) -> Callable[[GenerationRequest, ModelSpec], list[dict[str, str]]]:
-    def build(request: GenerationRequest, spec: ModelSpec) -> list[dict[str, str]]:
-        system = prompt.text
-        if spec.response_mode == "json_object":
-            schema = json_schema_text(SignalGenerationOutput)
-            system = (
-                f"{system}\nThe JSON object must match this JSON schema:\n{schema}\n"
-            )
+) -> Callable[[GenerationRequest], list[dict[str, str]]]:
+    def build(request: GenerationRequest) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": system},
+            {"role": "system", "content": prompt.text},
             {"role": "user", "content": request.as_json()},
         ]
 
@@ -292,26 +283,23 @@ class HiddenStep:
 
 
 def default_steps(
-    client: OpenRouterClient, prompt: Prompt
+    llm: Llm, prompt: Prompt
 ) -> tuple[FallbackStep[GenerationRequest, SignalDecision], ...]:
     messages = signal_messages(prompt)
-
-    def model(name: str, spec: ModelSpec) -> CitingModelStep:
-        return CitingModelStep(
+    routes = llm.routes_for(PURPOSE)
+    models: list[FallbackStep[GenerationRequest, SignalDecision]] = [
+        CitingModelStep(
             ModelStep(
                 name=name,
-                client=client,
-                spec=spec,
+                llm=llm,
+                route=route,
                 output_type=SignalGenerationOutput,
                 messages=messages,
             )
         )
-
-    return (
-        model("primary", primary_spec(client.settings)),
-        model("secondary", secondary_spec(client.settings)),
-        HiddenStep(),
-    )
+        for name, route in zip(route_step_names(routes), routes, strict=True)
+    ]
+    return (*models, HiddenStep())
 
 
 @dataclass(frozen=True)
@@ -346,9 +334,9 @@ class SignalGenerator:
         return self._prompt.prompt_version
 
     @classmethod
-    def from_client(cls, client: OpenRouterClient) -> SignalGenerator:
+    def from_llm(cls, llm: Llm) -> SignalGenerator:
         prompt = load_prompt(PURPOSE)
-        return cls(default_steps(client, prompt), prompt)
+        return cls(default_steps(llm, prompt), prompt)
 
     async def generate(self, request: GenerationRequest) -> Generation:
         if request.candidates.is_empty:

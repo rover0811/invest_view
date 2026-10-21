@@ -131,7 +131,7 @@ def test_every_model_failing_hides_the_signal() -> None:
     assert generation.decision.status == "HIDDEN"
     assert generation.decided_by is None
     assert generation.llm_failed
-    assert generation.last_error == LlmErrorKind.HTTP
+    assert generation.last_error == LlmErrorKind.UNAVAILABLE
     assert llm.calls == 2
 
 

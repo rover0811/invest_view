@@ -13,15 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ai_signal.llm import (
     FallbackOutcome,
     FallbackStep,
+    Llm,
     LlmAttempt,
-    ModelSpec,
     ModelStep,
-    OpenRouterClient,
-    primary_spec,
+    route_step_names,
     run_fallback,
-    secondary_spec,
 )
-from ai_signal.llm.client import json_schema_text
 from ai_signal.prompts import Prompt, load_prompt
 
 PURPOSE = "document_judgement"
@@ -79,16 +76,10 @@ class Judgement:
 
 def judgement_messages(
     prompt: Prompt,
-) -> Callable[[JudgementRequest, ModelSpec], list[dict[str, str]]]:
-    def build(request: JudgementRequest, spec: ModelSpec) -> list[dict[str, str]]:
-        system = prompt.text
-        if spec.response_mode == "json_object":
-            schema = json_schema_text(DocumentJudgementOutput)
-            system = (
-                f"{system}\nThe JSON object must match this JSON schema:\n{schema}\n"
-            )
+) -> Callable[[JudgementRequest], list[dict[str, str]]]:
+    def build(request: JudgementRequest) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": system},
+            {"role": "system", "content": prompt.text},
             {"role": "user", "content": request.as_json()},
         ]
 
@@ -96,24 +87,19 @@ def judgement_messages(
 
 
 def default_steps(
-    client: OpenRouterClient, prompt: Prompt
+    llm: Llm, prompt: Prompt
 ) -> tuple[FallbackStep[JudgementRequest, DocumentJudgementOutput], ...]:
     messages = judgement_messages(prompt)
-    return (
+    routes = llm.routes_for(PURPOSE)
+    return tuple(
         ModelStep(
-            name="primary",
-            client=client,
-            spec=primary_spec(client.settings),
+            name=name,
+            llm=llm,
+            route=route,
             output_type=DocumentJudgementOutput,
             messages=messages,
-        ),
-        ModelStep(
-            name="secondary",
-            client=client,
-            spec=secondary_spec(client.settings),
-            output_type=DocumentJudgementOutput,
-            messages=messages,
-        ),
+        )
+        for name, route in zip(route_step_names(routes), routes, strict=True)
     )
 
 
@@ -129,9 +115,9 @@ class DocumentJudge:
         self._prompt = prompt
 
     @classmethod
-    def from_client(cls, client: OpenRouterClient) -> DocumentJudge:
+    def from_llm(cls, llm: Llm) -> DocumentJudge:
         prompt = load_prompt(PURPOSE)
-        return cls(default_steps(client, prompt), prompt)
+        return cls(default_steps(llm, prompt), prompt)
 
     async def judge(self, request: JudgementRequest) -> Judgement | None:
         outcome: FallbackOutcome[DocumentJudgementOutput] = await run_fallback(
