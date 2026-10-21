@@ -19,10 +19,10 @@ def test_document_judgement_v3_prompt_names_every_output_field() -> None:
 
 
 def test_default_signal_generation_prompt_is_v2() -> None:
-    assert active_version("signal_generation", {}) == "v2"
+    assert active_version("signal_generation", {}) == "v3"
     prompt = load_prompt("signal_generation", environ={})
-    assert prompt.version == "v2"
-    assert prompt.prompt_version == "signal_generation/v2"
+    assert prompt.version == "v3"
+    assert prompt.prompt_version == "signal_generation/v3"
 
 
 def test_unknown_purpose_falls_back_to_v1() -> None:

@@ -13,7 +13,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ai_signal.llm import LlmErrorKind
 from ai_signal.outbox.writer import OutboxWriter
-from ai_signal.signals.generation import GeneratedCause, Generation
+from ai_signal.signals.generation import (
+    CurrentCause,
+    CurrentSignal,
+    GeneratedCause,
+    Generation,
+)
 from ai_signal.signals.move import OpenMove
 
 SIGNAL_UPDATES_TOPIC = "signal-updates"
@@ -42,6 +47,87 @@ async def latest_signal(session: AsyncSession, move_id: UUID) -> StoredSignal | 
     if row is None:
         return None
     return StoredSignal(int(row[0]), row[1], str(row[2]), int(row[3]), row[4])
+
+
+CURRENT_SIGNAL = text(
+    """
+    SELECT s.version, s.as_of_event_time, s.headline_cause_rank, c.rank, c.label,
+           c.explanation, src.source_id
+    FROM (
+        SELECT version, as_of_event_time, headline_cause_rank FROM gold.signal
+        WHERE move_id = :id AND move_version = :move_version AND status = 'SHOWN'
+        ORDER BY version DESC LIMIT 1
+    ) s
+    JOIN gold.signal_cause c ON c.move_id = :id AND c.version = s.version
+    LEFT JOIN gold.signal_cause_source src
+        ON src.move_id = c.move_id AND src.version = c.version AND src.rank = c.rank
+    ORDER BY c.rank, src.source_id
+    """
+)
+
+
+async def current_signal(
+    session: AsyncSession, move_id: UUID, move_version: int
+) -> CurrentSignal | None:
+    """Latest SHOWN signal of ``move_version`` with its causes and source ids."""
+    rows = (
+        await session.execute(
+            CURRENT_SIGNAL, {"id": move_id, "move_version": move_version}
+        )
+    ).all()
+    if not rows:
+        return None
+    labels: dict[int, tuple[str, str]] = {}
+    sources: dict[int, list[UUID]] = {}
+    for row in rows:
+        labels[int(row[3])] = (str(row[4]), str(row[5]))
+        ids = sources.setdefault(int(row[3]), [])
+        if row[6] is not None and row[6] not in ids:
+            ids.append(row[6])
+    headline = labels.get(int(rows[0][2])) if rows[0][2] is not None else None
+    return CurrentSignal(
+        version=int(rows[0][0]),
+        headline_label=headline[0] if headline is not None else None,
+        as_of_event_time=rows[0][1],
+        causes=tuple(
+            CurrentCause(label, explanation, tuple(sources[rank]))
+            for rank, (label, explanation) in sorted(labels.items())
+        ),
+    )
+
+
+async def record_decision(
+    session: AsyncSession,
+    move: OpenMove,
+    event_time: datetime,
+    generation: Generation,
+    now: datetime,
+) -> None:
+    """A KEEP answer writes no signal version; the decision row keeps the reason."""
+    decision = generation.decision
+    _ = await session.execute(
+        text(
+            """
+            INSERT INTO gold.signal_decision (
+                move_id, move_version, event_time, decision, reason, guard_applied,
+                llm_attempts, created_at
+            ) VALUES (
+                :move_id, :move_version, :event_time, :decision, :reason,
+                :guard_applied, CAST(:llm_attempts AS jsonb), :created_at
+            )
+            """
+        ),
+        {
+            "move_id": move.move_id,
+            "move_version": move.version,
+            "event_time": event_time,
+            "decision": "KEEP" if decision.keep else "UPDATE",
+            "reason": decision.reason or "",
+            "guard_applied": decision.guard_applied,
+            "llm_attempts": json.dumps(generation.llm_attempts, ensure_ascii=False),
+            "created_at": now,
+        },
+    )
 
 
 async def next_signal_version(session: AsyncSession, move_id: UUID) -> int:

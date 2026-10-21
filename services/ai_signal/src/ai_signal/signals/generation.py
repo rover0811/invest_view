@@ -6,8 +6,10 @@ import hashlib
 import json
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from decimal import Decimal
 from typing import Literal
+from uuid import UUID
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -30,6 +32,9 @@ PURPOSE = "signal_generation"
 NONE = "none"
 SignalStatus = Literal["SHOWN", "HIDDEN", "NO_CANDIDATE"]
 Scope = Literal["MARKET", "SECTOR", "SYMBOL"]
+Effect = Literal["POSITIVE", "NEGATIVE"]
+UpdateDecision = Literal["KEEP", "UPDATE"]
+GUARD_NO_NEW_SOURCE = "새 기사를 인용하지 않은 UPDATE라서 기존 문구를 유지해요."
 
 
 class SignalCauseOutput(BaseModel):
@@ -47,6 +52,9 @@ class SignalCauseOutput(BaseModel):
         description="배경, 원인, 이 종목에 준 영향 순서의 해요체 한 문장. '요.'로 끝나고 등락률 숫자를 쓰지 않습니다",
     )
     scope: Scope = Field(description="원인의 범위")
+    effect: Effect = Field(
+        description="이 원인이 주가에 준 영향의 방향. label과 explanation이 같은 방향을 말해야 합니다"
+    )
     document_ids: list[str] = Field(description="이 원인의 근거 기사 ref 목록(예: D1)")
     event_ids: list[str] = Field(
         description="이 원인의 근거 이벤트 ref 목록. 없으면 빈 목록"
@@ -56,11 +64,15 @@ class SignalCauseOutput(BaseModel):
 class SignalGenerationOutput(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
+    decision: UpdateDecision = Field(
+        description="current_signal을 유지하면 KEEP, 새 문구로 바꾸면 UPDATE"
+    )
+    reason: str = Field(min_length=1, description="결정 이유를 담은 한국어 한 문장")
     headline_cause_rank: int = Field(
         ge=1, le=3, description="헤드라인에 보여 줄 원인의 rank. 보통 1입니다"
     )
     causes: list[SignalCauseOutput] = Field(
-        min_length=1, max_length=3, description="원인 1개에서 3개"
+        max_length=3, description="원인 1개에서 3개. KEEP이면 빈 목록이어도 됩니다"
     )
     probability: float = Field(
         ge=0, le=1, description="헤드라인 원인이 움직임을 설명한다고 보는 확신도"
@@ -68,11 +80,82 @@ class SignalGenerationOutput(BaseModel):
 
 
 @dataclass(frozen=True)
+class CurrentCause:
+    label: str
+    explanation: str
+    source_ids: tuple[UUID, ...]
+
+
+@dataclass(frozen=True)
+class CurrentSignal:
+    """Latest SHOWN version of the current move version (a KEEP baseline)."""
+
+    version: int
+    headline_label: str | None
+    as_of_event_time: datetime | None
+    causes: tuple[CurrentCause, ...]
+
+
+@dataclass(frozen=True)
 class GenerationRequest:
     move: OpenMove
     candidates: CandidateSet
+    current_signal: CurrentSignal | None = None
+    event_time: datetime | None = None
+
+    @property
+    def allow_keep(self) -> bool:
+        return self.current_signal is not None
+
+    @property
+    def new_refs(self) -> frozenset[str]:
+        """Candidates published after the current signal and up to the request."""
+        current = self.current_signal
+        if current is None or current.as_of_event_time is None:
+            return frozenset()
+        since = current.as_of_event_time
+        return frozenset(
+            c.ref
+            for c in (*self.candidates.documents, *self.candidates.events)
+            if c.published_at > since
+            and (self.event_time is None or c.published_at <= self.event_time)
+        )
+
+    def _current_signal_input(self) -> object:
+        current = self.current_signal
+        if current is None:
+            return NONE
+        refs_by_id = {
+            c.source_id: c.ref
+            for c in (*self.candidates.documents, *self.candidates.events)
+        }
+        return {
+            "headline_label": current.headline_label,
+            "causes": [
+                {
+                    "label": cause.label,
+                    "explanation": cause.explanation,
+                    "refs": [
+                        refs_by_id[source_id]
+                        for source_id in cause.source_ids
+                        if source_id in refs_by_id
+                    ],
+                }
+                for cause in current.causes
+            ],
+        }
 
     def prompt_input(self) -> dict[str, object]:
+        new_refs = self.new_refs
+        base = self._base_input()
+        return {
+            **base,
+            "current_signal": self._current_signal_input(),
+            "documents": _candidate_list(self.candidates.documents, new_refs),
+            "events": _candidate_list(self.candidates.events, new_refs),
+        }
+
+    def _base_input(self) -> dict[str, object]:
         move = self.move
         layers = move.contributions
         decomposition: object = (
@@ -109,7 +192,7 @@ class GenerationRequest:
             "move_id": str(self.move.move_id),
             "move_version": self.move.version,
             "prompt_version": prompt_version,
-            "input": self.prompt_input(),
+            "input": self._base_input(),
             "sources": [
                 [c.ref, str(c.source_id), c.source_version]
                 for c in (*self.candidates.documents, *self.candidates.events)
@@ -123,7 +206,9 @@ def _number(value: Decimal) -> float:
     return round(float(value), 6)
 
 
-def _candidate_list(candidates: Sequence[SignalCandidate]) -> object:
+def _candidate_list(
+    candidates: Sequence[SignalCandidate], new_refs: frozenset[str] = frozenset()
+) -> object:
     if not candidates:
         return NONE
     return [
@@ -141,6 +226,7 @@ def _candidate_list(candidates: Sequence[SignalCandidate]) -> object:
                 "type": c.event_type,
                 "object": c.event_object,
             },
+            "is_new": c.ref in new_refs,
         }
         for c in candidates
     ]
@@ -161,6 +247,9 @@ class SignalDecision:
     headline_cause_rank: int | None = None
     causes: tuple[GeneratedCause, ...] = ()
     probability: float | None = None
+    keep: bool = False
+    reason: str | None = None
+    guard_applied: bool = False
 
     @property
     def headline_label(self) -> str | None:
@@ -265,8 +354,8 @@ class CitingModelStep:
         result = await self.model.attempt(request, failures)
         if result is None:
             return None
-        decision = resolve_output(result.value, request.candidates)
-        if decision is None or not wording_ok(decision):
+        decision = decide(result.value, request)
+        if decision is None:
             failures.reject_last_attempt(self.name, LlmErrorKind.SCHEMA)
             return None
         return StepResult(
@@ -274,6 +363,43 @@ class CitingModelStep:
             decided_by=result.decided_by,
             model_version=result.model_version,
         )
+
+
+def effect_ok(output: SignalGenerationOutput, move: OpenMove) -> bool:
+    """Every cause must push the price the way the move went (POSITIVE or NEGATIVE)."""
+    return all(cause.effect == move.price_state for cause in output.causes)
+
+
+def decide(
+    output: SignalGenerationOutput, request: GenerationRequest
+) -> SignalDecision | None:
+    """Validate a KEEP or UPDATE answer; ``None`` means a SCHEMA failure."""
+    if output.decision == "KEEP":
+        if not request.allow_keep:
+            return None
+        return SignalDecision(status="SHOWN", keep=True, reason=output.reason)
+    if not effect_ok(output, request.move):
+        return None
+    decision = resolve_output(output, request.candidates)
+    if decision is None or not wording_ok(decision):
+        return None
+    if request.allow_keep:
+        new_refs = request.new_refs
+        cited = {source.ref for cause in decision.causes for source in cause.sources}
+        if not cited & new_refs:
+            return SignalDecision(
+                status="SHOWN",
+                keep=True,
+                reason=GUARD_NO_NEW_SOURCE,
+                guard_applied=True,
+            )
+    return SignalDecision(
+        status=decision.status,
+        headline_cause_rank=decision.headline_cause_rank,
+        causes=decision.causes,
+        probability=decision.probability,
+        reason=output.reason,
+    )
 
 
 @dataclass(frozen=True)
