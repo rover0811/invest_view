@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool
 from ai_signal.avro import AvroValueDeserializer, AvroValueSerializer
 from ai_signal.consumers import ConsumedMessage, HandlerContext
 from ai_signal.db import create_session_factory
+from ai_signal.documents.judgement import DocumentJudgementOutput
 from ai_signal.documents.processor import DocumentProcessor
 from ai_signal.outbox import OutboxWriter
 from ai_signal.signals import SignalWorker
@@ -131,16 +132,21 @@ def _news(doc_id: str, title: str, published_at: datetime) -> ConsumedMessage:
     )
 
 
-def _seed_documents(url: str) -> None:
+def _seed_documents(
+    url: str,
+    outputs: Sequence[DocumentJudgementOutput] | None = None,
+    messages: Sequence[ConsumedMessage] | None = None,
+) -> None:
     judge, _ = scripted_judge(
-        [
+        outputs
+        or [
             judgement(direction=1),
             judgement(direction=1),
             judgement(direction=-1),
             judgement(direction=1, fail_reason="LISTING_ONLY"),
         ]
     )
-    messages = (
+    messages = messages or (
         _news("1", "SK하이닉스 HBM 공급 확대", IN_RANGE),
         _news("2", "SK하이닉스 지난주 실적 발표", BEFORE_RANGE),
         _news("3", "SK하이닉스 소송 제기", IN_RANGE),
@@ -513,3 +519,49 @@ def test_candidates_are_bounded_by_request_event_time(seeded_url: str) -> None:
     _work(seeded_url, generator, request_message(offset=2, event_time=IN_RANGE))
     assert llm.calls == 1
     assert [row[:2] for row in _signals(seeded_url)][-1] == (2, "SHOWN")
+
+
+def test_price_recap_is_a_candidate_with_its_character(seeded_url: str) -> None:
+    _seed_documents(
+        seeded_url,
+        [
+            judgement(
+                direction=1,
+                scope="MARKET",
+                info_type="PRICE_RECAP",
+                event_subject="코스피",
+                event_type="OTHER",
+                event_object="지수 반등",
+                target_relevance="SECTOR",
+            )
+        ],
+        [_news("9", "코스피 반등에 반도체 강세", IN_RANGE)],
+    )
+    generator, llm = fake_generator([output_json([cause(1, ["D1"])])])
+    _work(seeded_url, generator, request_message())
+
+    documents = _user_input(llm)["documents"]
+    assert [d["title"] for d in documents] == ["코스피 반등에 반도체 강세"]
+    assert documents[0]["info_type"] == "PRICE_RECAP"
+    assert documents[0]["target_relevance"] == "SECTOR"
+    assert documents[0]["event"] == {
+        "subject": "코스피",
+        "type": "OTHER",
+        "object": "지수 반등",
+    }
+
+
+def test_documents_judged_before_v4_stay_candidates(seeded_url: str) -> None:
+    _seed_documents(seeded_url)
+    _execute(
+        seeded_url,
+        "UPDATE silver.document_judgement SET info_type = NULL, event_subject = NULL, "
+        "event_type = NULL, event_object = NULL, target_relevance = NULL",
+    )
+    generator, llm = fake_generator([output_json([cause(1, ["D1"])])])
+    _work(seeded_url, generator, request_message())
+
+    documents = _user_input(llm)["documents"]
+    assert [d["title"] for d in documents] == ["SK하이닉스 HBM 공급 확대"]
+    assert documents[0]["info_type"] is None
+    assert documents[0]["event"] == {"subject": None, "type": None, "object": None}

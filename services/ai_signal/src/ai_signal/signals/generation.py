@@ -134,6 +134,13 @@ def _candidate_list(candidates: Sequence[SignalCandidate]) -> object:
             "published_at": c.published_at.isoformat(),
             "scope": c.scope,
             "timing": c.timing,
+            "info_type": c.info_type,
+            "target_relevance": c.target_relevance,
+            "event": {
+                "subject": c.event_subject,
+                "type": c.event_type,
+                "object": c.event_object,
+            },
         }
         for c in candidates
     ]

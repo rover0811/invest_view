@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import itertools
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -50,8 +51,14 @@ def news_message(
     symbol: str = "000660",
     source_doc_id: str = "2026101900001",
     title: str = "SK하이닉스, 3분기 영업이익 사상 최대",
+    published_at: datetime = PUBLISHED_AT,
 ) -> ConsumedMessage:
-    value = news_value(symbol=symbol, source_doc_id=source_doc_id, title=title)
+    value = news_value(
+        symbol=symbol,
+        source_doc_id=source_doc_id,
+        title=title,
+        published_at=published_at,
+    )
     return ConsumedMessage(
         topic="news-raw",
         partition=0,
@@ -61,6 +68,9 @@ def news_message(
         headers={},
         timestamp_ms=None,
     )
+
+
+_SUBJECTS = itertools.count(1)
 
 
 @dataclass
@@ -85,13 +95,24 @@ def judgement(
     scope: str = "SYMBOL",
     fail_reason: str | None = None,
     probability: float = 0.87654,
+    info_type: str = "NEW_FACT",
+    event_subject: str | None = None,
+    event_type: str = "CONTRACT",
+    event_object: str = "공급 계약",
+    target_relevance: str = "DIRECT",
 ) -> DocumentJudgementOutput:
+    """``event_subject`` defaults to a fresh value so identities never repeat."""
     return DocumentJudgementOutput.model_validate(
         {
             "direction": direction,
             "scope": scope,
             "fail_reason": fail_reason,
             "probability": probability,
+            "info_type": info_type,
+            "event_subject": event_subject or f"subject-{next(_SUBJECTS)}",
+            "event_type": event_type,
+            "event_object": event_object,
+            "target_relevance": target_relevance,
         }
     )
 
@@ -100,4 +121,4 @@ def scripted_judge(
     outputs: Sequence[DocumentJudgementOutput | None],
 ) -> tuple[DocumentJudge, ScriptedStep]:
     step = ScriptedStep(list(outputs))
-    return DocumentJudge([step], load_prompt("document_judgement", "v1")), step
+    return DocumentJudge([step], load_prompt("document_judgement", "v3")), step
