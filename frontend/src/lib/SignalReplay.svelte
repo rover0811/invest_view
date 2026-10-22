@@ -1320,6 +1320,12 @@
     pointer-events: auto;
   }
 
+  .document-marker.align-right .marker-label {
+    right: 0;
+    left: auto;
+    text-align: right;
+  }
+
   .document-marker.align-right .document-tooltip {
     right: 0;
     left: auto;
