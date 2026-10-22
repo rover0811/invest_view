@@ -156,6 +156,7 @@ export interface ReplayOverlayKey {
   priceScaleWidth: number;
   interval: ReplayBarInterval;
   revealedStateCount: number;
+  revealedSignalCount: number;
   currentBarTime: string | null;
   labelOnLeft: boolean;
 }
@@ -168,6 +169,7 @@ export interface ReplayKeyEvent {
   kind: ReplayKeyEventKind;
   label: string;
   headline?: string;
+  direction?: 'positive' | 'negative' | 'neutral';
 }
 
 export interface ReplayPlaybackAdvance {
@@ -418,6 +420,42 @@ export function selectReplaySignalCard(data: ReplayData, frame: ReplayFrame): Re
   return { mode: 'shown', signal };
 }
 
+export interface ChartSignalMark {
+  key: string;
+  at: string;
+  version: number;
+  status: SignalStatus;
+  direction: 'positive' | 'negative' | 'neutral';
+  label: string;
+  current: boolean;
+}
+
+export function signalDirection(data: ReplayData, signal: ReplaySignal): 'positive' | 'negative' | 'neutral' {
+  if (signal.status !== 'SHOWN') return 'neutral';
+  const state = data.states.findLast((item) => item.move_version === signal.move_version)?.state;
+  if (state === 'POSITIVE') return 'positive';
+  if (state === 'NEGATIVE') return 'negative';
+  return 'neutral';
+}
+
+export function buildChartSignalMarks(data: ReplayData, playhead: string): ChartSignalMark[] {
+  const playheadMs = Date.parse(playhead);
+  const card = selectReplaySignalCard(data, selectReplayFrame(data, playhead));
+  const currentSignal = card.mode === 'shown' ? card.signal : undefined;
+  return data.signals
+    .filter((signal) => (signal.status === 'SHOWN' || signal.status === 'HIDDEN')
+      && Date.parse(signal.at) <= playheadMs)
+    .map((signal) => ({
+      key: `${signal.at}-${signal.version}`,
+      at: signal.at,
+      version: signal.version,
+      status: signal.status,
+      direction: signalDirection(data, signal),
+      label: signal.status === 'SHOWN' ? signal.headline_label : '',
+      current: signal === currentSignal,
+    }));
+}
+
 export function visibleBarsAt(bars: ReplayBar[], playhead: string): ReplayBar[] {
   const playheadTime = Date.parse(playhead);
   return bars.filter((bar) => Date.parse(bar.t) <= playheadTime);
@@ -505,6 +543,7 @@ export function shouldRecomputeReplayOverlays(
     || previous.priceScaleWidth !== next.priceScaleWidth
     || previous.interval !== next.interval
     || previous.revealedStateCount !== next.revealedStateCount
+    || previous.revealedSignalCount !== next.revealedSignalCount
     || previous.currentBarTime !== next.currentBarTime
     || previous.labelOnLeft !== next.labelOnLeft;
 }
@@ -563,6 +602,7 @@ export function buildReplayKeyEvents(data: ReplayData): ReplayKeyEvent[] {
       at: signal.at,
       kind: 'signal' as const,
       label: `시그널 v${signal.version}`,
+      direction: signalDirection(data, signal),
       ...(signal.status === 'SHOWN' && signal.headline_label
         ? { headline: signal.headline_label }
         : {}),

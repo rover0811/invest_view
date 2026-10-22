@@ -4,6 +4,7 @@ import {
   assembleHeadline,
   aggregateReplayBars,
   advanceReplayPlayhead,
+  buildChartSignalMarks,
   buildReplayDensity,
   buildReplayEvents,
   buildReplayKeyEvents,
@@ -129,6 +130,25 @@ describe('selectReplayFrame', () => {
   });
 });
 
+describe('buildChartSignalMarks', () => {
+  it('marks every regenerated version up to the playhead and expands only the card signal', () => {
+    const marks = buildChartSignalMarks(replay, '2026-10-20T10:10:00+09:00');
+
+    expect(marks.map((mark) => [mark.version, mark.status, mark.direction, mark.current])).toEqual([
+      [1, 'HIDDEN', 'neutral', false],
+      [2, 'SHOWN', 'positive', true],
+    ]);
+    expect(marks[1].label).toBe('HBM 장기 공급 계약');
+    expect(buildChartSignalMarks(replay, '2026-10-20T09:00:00+09:00')).toEqual([]);
+  });
+
+  it('collapses a stale headline once the price state moves past it', () => {
+    const marks = buildChartSignalMarks(replay, '2026-10-20T11:53:00+09:00');
+
+    expect(marks.map((mark) => mark.current)).toEqual([false, false]);
+  });
+});
+
 describe('selectReplaySignalCard', () => {
   it('hides an older SHOWN signal when the latest version is HIDDEN', () => {
     const hiddenAfterShown: ReplayData = {
@@ -152,15 +172,19 @@ describe('selectReplaySignalCard', () => {
     });
   });
 
-  it('shows a pending state after the 14:35 state change and before the 14:37 signal', () => {
-    const fixture = JSON.parse(
-      readFileSync(new URL('../../public/replay/000660-2026-10-14.json', import.meta.url), 'utf8'),
-    ) as ReplayData;
-    const frame = selectReplayFrame(fixture, '2026-10-14T14:36:00+09:00');
+  it('shows a pending state after a state change and before the next signal', () => {
+    const reversed: ReplayData = {
+      ...replay,
+      states: [
+        ...replay.states.slice(0, 1),
+        { t: '2026-10-20T11:00:00+09:00', state: 'NEGATIVE', move_id: 'move-1', move_version: 2, return_pct: -1.2 },
+      ],
+    };
+    const frame = selectReplayFrame(reversed, '2026-10-20T11:01:00+09:00');
 
-    expect(selectReplaySignalCard(fixture, frame)).toEqual({
+    expect(selectReplaySignalCard(reversed, frame)).toEqual({
       mode: 'pending',
-      signal: fixture.signals[2],
+      signal: reversed.signals[1],
     });
   });
 
@@ -386,6 +410,7 @@ describe('shouldRecomputeReplayOverlays', () => {
       priceScaleWidth: 74,
       interval: 3,
       revealedStateCount: 1,
+      revealedSignalCount: 0,
       currentBarTime: '2026-10-20T10:10:00+09:00',
       labelOnLeft: false,
     };
@@ -394,6 +419,7 @@ describe('shouldRecomputeReplayOverlays', () => {
     expect(shouldRecomputeReplayOverlays(key, { ...key })).toBe(false);
     expect(shouldRecomputeReplayOverlays(key, { ...key, currentBarTime: '2026-10-20T10:11:00+09:00' })).toBe(true);
     expect(shouldRecomputeReplayOverlays(key, { ...key, revealedStateCount: 2 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, revealedSignalCount: 1 })).toBe(true);
     expect(shouldRecomputeReplayOverlays(key, { ...key, width: 900 })).toBe(true);
     expect(shouldRecomputeReplayOverlays(key, { ...key, height: 400 })).toBe(true);
     expect(shouldRecomputeReplayOverlays(key, { ...key, priceScaleWidth: 80 })).toBe(true);
@@ -479,12 +505,14 @@ describe('buildReplayKeyEvents', () => {
         at: '2026-10-20T09:24:00+09:00',
         kind: 'signal',
         label: '시그널 v1',
+        direction: 'neutral',
       },
       {
         id: 'signal-2026-10-20T10:10:00+09:00-2-SHOWN',
         at: '2026-10-20T10:10:00+09:00',
         kind: 'signal',
         label: '시그널 v2',
+        direction: 'positive',
         headline: 'HBM 장기 공급 계약',
       },
       {
