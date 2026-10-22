@@ -234,4 +234,4 @@ v1(09:08, PRICE_STATE_CHANGE)은 primary가 UNAVAILABLE이어서 gemini-3.5-flas
 | `04-v4-1442.png` | 14:42 부정 진입과 v4 |
 | `05-keep-1504.png` | 15:04 문구 유지 |
 | `06-v5-1659.png` | 16:59 장 마감 뒤 v5 |
-| `signal-replay-16x.mp4`, `signal-replay-16x.gif` | 빈 구간을 건너뛰며 16배속으로 하루 전체를 재생 |
+| `signal-replay-16x.mp4`, `signal-replay-16x.gif` | 빈 구간을 건너뛰며 16배속으로 09:00부터 장 마감 15:30까지 재생(14초) |
