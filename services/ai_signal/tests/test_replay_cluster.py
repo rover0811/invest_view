@@ -41,6 +41,12 @@ def test_count_llm_attempts_handles_text_list_and_null() -> None:
     assert cluster.count_llm_attempts(None) == 0
 
 
+def test_count_llm_attempts_excludes_cache_hits() -> None:
+    raw = '[{"model": "a", "cached": true}, {"model": "b", "cached": false}, {"model": "c"}]'
+    assert cluster.count_llm_attempts(raw) == 2
+    assert cluster.count_llm_attempts([{"model": "a", "cached": True}]) == 0
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
