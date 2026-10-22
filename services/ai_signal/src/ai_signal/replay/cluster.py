@@ -121,11 +121,16 @@ def news_record(
 
 
 def count_llm_attempts(raw: object) -> int:
-    """``llm_attempts`` JSONB is a list of attempts; asyncpg returns it as text."""
+    """Count real LLM calls in ``llm_attempts`` JSONB (asyncpg returns it as text).
+
+    Cache hits (``cached`` true) cost nothing, so they do not count toward the cap.
+    """
     if raw is None:
         return 0
     value = json.loads(raw) if isinstance(raw, str) else raw
-    return len(value) if isinstance(value, list) else 0
+    if not isinstance(value, list):
+        return 0
+    return sum(1 for attempt in value if not (isinstance(attempt, dict) and attempt.get("cached") is True))
 
 
 # ---------------------------------------------------------------- idle wait
