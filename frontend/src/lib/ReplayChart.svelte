@@ -346,7 +346,7 @@
       const alignRight = x + width > plotRight;
       const left = alignRight ? x - width : x;
       const right = left + width;
-      const bars = renderedBars ?? [];
+      const bars = data.bars;
       const nearby = bars.filter((bar) => {
         const barX = xForTime(bar.t);
         return barX >= left - space2 && barX <= right + space2;
