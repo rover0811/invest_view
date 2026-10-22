@@ -15,6 +15,7 @@
   import { fmtPrice } from './format';
   import {
     aggregateReplayBars,
+    buildChartSignalMarks,
     computeStateBands,
     formatReplayTime,
     layoutReplayAnnotationTags,
@@ -23,6 +24,7 @@
     shouldRecomputeReplayOverlays,
     visibleBarsAt,
     type ReplayBar,
+    type ChartSignalMark,
     type ReplayBarInterval,
     type ReplayData,
     type ReplayOverlayKey,
@@ -34,8 +36,11 @@
   type RenderedThreshold = { key: number; label: string; y: number; className: string };
   type RenderedAnnotation = { key: number; label: string; x: number; y: number; className: string };
   type RenderedCurrentPrice = { label: string; y: number; className: string };
+  type RenderedSignalMark = ChartSignalMark & { x: number; y: number; alignRight: boolean };
 
   const MAX_ANNOTATION_ROWS = 2;
+  const CALLOUT_MAX_WIDTH = 440;
+  const CALLOUT_MAX_RATIO = 0.62;
   const PRICE_PADDING_RATIO = 0.04;
   const MIN_PRICE_PADDING_RATIO = 0.001;
 
@@ -58,6 +63,9 @@
   let renderedThresholds = $state<RenderedThreshold[]>([]);
   let renderedAnnotations = $state<RenderedAnnotation[]>([]);
   let renderedCurrentPrice = $state<RenderedCurrentPrice | null>(null);
+  let renderedSignalMarks = $state<RenderedSignalMark[]>([]);
+  let signalStripTop = $state(0);
+  const currentSignalMark = $derived(renderedSignalMarks.find((mark) => mark.current));
   let interval = $state<ReplayBarInterval>(3);
   let intervalSelected = false;
 
@@ -156,6 +164,8 @@
     const chartGrid = token(styles, '--chart-grid', 'currentColor');
     const borderSubtle = token(styles, '--border-subtle', 'currentColor');
     const fontSans = token(styles, '--font-sans', 'Pretendard, sans-serif');
+    const fontMono = token(styles, '--font-mono', 'monospace');
+    const measureContext = document.createElement('canvas').getContext('2d');
     const transparent = 'transparent';
     const space1 = Number.parseFloat(token(styles, '--space-1', '4px'));
     const space2 = Number.parseFloat(token(styles, '--space-2', '8px'));
@@ -198,7 +208,7 @@
         minBarSpacing: 2,
         rightOffset: 1,
       },
-      rightPriceScale: { borderColor: borderSubtle },
+      rightPriceScale: { borderColor: borderSubtle, scaleMargins: { top: 0, bottom: 0 } },
       handleScale: false,
       handleScroll: false,
     });
@@ -218,8 +228,8 @@
           maxValue: fullDayDomain.max,
         },
         margins: {
-          above: space8 + space8,
-          below: space3,
+          above: Math.min(space8 + space8, Math.max(space6, chartHost.clientHeight * 0.16)),
+          below: Math.min(space8 + space6, Math.max(space6 + space1, chartHost.clientHeight * 0.14)),
         },
       }),
     });
@@ -321,6 +331,41 @@
       }
     }
 
+    function calloutWidth(mark: ChartSignalMark): number {
+      const maxWidth = Math.min(CALLOUT_MAX_WIDTH, chartHost.clientWidth * CALLOUT_MAX_RATIO);
+      if (!measureContext) return maxWidth;
+      measureContext.font = `700 12px ${fontSans}`;
+      const labelWidth = measureContext.measureText(mark.label).width;
+      measureContext.font = `700 10px ${fontMono}`;
+      const versionWidth = measureContext.measureText(`v${mark.version}`).width;
+      return Math.min(maxWidth, Math.ceil(labelWidth + versionWidth + space2 + space2 + space3 + space1 + 2));
+    }
+
+    function placeCallout(mark: ChartSignalMark, x: number, plotRight: number, stripTop: number) {
+      const width = calloutWidth(mark);
+      const alignRight = x + width > plotRight;
+      const left = alignRight ? x - width : x;
+      const right = left + width;
+      const bars = renderedBars ?? [];
+      const nearby = bars.filter((bar) => {
+        const barX = xForTime(bar.t);
+        return barX >= left - space2 && barX <= right + space2;
+      });
+      const anchorBar = bars.findLast((bar) => Date.parse(bar.t) <= Date.parse(mark.at)) ?? bars.at(-1);
+      const span = nearby.length > 0 ? nearby : anchorBar ? [anchorBar] : [];
+      const height = space6 + space1;
+      const minTop = space8 + space6;
+      const maxTop = Math.max(minTop, stripTop - height - space1);
+      if (span.length === 0) return { y: maxTop, alignRight };
+      const highY = candleSeries.priceToCoordinate(Math.max(...span.map((bar) => bar.h)));
+      const lowY = candleSeries.priceToCoordinate(Math.min(...span.map((bar) => bar.l)));
+      const above = highY == null ? null : Number(highY) - space2 - height;
+      const below = lowY == null ? null : Number(lowY) + space2;
+      if (above != null && above >= minTop) return { y: above, alignRight };
+      if (below != null && below <= maxTop) return { y: below, alignRight };
+      return { y: Math.min(maxTop, Math.max(minTop, above ?? minTop)), alignRight };
+    }
+
     function revealedStatesAt(nextPlayheadMs: number) {
       return data.states.filter((state) => Date.parse(state.t) <= nextPlayheadMs);
     }
@@ -328,12 +373,14 @@
     function syncOverlays(nextPlayheadMs: number, revealedStates: ReplayData['states']) {
       const currentBar = data.bars.findLast((bar) => Date.parse(bar.t) <= nextPlayheadMs);
       const nextPriceScaleWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
+      const signalMarks = buildChartSignalMarks(data, new Date(nextPlayheadMs).toISOString());
       const nextOverlayKey: ReplayOverlayKey = {
         width: chartHost.clientWidth,
         height: chartHost.clientHeight,
         priceScaleWidth: nextPriceScaleWidth,
         interval: latestInterval,
         revealedStateCount: revealedStates.length,
+        revealedSignalCount: signalMarks.length,
         currentBarTime: currentBar?.t ?? null,
         labelOnLeft,
       };
@@ -440,6 +487,14 @@
         }];
       });
       replaceArray(renderedAnnotations, nextAnnotations);
+
+      const plotBottom = chartHost.clientHeight - chart.timeScale().height();
+      signalStripTop = Math.max(0, plotBottom - space6 - space1);
+      renderedSignalMarks = signalMarks.map((mark) => {
+        const x = Math.min(plotRight, Math.max(0, xForTime(mark.at)));
+        if (!mark.current) return { ...mark, x, y: signalStripTop, alignRight: false };
+        return { ...mark, x, ...placeCallout(mark, x, plotRight, signalStripTop) };
+      });
     }
 
     function syncStateDecorations(nextPlayheadMs: number, aggregatedBars: ReplayBar[], force = false) {
@@ -544,10 +599,7 @@
 
 <section class="replay-chart panel" aria-label="가격 상태 차트">
   <header class="chart-head">
-    <div class="chart-copy">
-      <span class="eyebrow">가격 상태</span>
-      <strong>전일 종가 대비 상태 변화를 재생합니다.</strong>
-    </div>
+    <strong class="chart-title">가격 상태</strong>
     <div class="chart-tools">
       <div class="interval-control" aria-label="봉 간격">
         {#each intervalOptions as option}
@@ -595,6 +647,35 @@
         aria-hidden="true"
       >{annotation.label}</span>
     {/each}
+    {#each renderedSignalMarks as mark (mark.key)}
+      <span
+        class="signal-guide {mark.direction}"
+        class:current={mark.current}
+        style="left: {mark.x}px; height: {signalStripTop}px;"
+        aria-hidden="true"
+      ></span>
+      {#if !mark.current}
+        <span
+          class="signal-pin {mark.direction}"
+          style="left: {mark.x}px; top: {signalStripTop}px;"
+          title={mark.label || `시그널 v${mark.version}`}
+          aria-hidden="true"
+        >v{mark.version}{mark.status === 'HIDDEN' ? ' 숨김' : ''}</span>
+      {/if}
+    {/each}
+    {#if currentSignalMark}
+      {#key currentSignalMark.key}
+        <span
+          class="signal-callout {currentSignalMark.direction}"
+          class:align-right={currentSignalMark.alignRight}
+          style="left: {currentSignalMark.x}px; top: {currentSignalMark.y}px;"
+          role="status"
+        >
+          <strong class="tnum">v{currentSignalMark.version}</strong>
+          <span>{currentSignalMark.label}</span>
+        </span>
+      {/key}
+    {/if}
     <div bind:this={playheadElement} class="playhead" aria-hidden="true">
       <span>
         <strong>{formatReplayTime(playhead, data.date)}</strong>
@@ -615,17 +696,11 @@
 
   .chart-head {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
     gap: var(--space-3);
     padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .chart-copy {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
   }
 
   .chart-tools {
@@ -667,7 +742,6 @@
     outline-offset: 2px;
   }
 
-  .eyebrow,
   .price-range {
     font-size: 11px;
     color: var(--text-tertiary);
@@ -860,6 +934,123 @@
   :global(.playhead.label-left) span {
     right: var(--space-2);
     left: auto;
+  }
+
+  .signal-guide {
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    width: 0;
+    border-left: 1px dashed currentColor;
+    opacity: 0.35;
+    pointer-events: none;
+  }
+
+  .signal-guide.current {
+    border-left-style: solid;
+    opacity: 0.8;
+  }
+
+  .signal-guide.positive,
+  .signal-pin.positive,
+  .signal-callout.positive strong {
+    color: var(--color-positive);
+  }
+
+  .signal-guide.negative,
+  .signal-pin.negative,
+  .signal-callout.negative strong {
+    color: var(--color-negative);
+  }
+
+  .signal-guide.neutral,
+  .signal-pin.neutral,
+  .signal-callout.neutral strong {
+    color: var(--text-tertiary);
+  }
+
+  .signal-pin {
+    position: absolute;
+    z-index: 4;
+    transform: translateX(-50%);
+    padding: 2px var(--space-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--surface-body) 94%, transparent);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.4;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .signal-callout {
+    position: absolute;
+    z-index: 5;
+    box-sizing: border-box;
+    max-width: min(440px, 62%);
+    height: calc(var(--space-6) + var(--space-1));
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid currentColor;
+    border-radius: var(--radius-sm);
+    background: var(--surface-overlay);
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.4;
+    pointer-events: none;
+    animation: signal-callout-in 260ms var(--ease-out);
+  }
+
+  .signal-callout.positive {
+    color: var(--color-positive);
+  }
+
+  .signal-callout.negative {
+    color: var(--color-negative);
+  }
+
+  .signal-callout.align-right {
+    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+    transform: translateX(-100%);
+    border-right: 3px solid currentColor;
+    border-left: 1px solid var(--border-strong);
+  }
+
+  .signal-callout strong {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .signal-callout span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @keyframes signal-callout-in {
+    from {
+      opacity: 0;
+      translate: 0 var(--space-1);
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .signal-callout {
+      animation: none;
+    }
   }
 
   @media (max-width: 720px) {

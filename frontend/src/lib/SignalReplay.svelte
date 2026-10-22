@@ -43,6 +43,14 @@
   let markerDistance = $state(0);
   let premarketReserve = $state(0);
   let keyEventListElement = $state<HTMLOListElement>();
+  let scrubberElement = $state<HTMLDivElement>();
+  let scrubbing = $state(false);
+  let hoverPosition = $state<number | null>(null);
+  let scrubMoved = false;
+  let scrubStartX = 0;
+  let resumeAfterScrub = false;
+  const SCRUB_SNAP_PX = 8;
+  const SCRUB_CLICK_TOLERANCE_PX = 3;
 
   const timeline = $derived(data ? buildReplayTimeline(data) : null);
   const startMs = $derived(timeline?.startMs ?? 0);
@@ -70,6 +78,9 @@
   const headline = $derived(data && frame ? assembleHeadline(cardSignal, data.name, frame.returnPct) : null);
   const playheadPosition = $derived(timeline ? replayTimeToPosition(timeline, playheadMs) : 0);
   const afterClose = $derived(closeMs > 0 && playheadMs > closeMs);
+  const hoverLabel = $derived(timeline && hoverPosition != null
+    ? formatTime(new Date(Math.round(replayPositionToTime(timeline, hoverPosition) / 60_000) * 60_000).toISOString())
+    : '');
   const documentGroups = $derived(frame
     ? splitAtSessionOpen(frame.documents, (document) => document.published_at, startMs)
     : { premarket: [], session: [] });
@@ -127,6 +138,7 @@
   }
 
   function keyEventClass(event: ReplayKeyEvent): string {
+    if (event.kind === 'signal') return event.direction ?? 'neutral';
     if (event.kind !== 'state') return event.kind;
     if (event.label === '긍정 진입') return 'positive';
     if (event.label === '부정 진입') return 'negative';
@@ -185,7 +197,7 @@
     const frame = requestAnimationFrame(() => {
       const current = list.querySelector<HTMLElement>('[aria-current="true"]');
       if (!current) return;
-      const itemLeft = current.offsetLeft;
+      const itemLeft = current.getBoundingClientRect().left - list.getBoundingClientRect().left + list.scrollLeft;
       const itemRight = itemLeft + current.offsetWidth;
       if (itemLeft < list.scrollLeft) list.scrollLeft = itemLeft;
       else if (itemRight > list.scrollLeft + list.clientWidth) {
@@ -243,11 +255,78 @@
     playing = !playing;
   }
 
-  function updateRange(event: Event) {
+  function pointerPosition(clientX: number): number {
+    if (!scrubberElement) return 0;
+    const rect = scrubberElement.getBoundingClientRect();
+    if (rect.width <= 0) return 0;
+    return Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
+  }
+
+  function seekToPosition(position: number) {
     if (!timeline) return;
-    const mappedTime = replayPositionToTime(timeline, Number((event.currentTarget as HTMLInputElement).value));
-    setPlayhead(Math.round(mappedTime / 60_000) * 60_000);
+    const mappedTime = replayPositionToTime(timeline, position);
+    setPlayhead(Math.min(endMs, Math.max(startMs, Math.round(mappedTime / 60_000) * 60_000)));
+  }
+
+  function nearestTick(clientX: number): string | undefined {
+    if (!scrubberElement) return undefined;
+    const width = scrubberElement.getBoundingClientRect().width;
+    if (width <= 0) return undefined;
+    const position = pointerPosition(clientX);
+    const threshold = (SCRUB_SNAP_PX / width) * 100;
+    let best: { tick: string; distance: number } | undefined;
+    for (const tick of scrubberTicks) {
+      const distance = Math.abs(eventPosition(tick) - position);
+      if (distance <= threshold && (!best || distance < best.distance)) best = { tick, distance };
+    }
+    return best?.tick;
+  }
+
+  function handleScrubStart(event: PointerEvent) {
+    if (event.button !== 0 || !scrubberElement) return;
+    scrubberElement.setPointerCapture(event.pointerId);
+    scrubbing = true;
+    scrubMoved = false;
+    scrubStartX = event.clientX;
+    resumeAfterScrub = playing;
     playing = false;
+    hoverPosition = pointerPosition(event.clientX);
+    seekToPosition(hoverPosition);
+  }
+
+  function handleScrubMove(event: PointerEvent) {
+    hoverPosition = pointerPosition(event.clientX);
+    if (!scrubbing) return;
+    if (Math.abs(event.clientX - scrubStartX) > SCRUB_CLICK_TOLERANCE_PX) scrubMoved = true;
+    seekToPosition(hoverPosition);
+  }
+
+  function finishScrub(event: PointerEvent, cancelled: boolean) {
+    if (!scrubbing) return;
+    if (scrubberElement?.hasPointerCapture(event.pointerId)) {
+      scrubberElement.releasePointerCapture(event.pointerId);
+    }
+    if (!cancelled && !scrubMoved) {
+      const tick = nearestTick(event.clientX);
+      if (tick) setPlayhead(Date.parse(tick));
+    }
+    scrubbing = false;
+    if (resumeAfterScrub && playheadMs < endMs) playing = true;
+    resumeAfterScrub = false;
+  }
+
+  function handleScrubKeydown(event: KeyboardEvent) {
+    const step = event.shiftKey ? 10 * 60_000 : 60_000;
+    let next: number | undefined;
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowDown') next = playheadMs - step;
+    else if (event.key === 'ArrowRight' || event.key === 'ArrowUp') next = playheadMs + step;
+    else if (event.key === 'Home') next = startMs;
+    else if (event.key === 'End') next = endMs;
+    if (next == null) return;
+    event.preventDefault();
+    event.stopPropagation();
+    playing = false;
+    setPlayhead(Math.min(endMs, Math.max(startMs, next)));
   }
 
   function isEditableTarget(target: EventTarget | null): boolean {
@@ -365,21 +444,31 @@
       <span>주소의 종목 코드와 거래일을 확인해 주세요.</span>
     </section>
   {:else if data && frame}
+    {@const currentPrice = frame.bar ? frame.bar.c : data.prev_close}
+    {@const priceChange = currentPrice - data.prev_close}
     <header class="replay-header">
-      <div class="header-copy">
-        <div class="header-meta">
-          <span>시그널 리플레이</span>
-          <span class="header-separator" aria-hidden="true"></span>
-          <time class="tnum">{formatDate(data.date)}</time>
-          {#if fixture}<span class="fixture-badge">데모 데이터</span>{/if}
+      <div class="stock-summary">
+        <div class="stock-title">
+          <h1>{data.name}</h1>
+          <span class="stock-code tnum">{data.symbol}</span>
         </div>
-        <h1>{data.name}의 하루를 사건 순서대로 다시 봅니다.</h1>
-        <p>가격 상태와 기사 판단, 시그널 버전이 바뀐 시점을 한 화면에서 확인할 수 있습니다.</p>
+        <div class="stock-price">
+          <strong class="tnum">{fmtPrice(currentPrice)}원</strong>
+          <span class="stock-change">
+            <span>어제보다</span>
+            <span class="tnum {priceClass(frame.returnPct)}">
+              {priceChange > 0 ? '+' : ''}{fmtPrice(priceChange)}원 ({Math.abs(frame.returnPct).toFixed(1)}%)
+            </span>
+          </span>
+        </div>
       </div>
-      <div class="header-price">
-        <span class="symbol tnum">{data.symbol}</span>
-        <strong class="tnum {priceClass(frame.returnPct)}">{frame.bar ? fmtPrice(frame.bar.c) : fmtPrice(data.prev_close)}</strong>
-        <span class="tnum {priceClass(frame.returnPct)}">{frame.returnPct >= 0 ? '+' : ''}{frame.returnPct.toFixed(1)}%</span>
+      <div class="header-meta">
+        {#if fixture}<span class="fixture-badge">데모 데이터</span>{/if}
+        <span>시그널 리플레이</span>
+        <span class="header-separator" aria-hidden="true"></span>
+        <time class="tnum">{formatDate(data.date)}</time>
+        <span class="header-separator" aria-hidden="true"></span>
+        <time class="tnum">{formatTime(playhead)}</time>
       </div>
     </header>
 
@@ -387,12 +476,33 @@
       <div class="replay-main">
         <ReplayChart {data} {playhead} {registerPlayheadFrame} />
 
+        <section class="key-events panel" aria-label="핵심 사건">
+          <div class="key-events-title">
+            <strong>핵심 사건</strong>
+            <span class="tnum">{keyEvents.length}건</span>
+          </div>
+          <ol class="key-event-list" bind:this={keyEventListElement} aria-label="핵심 사건 목록">
+            {#each keyEvents as event (event.id)}
+              <li>
+                <button
+                  type="button"
+                  class:current={event.id === currentKeyEventId}
+                  aria-current={event.id === currentKeyEventId ? 'true' : undefined}
+                  aria-label={`${keyEventAriaLabel(event)} 시점으로 이동`}
+                  onclick={() => jumpTo(event.at)}
+                >
+                  <time class="tnum">{formatTime(event.at)}</time>
+                  <span class="key-event-kind {keyEventClass(event)}">{event.label}</span>
+                  {#if event.headline}<span class="key-event-headline">{event.headline}</span>{/if}
+                </button>
+              </li>
+            {/each}
+          </ol>
+        </section>
+
         <section class="lanes panel" aria-label="상태별 기사 윈도우">
           <header class="section-head">
-            <div>
-              <span class="section-kicker">상태 윈도우</span>
-              <strong>현재 상태와 같은 방향의 사건만 원인 후보가 됩니다.</strong>
-            </div>
+            <strong class="section-title">상태 윈도우</strong>
             <span class="document-count tnum">공개된 기사 {frame.documents.length}건</span>
           </header>
           <div class="lanes-scroll">
@@ -576,10 +686,7 @@
 
         <section class="log-panel panel">
           <header class="section-head log-head">
-            <div>
-              <span class="section-kicker">처리 기록</span>
-              <strong>재생 시점까지 완료된 단계입니다.</strong>
-            </div>
+            <strong class="section-title">처리 기록</strong>
           </header>
           {#if frame.logs.length > 0}
             <div class="log-content">
@@ -619,35 +726,6 @@
     </div>
 
     <section class="playback panel" aria-label="재생 제어">
-      <div class="key-events">
-        <div class="key-events-title">
-          <strong>핵심 사건</strong>
-          <span class="tnum">{keyEvents.length}건</span>
-        </div>
-        <ol class="key-event-list" bind:this={keyEventListElement} aria-label="핵심 사건 목록">
-          {#each keyEvents as event (event.id)}
-            <li>
-              <button
-                type="button"
-                class:current={event.id === currentKeyEventId}
-                aria-current={event.id === currentKeyEventId ? 'true' : undefined}
-                aria-label={`${keyEventAriaLabel(event)} 시점으로 이동`}
-                onclick={() => jumpTo(event.at)}
-              >
-                <time class="tnum">{formatTime(event.at)}</time>
-                <span class="key-event-kind {keyEventClass(event)}">{event.label}</span>
-                {#if event.headline}<span class="key-event-headline">{event.headline}</span>{/if}
-              </button>
-            </li>
-          {/each}
-        </ol>
-        <label class="skip-toggle">
-          <input type="checkbox" bind:checked={skipIdle} />
-          <span class="toggle-track" aria-hidden="true"><span></span></span>
-          <span>빈 구간 건너뛰기</span>
-        </label>
-      </div>
-
       <div class="transport">
         <button type="button" class="icon-button" onclick={() => jump(-1)} aria-label="이전 사건으로 이동">
           <svg viewBox="0 0 20 20" aria-hidden="true"><path d="M5 4v12M15 5l-7 5 7 5z" /></svg>
@@ -668,16 +746,40 @@
         <div class="scrubber-meta">
           <time class="tnum current-time">{formatTime(playhead)}{afterClose ? ' 장 마감 뒤' : ''}</time>
           <span class:fast-forwarding={fastForwarding} aria-live="polite">
-            {fastForwarding ? '다음 사건까지 빠르게 넘기는 중' : '09:00-15:30 장중, 이후 구간은 압축하여 표시합니다.'}
+            {#if fastForwarding}
+              다음 사건까지 빠르게 넘기는 중
+            {:else}
+              <svg class="drag-hint-icon" viewBox="0 0 20 12" aria-hidden="true"><path d="M5 2 1 6l4 4M15 2l4 4-4 4M1 6h18" /></svg>
+              막대를 좌우로 끌어서 원하는 시점으로 이동할 수 있습니다.
+            {/if}
           </span>
           <time class="tnum">{formatTime(new Date(endMs).toISOString())}</time>
         </div>
-        <div class="scrubber" style="--session-end: {timeline?.sessionEndPosition ?? 100}%;">
+        <div
+          class="scrubber"
+          class:scrubbing
+          bind:this={scrubberElement}
+          style="--session-end: {timeline?.sessionEndPosition ?? 100}%; --playhead: {playheadPosition}%;"
+          role="slider"
+          tabindex="0"
+          aria-label="재생 시점"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={Math.round(playheadPosition)}
+          aria-valuetext={`${formatTime(playhead)}${afterClose ? ' 장 마감 뒤' : ''}`}
+          onpointerdown={handleScrubStart}
+          onpointermove={handleScrubMove}
+          onpointerup={(event) => finishScrub(event, false)}
+          onpointercancel={(event) => finishScrub(event, true)}
+          onpointerleave={() => { if (!scrubbing) hoverPosition = null; }}
+          onkeydown={handleScrubKeydown}
+        >
           <div class="scrubber-track" aria-hidden="true">
             <span class="session-segment"></span>
             {#if timeline && timeline.endMs > timeline.closeMs}
               <span class="after-close-segment"><span>장 마감 뒤</span></span>
             {/if}
+            <span class="scrubber-progress"></span>
           </div>
           <div class="density-strip" aria-hidden="true">
             {#each density as bucket}
@@ -686,35 +788,38 @@
               {/if}
             {/each}
           </div>
-          <input
-            type="range"
-            min="0"
-            max="100"
-            step="0.01"
-            value={playheadPosition}
-            oninput={updateRange}
-            aria-label="재생 시점"
-            aria-valuetext={`${formatTime(playhead)}${afterClose ? ' 장 마감 뒤' : ''}`}
-          />
-          <div class="event-ticks">
+          <div class="event-ticks" aria-hidden="true">
             {#each scrubberTicks as event}
-              <button
-                type="button"
-                tabindex="-1"
-                style="--position: {eventPosition(event)}%;"
-                class:past={Date.parse(event) <= playheadMs}
-                onclick={() => jumpTo(event)}
-                aria-label={`${formatTime(event)} 사건으로 이동`}
-              ></button>
+              <span style="--position: {eventPosition(event)}%;" class:past={Date.parse(event) <= playheadMs}></span>
             {/each}
           </div>
+          {#if hoverPosition != null && !scrubbing}
+            <span class="scrub-hover-line" style="--position: {hoverPosition}%;" aria-hidden="true"></span>
+          {/if}
+          <span class="scrubber-thumb" aria-hidden="true">
+            <span class="thumb-grip"></span>
+          </span>
+          {#if scrubbing || hoverPosition != null}
+            <span
+              class="scrub-tooltip tnum"
+              style="--position: {scrubbing ? playheadPosition : hoverPosition}%;"
+              aria-hidden="true"
+            >{scrubbing ? formatTime(playhead) : hoverLabel}</span>
+          {/if}
         </div>
       </div>
 
-      <div class="speed-group" aria-label="재생 속도">
-        {#each [1, 4, 16] as option}
-          <button type="button" class:active={speed === option} aria-pressed={speed === option} onclick={() => speed = option}>{option}x</button>
-        {/each}
+      <div class="playback-options">
+        <label class="skip-toggle">
+          <input type="checkbox" bind:checked={skipIdle} />
+          <span class="toggle-track" aria-hidden="true"><span></span></span>
+          <span>빈 구간 건너뛰기</span>
+        </label>
+        <div class="speed-group" aria-label="재생 속도">
+          {#each [1, 4, 16] as option}
+            <button type="button" class:active={speed === option} aria-pressed={speed === option} onclick={() => speed = option}>{option}x</button>
+          {/each}
+        </div>
       </div>
     </section>
   {/if}
@@ -722,8 +827,8 @@
 
 <style>
   .replay-page {
-    --replay-chart-panel-height: calc(var(--space-8) * 11);
-    --replay-main-area-height: calc(var(--replay-chart-panel-height) + var(--space-8) * 7 + var(--space-6));
+    --replay-chart-panel-height: calc(var(--space-8) * 6 + var(--space-2));
+    --replay-main-area-height: calc(var(--replay-chart-panel-height) + var(--space-8) * 9 + var(--space-2));
     width: 100%;
     max-width: 1320px;
     min-height: 0;
@@ -731,7 +836,8 @@
     flex: 1;
     flex-direction: column;
     gap: var(--space-2);
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
     scrollbar-color: var(--surface-raised) var(--surface-floor);
     scrollbar-width: thin;
   }
@@ -759,8 +865,7 @@
     text-align: center;
   }
 
-  .status-kicker,
-  .section-kicker {
+  .status-kicker {
     font-size: 11px;
     font-weight: 700;
     color: var(--text-tertiary);
@@ -771,20 +876,57 @@
     align-items: flex-end;
     justify-content: space-between;
     gap: var(--space-6);
-    padding: 0 var(--space-2) var(--space-1);
+    padding: var(--space-1) var(--space-2) var(--space-1);
   }
 
-  .header-copy {
+  .stock-summary {
     min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: var(--space-1);
+  }
+
+  .stock-title {
+    display: flex;
+    align-items: baseline;
+    gap: var(--space-2);
+  }
+
+  .stock-code {
+    color: var(--text-tertiary);
+    font-size: 13px;
+  }
+
+  .stock-price {
+    display: flex;
+    align-items: baseline;
+    flex-wrap: wrap;
+    gap: var(--space-3);
+  }
+
+  .stock-price strong {
+    color: var(--text-primary);
+    font-size: 28px;
+    font-weight: 700;
+    line-height: 1.1;
+    letter-spacing: -0.02em;
+  }
+
+  .stock-change {
+    display: inline-flex;
+    gap: var(--space-1);
+    color: var(--text-tertiary);
+    font-size: 14px;
+    font-weight: 600;
   }
 
   .header-meta {
     display: flex;
     align-items: center;
     gap: var(--space-2);
-    margin-bottom: var(--space-1);
+    padding-bottom: var(--space-1);
     color: var(--text-tertiary);
-    font-size: 11px;
+    font-size: 12px;
     font-weight: 600;
   }
 
@@ -807,48 +949,16 @@
 
   h1 {
     margin: 0;
-    max-width: 720px;
     color: var(--text-primary);
-    font-size: 20px;
-    line-height: 1.25;
-    letter-spacing: -0.025em;
-  }
-
-  .header-copy p {
-    margin: var(--space-1) 0 0;
-    color: var(--text-secondary);
-    font-size: 12px;
-    line-height: 1.4;
-  }
-
-  .header-price {
-    display: grid;
-    grid-template-columns: auto auto;
-    align-items: baseline;
-    column-gap: var(--space-3);
-    flex: 0 0 auto;
-  }
-
-  .header-price .symbol {
-    grid-column: 1 / -1;
-    justify-self: end;
-    color: var(--text-tertiary);
-    font-size: 11px;
-  }
-
-  .header-price strong {
-    font-size: 24px;
-    line-height: 1;
-  }
-
-  .header-price span:last-child {
-    font-size: 12px;
+    font-size: 18px;
     font-weight: 700;
+    line-height: 1.25;
+    letter-spacing: -0.02em;
   }
 
   .replay-grid {
-    height: var(--replay-main-area-height);
-    min-height: 0;
+    flex: 1 1 0;
+    min-height: var(--replay-main-area-height);
     display: grid;
     grid-template-columns: minmax(0, 2.1fr) minmax(320px, 1fr);
     align-items: stretch;
@@ -871,8 +981,8 @@
   }
 
   .replay-main :global(.replay-chart) {
-    height: var(--replay-chart-panel-height);
-    flex: 0 0 var(--replay-chart-panel-height);
+    min-height: var(--replay-chart-panel-height);
+    flex: 1 1 0;
   }
 
   .section-head {
@@ -884,15 +994,10 @@
     border-bottom: 1px solid var(--border-subtle);
   }
 
-  .section-head > div {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
-  }
-
-  .section-head strong {
+  .section-title {
     color: var(--text-primary);
-    font-size: 12px;
+    font-size: 13px;
+    font-weight: 700;
   }
 
   .document-count {
@@ -903,7 +1008,7 @@
   .lanes {
     overflow: hidden;
     min-height: 0;
-    flex: 1;
+    flex: 0 0 auto;
   }
 
   .lanes-scroll {
@@ -913,6 +1018,18 @@
 
   .lanes-scroll::-webkit-scrollbar {
     display: none;
+  }
+
+  @media (min-width: 901px) {
+    .lanes {
+      position: relative;
+      z-index: 10;
+      overflow: visible;
+    }
+
+    .lanes-scroll {
+      overflow: visible;
+    }
   }
 
   .lanes-canvas {
@@ -1062,7 +1179,7 @@
 
   .premarket-documents {
     position: absolute;
-    top: calc(100% + var(--space-1));
+    bottom: calc(100% + var(--space-1));
     left: 0;
     width: min(320px, calc(100vw - var(--space-8) - var(--space-8)));
     display: flex;
@@ -1141,7 +1258,7 @@
   .document-tooltip {
     position: absolute;
     z-index: 12;
-    top: 50%;
+    bottom: calc(100% + var(--space-1));
     left: 0;
     width: max-content;
     max-width: min(280px, calc(100vw - var(--space-8) - var(--space-8)));
@@ -1156,11 +1273,19 @@
     font-size: 11px;
     line-height: 1.45;
     white-space: normal;
-    transform: translateY(-50%);
     visibility: hidden;
     opacity: 0;
     pointer-events: none;
     transition: opacity var(--dur-hover) var(--ease-out);
+  }
+
+  .document-tooltip::after {
+    content: '';
+    position: absolute;
+    top: 100%;
+    right: 0;
+    left: 0;
+    height: calc(var(--space-1) + var(--space-1));
   }
 
   .document-tooltip strong {
@@ -1531,14 +1656,19 @@
   }
 
   .key-events {
-    grid-column: 1 / -1;
+    flex: 0 0 auto;
     min-width: 0;
     display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-columns: auto minmax(0, 1fr);
     align-items: center;
-    gap: var(--space-2);
-    padding-bottom: var(--space-1);
-    border-bottom: 1px solid var(--border-subtle);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3) var(--space-1);
+  }
+
+  .playback-options {
+    display: flex;
+    align-items: center;
+    gap: var(--space-3);
   }
 
   .key-events-title {
@@ -1630,7 +1760,6 @@
   .key-event-kind.positive { color: var(--color-positive); }
   .key-event-kind.negative { color: var(--color-negative); }
   .key-event-kind.neutral { color: var(--color-flat); }
-  .key-event-kind.signal { color: var(--brand); }
 
   .key-event-headline {
     overflow: hidden;
@@ -1735,7 +1864,7 @@
   .play-button:focus-visible,
   .speed-group button:focus-visible,
   .document-marker:focus-visible,
-  input[type='range']:focus-visible {
+  .scrubber:focus-visible {
     outline: 2px solid var(--brand);
     outline-offset: 2px;
   }
@@ -1775,6 +1904,98 @@
   .scrubber {
     position: relative;
     height: var(--space-6);
+    border-radius: var(--radius-sm);
+    cursor: grab;
+    touch-action: none;
+    user-select: none;
+  }
+
+  .scrubber.scrubbing {
+    cursor: grabbing;
+  }
+
+  .drag-hint-icon {
+    width: var(--space-3);
+    height: var(--space-2);
+    margin-right: var(--space-1);
+    vertical-align: -1px;
+    fill: none;
+    stroke: currentColor;
+    stroke-width: 1.6;
+    stroke-linecap: round;
+    stroke-linejoin: round;
+  }
+
+  .scrubber-progress {
+    position: absolute;
+    top: 0;
+    bottom: 0;
+    left: 0;
+    width: var(--playhead);
+    background: color-mix(in srgb, var(--brand) 55%, transparent);
+  }
+
+  .scrubber-thumb {
+    position: absolute;
+    z-index: 4;
+    top: var(--space-3);
+    left: var(--playhead);
+    width: calc(var(--space-4) + var(--space-1));
+    height: calc(var(--space-4) + var(--space-1));
+    display: grid;
+    place-items: center;
+    transform: translate(-50%, -50%);
+    border: 2px solid var(--text-on-brand);
+    border-radius: 50%;
+    background: var(--brand);
+    box-shadow: 0 0 0 var(--space-1) color-mix(in srgb, var(--brand) 22%, transparent);
+    pointer-events: none;
+    transition: transform 120ms var(--ease-out), box-shadow 120ms var(--ease-out);
+  }
+
+  .thumb-grip {
+    width: 6px;
+    height: 8px;
+    border-right: 1.5px solid var(--text-on-brand);
+    border-left: 1.5px solid var(--text-on-brand);
+  }
+
+  .scrubber:hover .scrubber-thumb,
+  .scrubber:focus-visible .scrubber-thumb {
+    transform: translate(-50%, -50%) scale(1.12);
+  }
+
+  .scrubber.scrubbing .scrubber-thumb {
+    transform: translate(-50%, -50%) scale(1.2);
+    box-shadow: 0 0 0 calc(var(--space-1) + 2px) color-mix(in srgb, var(--brand) 30%, transparent);
+  }
+
+  .scrub-hover-line {
+    position: absolute;
+    z-index: 3;
+    top: var(--space-1);
+    left: var(--position);
+    width: 1px;
+    height: var(--space-4);
+    background: var(--text-secondary);
+    pointer-events: none;
+  }
+
+  .scrub-tooltip {
+    position: absolute;
+    z-index: 5;
+    bottom: calc(100% + var(--space-1));
+    left: var(--position);
+    padding: 2px var(--space-2);
+    transform: translateX(-50%);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: var(--surface-raised);
+    color: var(--text-primary);
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+    pointer-events: none;
   }
 
   .scrubber-track {
@@ -1842,46 +2063,6 @@
     opacity: calc(0.12 + var(--intensity) * 0.42);
   }
 
-  input[type='range'] {
-    position: absolute;
-    z-index: 2;
-    inset: 0;
-    width: 100%;
-    height: var(--space-6);
-    margin: 0;
-    appearance: none;
-    background: transparent;
-    cursor: pointer;
-  }
-
-  input[type='range']::-webkit-slider-runnable-track {
-    height: var(--space-2);
-    background: transparent;
-  }
-
-  input[type='range']::-webkit-slider-thumb {
-    width: var(--space-4);
-    height: var(--space-4);
-    margin-top: calc(var(--space-1) * -1);
-    appearance: none;
-    border: 1px solid var(--text-on-brand);
-    border-radius: 50%;
-    background: var(--brand);
-  }
-
-  input[type='range']::-moz-range-track {
-    height: var(--space-2);
-    background: transparent;
-  }
-
-  input[type='range']::-moz-range-thumb {
-    width: var(--space-4);
-    height: var(--space-4);
-    border: 1px solid var(--text-on-brand);
-    border-radius: 50%;
-    background: var(--brand);
-  }
-
   .event-ticks {
     position: absolute;
     z-index: 3;
@@ -1889,33 +2070,18 @@
     pointer-events: none;
   }
 
-  .event-ticks button {
+  .event-ticks span {
     position: absolute;
-    left: var(--position);
     top: var(--space-3);
-    width: var(--space-4);
-    height: var(--space-6);
-    padding: 0;
-    transform: translate(-50%, -50%);
-    border: none;
-    background: transparent;
-    pointer-events: auto;
-    cursor: pointer;
-  }
-
-  .event-ticks button::before {
-    content: '';
-    position: absolute;
-    top: var(--space-2);
-    left: 50%;
-    width: var(--space-1);
-    height: var(--space-2);
+    left: var(--position);
+    width: 3px;
+    height: var(--space-3);
     transform: translate(-50%, -50%);
     border-radius: var(--radius-sm);
     background: var(--text-tertiary);
   }
 
-  .event-ticks button.past::before {
+  .event-ticks span.past {
     background: var(--text-primary);
   }
 
@@ -1960,23 +2126,7 @@
       padding-inline: var(--space-1);
     }
 
-    h1 {
-      font-size: 20px;
-    }
-
-    .header-copy p {
-      font-size: 12px;
-    }
-
-    .header-price {
-      width: 100%;
-    }
-
-    .header-price .symbol {
-      justify-self: start;
-    }
-
-    .header-price strong {
+    .stock-price strong {
       font-size: 24px;
     }
 
@@ -2005,8 +2155,7 @@
     }
 
     .key-events {
-      grid-row: 1;
-      grid-template-columns: minmax(0, 1fr) auto;
+      grid-template-columns: minmax(0, 1fr);
     }
 
     .key-events-title {
@@ -2019,17 +2168,17 @@
 
     .scrubber-wrap {
       grid-column: 1 / -1;
-      grid-row: 2;
+      grid-row: 1;
     }
 
     .transport {
       grid-column: 1;
-      grid-row: 3;
+      grid-row: 2;
     }
 
-    .speed-group {
+    .playback-options {
       grid-column: 2;
-      grid-row: 3;
+      grid-row: 2;
     }
 
     .scrubber-meta span {
