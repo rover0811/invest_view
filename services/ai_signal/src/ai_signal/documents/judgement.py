@@ -6,7 +6,7 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -26,6 +26,25 @@ PURPOSE = "document_judgement"
 Direction = Literal[-1, 0, 1]
 Scope = Literal["MARKET", "SECTOR", "SYMBOL"]
 FailReason = Literal["LISTING_ONLY", "AD", "NO_EVIDENCE"]
+InfoType = Literal["NEW_FACT", "PRICE_RECAP", "OPINION", "FLOW", "OTHER"]
+EventType = Literal[
+    "CONTRACT",
+    "EARNINGS",
+    "INVESTMENT",
+    "TECH_ANNOUNCEMENT",
+    "PRODUCT",
+    "PERSONNEL",
+    "POLICY",
+    "REGULATION",
+    "LEGAL",
+    "CAPITAL",
+    "SCHEDULE",
+    "OTHER",
+]
+TargetRelevance = Literal["DIRECT", "COMPETITOR", "SUPPLY_CHAIN", "SECTOR", "UNRELATED"]
+INFO_TYPES: tuple[str, ...] = get_args(InfoType)
+EVENT_TYPES: tuple[str, ...] = get_args(EventType)
+TARGET_RELEVANCES: tuple[str, ...] = get_args(TargetRelevance)
 
 
 class DocumentJudgementOutput(BaseModel):
@@ -35,6 +54,11 @@ class DocumentJudgementOutput(BaseModel):
     scope: Scope
     fail_reason: FailReason | None
     probability: float = Field(ge=0, le=1)
+    info_type: InfoType
+    event_subject: str
+    event_type: EventType
+    event_object: str
+    target_relevance: TargetRelevance
 
     @property
     def is_signal_candidate(self) -> bool:
@@ -70,7 +94,7 @@ class Judgement:
     attempts: tuple[LlmAttempt, ...] = ()
 
     @property
-    def llm_attempts(self) -> list[dict[str, str | None]] | None:
+    def llm_attempts(self) -> list[dict[str, str | bool | None]] | None:
         return [a.as_json() for a in self.attempts] if self.attempts else None
 
 

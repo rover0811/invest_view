@@ -36,6 +36,11 @@ class SignalCandidate:
     published_at: datetime
     scope: str
     timing: Timing
+    info_type: str | None = None
+    target_relevance: str | None = None
+    event_subject: str | None = None
+    event_type: str | None = None
+    event_object: str | None = None
 
 
 @dataclass(frozen=True)
@@ -71,7 +76,8 @@ def timing_of(published_at: datetime, move: OpenMove) -> Timing:
 DOCUMENT_CANDIDATES = text(
     """
     SELECT DISTINCT d.document_id, d.version, d.title, d.publisher,
-           d.published_at, j.scope
+           d.published_at, j.scope, j.info_type, j.target_relevance,
+           j.event_subject, j.event_type, j.event_object
     FROM silver.document d
     JOIN silver.document_judgement j
       ON j.document_id = d.document_id AND j.version = d.version
@@ -90,7 +96,11 @@ DOCUMENT_CANDIDATES = text(
 
 @dataclass(frozen=True)
 class DocumentCandidateSource:
-    """Judged documents without ``fail_reason`` in the move's direction pool."""
+    """Judged documents without ``fail_reason`` in the move's direction pool.
+
+    Every article character is a candidate (PRICE_RECAP, OPINION and FLOW
+    included): market-wide causes such as an index rebound live in recaps.
+    """
 
     limit: int = MAX_DOCUMENTS
     source_type: SourceType = "DOCUMENT"
@@ -126,6 +136,11 @@ class DocumentCandidateSource:
                 published_at=row[4],
                 scope=str(row[5]),
                 timing=timing_of(row[4], move),
+                info_type=row[6],
+                target_relevance=row[7],
+                event_subject=row[8],
+                event_type=row[9],
+                event_object=row[10],
             )
             for index, row in enumerate(rows, start=1)
         )

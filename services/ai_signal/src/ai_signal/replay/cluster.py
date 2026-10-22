@@ -121,11 +121,16 @@ def news_record(
 
 
 def count_llm_attempts(raw: object) -> int:
-    """``llm_attempts`` JSONB is a list of attempts; asyncpg returns it as text."""
+    """Count real LLM calls in ``llm_attempts`` JSONB (asyncpg returns it as text).
+
+    Cache hits (``cached`` true) cost nothing, so they do not count toward the cap.
+    """
     if raw is None:
         return 0
     value = json.loads(raw) if isinstance(raw, str) else raw
-    return len(value) if isinstance(value, list) else 0
+    if not isinstance(value, list):
+        return 0
+    return sum(1 for attempt in value if not (isinstance(attempt, dict) and attempt.get("cached") is True))
 
 
 # ---------------------------------------------------------------- idle wait
@@ -189,6 +194,20 @@ def observations_to_states(
             )
         )
     return rows
+
+
+def decisions_to_log(
+    decisions: Sequence[Mapping[str, Any]], clock: Callable[[datetime], datetime | None]
+) -> list[LogEntry]:
+    """KEEP rows of gold.signal_decision as log lines on the replay clock."""
+    entries: list[LogEntry] = []
+    for row in decisions:
+        if row["decision"] != "KEEP":
+            continue
+        at = clock(row["created_at"])
+        if at is not None:
+            entries.append(LogEntry(at, "signal", f"기존 문구 유지: {row['reason']}"))
+    return entries
 
 
 def observations_to_log(observations: Sequence[Observation]) -> list[LogEntry]:

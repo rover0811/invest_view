@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -17,6 +17,7 @@ from sqlalchemy.pool import NullPool
 from ai_signal.avro import AvroValueDeserializer, AvroValueSerializer
 from ai_signal.consumers import ConsumedMessage, HandlerContext
 from ai_signal.db import create_session_factory
+from ai_signal.documents.judgement import DocumentJudgementOutput
 from ai_signal.documents.processor import DocumentProcessor
 from ai_signal.outbox import OutboxWriter
 from ai_signal.signals import SignalWorker
@@ -131,16 +132,21 @@ def _news(doc_id: str, title: str, published_at: datetime) -> ConsumedMessage:
     )
 
 
-def _seed_documents(url: str) -> None:
+def _seed_documents(
+    url: str,
+    outputs: Sequence[DocumentJudgementOutput] | None = None,
+    messages: Sequence[ConsumedMessage] | None = None,
+) -> None:
     judge, _ = scripted_judge(
-        [
+        outputs
+        or [
             judgement(direction=1),
             judgement(direction=1),
             judgement(direction=-1),
             judgement(direction=1, fail_reason="LISTING_ONLY"),
         ]
     )
-    messages = (
+    messages = messages or (
         _news("1", "SK하이닉스 HBM 공급 확대", IN_RANGE),
         _news("2", "SK하이닉스 지난주 실적 발표", BEFORE_RANGE),
         _news("3", "SK하이닉스 소송 제기", IN_RANGE),
@@ -236,7 +242,7 @@ def test_shown_signal_uses_only_same_direction_documents_in_range(
             1,
             "llm",
             "nvidia/nemotron-3-super-120b-a12b:free",
-            "signal_generation/v2",
+            "signal_generation/v3",
             1,
         )
     ]
@@ -258,6 +264,7 @@ def test_shown_signal_uses_only_same_direction_documents_in_range(
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": None,
                 "raw_content": output_json([cause(1, ["D1"])]),
+                "cached": False,
             }
         ]
     ]
@@ -335,6 +342,7 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": "RATE_LIMIT",
                 "raw_content": None,
+                "cached": False,
             },
             {
                 "step": "secondary",
@@ -342,6 +350,7 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
                 "model": "nvidia/nemotron-3.5-super-vl:free",
                 "error": "UNAVAILABLE",
                 "raw_content": None,
+                "cached": False,
             },
         ]
     ]
@@ -375,6 +384,7 @@ def test_rule_violating_answers_are_kept_on_hidden_signal(seeded_url: str) -> No
                 "model": "nvidia/nemotron-3-super-120b-a12b:free",
                 "error": "SCHEMA",
                 "raw_content": uncited,
+                "cached": False,
             },
             {
                 "step": "secondary",
@@ -382,6 +392,7 @@ def test_rule_violating_answers_are_kept_on_hidden_signal(seeded_url: str) -> No
                 "model": "nvidia/nemotron-3.5-super-vl:free",
                 "error": "SCHEMA",
                 "raw_content": "not json",
+                "cached": False,
             },
         ]
     ]
@@ -495,11 +506,14 @@ def test_new_document_requests_coalesce_in_event_time(seeded_url: str) -> None:
     assert llm.calls == 3
     assert _rows(
         seeded_url, "SELECT version, as_of_event_time FROM gold.signal ORDER BY 1"
-    ) == [
-        (1, NOW),
-        (2, NOW + timedelta(minutes=10)),
-        (3, NOW + timedelta(minutes=11)),
-    ]
+    ) == [(1, NOW), (2, NOW + timedelta(minutes=11))]
+    # The minute-10 answer cites no document newer than v1, so the guard keeps v1.
+    assert _rows(
+        seeded_url,
+        "SELECT move_version, event_time, decision, guard_applied, "
+        "jsonb_array_length(llm_attempts) FROM gold.signal_decision",
+    ) == [(1, NOW + timedelta(minutes=10), "KEEP", True, 1)]
+    assert [u["version"] for u in _updates(seeded_url)] == [1, 2]
 
 
 def test_candidates_are_bounded_by_request_event_time(seeded_url: str) -> None:
@@ -513,3 +527,49 @@ def test_candidates_are_bounded_by_request_event_time(seeded_url: str) -> None:
     _work(seeded_url, generator, request_message(offset=2, event_time=IN_RANGE))
     assert llm.calls == 1
     assert [row[:2] for row in _signals(seeded_url)][-1] == (2, "SHOWN")
+
+
+def test_price_recap_is_a_candidate_with_its_character(seeded_url: str) -> None:
+    _seed_documents(
+        seeded_url,
+        [
+            judgement(
+                direction=1,
+                scope="MARKET",
+                info_type="PRICE_RECAP",
+                event_subject="코스피",
+                event_type="OTHER",
+                event_object="지수 반등",
+                target_relevance="SECTOR",
+            )
+        ],
+        [_news("9", "코스피 반등에 반도체 강세", IN_RANGE)],
+    )
+    generator, llm = fake_generator([output_json([cause(1, ["D1"])])])
+    _work(seeded_url, generator, request_message())
+
+    documents = _user_input(llm)["documents"]
+    assert [d["title"] for d in documents] == ["코스피 반등에 반도체 강세"]
+    assert documents[0]["info_type"] == "PRICE_RECAP"
+    assert documents[0]["target_relevance"] == "SECTOR"
+    assert documents[0]["event"] == {
+        "subject": "코스피",
+        "type": "OTHER",
+        "object": "지수 반등",
+    }
+
+
+def test_documents_judged_before_v4_stay_candidates(seeded_url: str) -> None:
+    _seed_documents(seeded_url)
+    _execute(
+        seeded_url,
+        "UPDATE silver.document_judgement SET info_type = NULL, event_subject = NULL, "
+        "event_type = NULL, event_object = NULL, target_relevance = NULL",
+    )
+    generator, llm = fake_generator([output_json([cause(1, ["D1"])])])
+    _work(seeded_url, generator, request_message())
+
+    documents = _user_input(llm)["documents"]
+    assert [d["title"] for d in documents] == ["SK하이닉스 HBM 공급 확대"]
+    assert documents[0]["info_type"] is None
+    assert documents[0]["event"] == {"subject": None, "type": None, "object": None}

@@ -15,19 +15,34 @@
   import { fmtPrice } from './format';
   import {
     aggregateReplayBars,
+    buildChartSignalMarks,
     computeStateBands,
     formatReplayTime,
     layoutReplayAnnotationTags,
     planReplaySeriesUpdate,
     replayTimeToChartCoordinate,
+    shouldRecomputeReplayOverlays,
     visibleBarsAt,
     type ReplayBar,
+    type ChartSignalMark,
     type ReplayBarInterval,
     type ReplayData,
+    type ReplayOverlayKey,
     type StateBand,
   } from './replay';
 
   type PlayheadFrameDriver = (playheadMs: number) => void;
+  type RenderedBand = StateBand & { key: number; left: number; width: number };
+  type RenderedThreshold = { key: number; label: string; y: number; className: string };
+  type RenderedAnnotation = { key: number; label: string; x: number; y: number; className: string };
+  type RenderedCurrentPrice = { label: string; y: number; className: string };
+  type RenderedSignalMark = ChartSignalMark & { x: number; y: number; alignRight: boolean };
+
+  const MAX_ANNOTATION_ROWS = 2;
+  const CALLOUT_MAX_WIDTH = 440;
+  const CALLOUT_MAX_RATIO = 0.62;
+  const PRICE_PADDING_RATIO = 0.04;
+  const MIN_PRICE_PADDING_RATIO = 0.001;
 
   let {
     data,
@@ -44,10 +59,13 @@
   let futureMaskElement = $state<HTMLDivElement>();
   let updateChart = (_playhead: string, _interval: ReplayBarInterval) => {};
   let priceScaleWidth = $state(0);
-  let renderedBands = $state<Array<StateBand & { left: number; width: number }>>([]);
-  let renderedThresholds = $state<Array<{ label: string; y: number; className: string }>>([]);
-  let renderedAnnotations = $state<Array<{ label: string; x: number; y: number; className: string }>>([]);
-  let renderedCurrentPrice = $state<{ label: string; y: number; className: string } | null>(null);
+  let renderedBands = $state<RenderedBand[]>([]);
+  let renderedThresholds = $state<RenderedThreshold[]>([]);
+  let renderedAnnotations = $state<RenderedAnnotation[]>([]);
+  let renderedCurrentPrice = $state<RenderedCurrentPrice | null>(null);
+  let renderedSignalMarks = $state<RenderedSignalMark[]>([]);
+  let signalStripTop = $state(0);
+  const currentSignalMark = $derived(renderedSignalMarks.find((mark) => mark.current));
   let interval = $state<ReplayBarInterval>(3);
   let intervalSelected = false;
 
@@ -61,16 +79,13 @@
   const lastMs = $derived(Date.parse(lastTime));
   const afterClose = $derived(Date.parse(playhead) > lastMs);
   const priceDomain = $derived.by(() => {
-    const enter = data.thresholds.enter_pct / 100;
-    const exit = data.thresholds.exit_pct / 100;
     const values = data.bars.flatMap((bar) => [bar.l, bar.h]);
-    values.push(
-      data.prev_close * (1 + enter),
-      data.prev_close * (1 + exit),
-      data.prev_close * (1 - exit),
-      data.prev_close * (1 - enter),
+    const dayDomain = computeYDomain(values);
+    const padding = Math.max(
+      (dayDomain.max - dayDomain.min) * PRICE_PADDING_RATIO,
+      data.prev_close * MIN_PRICE_PADDING_RATIO,
     );
-    return computeYDomain(values);
+    return { min: dayDomain.min - padding, max: dayDomain.max + padding };
   });
 
   function toTimestamp(iso: string): UTCTimestamp {
@@ -118,6 +133,10 @@
     interval = nextInterval;
   }
 
+  function replaceArray<T>(target: T[], next: T[]) {
+    target.splice(0, target.length, ...next);
+  }
+
   $effect(() => {
     const mobile = window.matchMedia('(max-width: 720px)');
     const applyDefault = () => {
@@ -145,6 +164,8 @@
     const chartGrid = token(styles, '--chart-grid', 'currentColor');
     const borderSubtle = token(styles, '--border-subtle', 'currentColor');
     const fontSans = token(styles, '--font-sans', 'Pretendard, sans-serif');
+    const fontMono = token(styles, '--font-mono', 'monospace');
+    const measureContext = document.createElement('canvas').getContext('2d');
     const transparent = 'transparent';
     const space1 = Number.parseFloat(token(styles, '--space-1', '4px'));
     const space2 = Number.parseFloat(token(styles, '--space-2', '8px'));
@@ -156,6 +177,7 @@
     const annotationRowHeight = space8;
     const playheadLabelFallbackWidth = space8 + space6;
     const thresholdLabelReserve = space8 + space6;
+    const labelSideHysteresis = space3;
 
     const chart = createChart(chartHost, {
       layout: {
@@ -186,7 +208,7 @@
         minBarSpacing: 2,
         rightOffset: 1,
       },
-      rightPriceScale: { borderColor: borderSubtle },
+      rightPriceScale: { borderColor: borderSubtle, scaleMargins: { top: 0, bottom: 0 } },
       handleScale: false,
       handleScroll: false,
     });
@@ -206,8 +228,8 @@
           maxValue: fullDayDomain.max,
         },
         margins: {
-          above: space8 + space8 + space8,
-          below: space6,
+          above: Math.min(space8 + space8, Math.max(space6, chartHost.clientHeight * 0.16)),
+          below: Math.min(space8 + space6, Math.max(space6 + space1, chartHost.clientHeight * 0.14)),
         },
       }),
     });
@@ -242,12 +264,23 @@
 
     const markerApi = createSeriesMarkers(candleSeries, []);
     const replayBands = computeStateBands(data.states, finalBar.t);
+    const playheadLabelNode = playheadNode.querySelector('span');
+    const playheadLabelWidth = playheadLabelNode?.getBoundingClientRect().width
+      ?? playheadLabelFallbackWidth;
 
     let latestPlayheadMs = Date.parse(untrack(() => playhead));
     let smoothPlayheadMs = latestPlayheadMs;
     let latestInterval = untrack(() => interval);
     let renderedBars: ReplayBar[] | null = null;
     let revealedStateCount = -1;
+    let overlayKey: ReplayOverlayKey | null = null;
+    let latestPriceScaleWidth = 0;
+    let labelOnLeft = playheadNode.classList.contains('label-left');
+    let chartWidth = chartHost.clientWidth;
+    let chartHeight = chartHost.clientHeight;
+    let resizeAnimationFrame = 0;
+    let overlayAnimationFrame = 0;
+    let pendingWidthFit = false;
 
     function setAnchorData(nextInterval: ReplayBarInterval) {
       const anchorData: LineData<UTCTimestamp>[] = [];
@@ -276,15 +309,61 @@
 
     function movePlayhead(nextPlayheadMs: number) {
       smoothPlayheadMs = nextPlayheadMs;
-      const nextPlayheadX = xForTimeMs(nextPlayheadMs);
+      const axisWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
+      const hostWidth = chartHost.clientWidth;
+      const plotRight = Math.max(0, hostWidth - axisWidth);
+      const nextPlayheadX = replayTimeToChartCoordinate(
+        data.bars,
+        new Date(nextPlayheadMs).toISOString(),
+        plotRight,
+      );
+      const labelBoundary = plotRight - playheadLabelWidth - space2;
+      const nextLabelOnLeft = labelOnLeft
+        ? nextPlayheadX >= labelBoundary - labelSideHysteresis
+        : nextPlayheadX > labelBoundary;
       const transform = `translate3d(${nextPlayheadX}px, 0, 0)`;
       playheadNode.style.transform = transform;
       futureMaskNode.style.transform = transform;
+      if (nextLabelOnLeft !== labelOnLeft) {
+        labelOnLeft = nextLabelOnLeft;
+        playheadNode.classList.toggle('label-left', labelOnLeft);
+        syncOverlays(nextPlayheadMs, revealedStatesAt(nextPlayheadMs));
+      }
+    }
 
-      const plotRight = Math.max(0, chartHost.clientWidth - chart.priceScale('right').width());
-      const playheadLabelWidth = playheadNode.querySelector('span')?.getBoundingClientRect().width
-        ?? playheadLabelFallbackWidth;
-      playheadNode.classList.toggle('label-left', nextPlayheadX > plotRight - playheadLabelWidth - space2);
+    function calloutWidth(mark: ChartSignalMark): number {
+      const maxWidth = Math.min(CALLOUT_MAX_WIDTH, chartHost.clientWidth * CALLOUT_MAX_RATIO);
+      if (!measureContext) return maxWidth;
+      measureContext.font = `700 12px ${fontSans}`;
+      const labelWidth = measureContext.measureText(mark.label).width;
+      measureContext.font = `700 10px ${fontMono}`;
+      const versionWidth = measureContext.measureText(`v${mark.version}`).width;
+      return Math.min(maxWidth, Math.ceil(labelWidth + versionWidth + space2 + space2 + space3 + space1 + 2));
+    }
+
+    function placeCallout(mark: ChartSignalMark, x: number, plotRight: number, stripTop: number) {
+      const width = calloutWidth(mark);
+      const alignRight = x + width > plotRight;
+      const left = alignRight ? x - width : x;
+      const right = left + width;
+      const bars = data.bars;
+      const nearby = bars.filter((bar) => {
+        const barX = xForTime(bar.t);
+        return barX >= left - space2 && barX <= right + space2;
+      });
+      const anchorBar = bars.findLast((bar) => Date.parse(bar.t) <= Date.parse(mark.at)) ?? bars.at(-1);
+      const span = nearby.length > 0 ? nearby : anchorBar ? [anchorBar] : [];
+      const height = space6 + space1;
+      const minTop = space8 + space6;
+      const maxTop = Math.max(minTop, stripTop - height - space1);
+      if (span.length === 0) return { y: maxTop, alignRight };
+      const highY = candleSeries.priceToCoordinate(Math.max(...span.map((bar) => bar.h)));
+      const lowY = candleSeries.priceToCoordinate(Math.min(...span.map((bar) => bar.l)));
+      const above = highY == null ? null : Number(highY) - space2 - height;
+      const below = lowY == null ? null : Number(lowY) + space2;
+      if (above != null && above >= minTop) return { y: above, alignRight };
+      if (below != null && below <= maxTop) return { y: below, alignRight };
+      return { y: Math.min(maxTop, Math.max(minTop, above ?? minTop)), alignRight };
     }
 
     function revealedStatesAt(nextPlayheadMs: number) {
@@ -292,18 +371,37 @@
     }
 
     function syncOverlays(nextPlayheadMs: number, revealedStates: ReplayData['states']) {
+      const currentBar = data.bars.findLast((bar) => Date.parse(bar.t) <= nextPlayheadMs);
+      const nextPriceScaleWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
+      const signalMarks = buildChartSignalMarks(data, new Date(nextPlayheadMs).toISOString());
+      const nextOverlayKey: ReplayOverlayKey = {
+        width: chartHost.clientWidth,
+        height: chartHost.clientHeight,
+        priceScaleWidth: nextPriceScaleWidth,
+        interval: latestInterval,
+        revealedStateCount: revealedStates.length,
+        revealedSignalCount: signalMarks.length,
+        currentBarTime: currentBar?.t ?? null,
+        labelOnLeft,
+      };
+      if (!shouldRecomputeReplayOverlays(overlayKey, nextOverlayKey)) return;
+
+      overlayKey = nextOverlayKey;
       const nextPlayheadX = xForTimeMs(nextPlayheadMs);
-      priceScaleWidth = Math.max(chart.priceScale('right').width(), space8 + space8);
-      const plotRight = Math.max(0, chartHost.clientWidth - priceScaleWidth);
-      renderedBands = replayBands.map((band) => {
+      if (latestPriceScaleWidth !== nextPriceScaleWidth) {
+        latestPriceScaleWidth = nextPriceScaleWidth;
+        priceScaleWidth = nextPriceScaleWidth;
+      }
+      const plotRight = Math.max(0, chartHost.clientWidth - nextPriceScaleWidth);
+      const nextBands = replayBands.map((band, index) => {
         const left = xForTime(band.start);
         const right = xForTime(band.end);
-        return { ...band, left, width: Math.max(0, right - left) };
+        return { ...band, key: index, left, width: Math.max(0, right - left) };
       });
+      replaceArray(renderedBands, nextBands);
 
-      const currentBar = data.bars.findLast((bar) => Date.parse(bar.t) <= nextPlayheadMs);
       const currentPriceY = currentBar ? candleSeries.priceToCoordinate(currentBar.c) : null;
-      renderedCurrentPrice = currentBar && currentPriceY != null
+      const nextCurrentPrice = currentBar && currentPriceY != null
         ? {
             label: fmtPrice(currentBar.c),
             y: Number(currentPriceY),
@@ -312,6 +410,15 @@
               : currentBar.c < data.prev_close ? 'negative' : 'neutral',
           }
         : null;
+      if (nextCurrentPrice == null) {
+        renderedCurrentPrice = null;
+      } else if (renderedCurrentPrice == null) {
+        renderedCurrentPrice = nextCurrentPrice;
+      } else {
+        renderedCurrentPrice.label = nextCurrentPrice.label;
+        renderedCurrentPrice.y = nextCurrentPrice.y;
+        renderedCurrentPrice.className = nextCurrentPrice.className;
+      }
 
       const minimumY = space6 + space2;
       const maximumY = Math.max(minimumY, chartHost.clientHeight - space6 - space6);
@@ -329,25 +436,23 @@
         return { ...threshold, y };
       });
       const overflow = Math.max(0, (nudged.at(-1)?.y ?? maximumY) - maximumY);
-      const nextThresholds = nudged.map((threshold) => ({
+      const nextThresholds = nudged.map((threshold, index) => ({
+        key: index,
         label: threshold.label,
         y: Math.max(minimumY, threshold.y - overflow),
         className: threshold.className,
       }));
-      renderedThresholds = nextThresholds;
+      replaceArray(renderedThresholds, nextThresholds);
 
       const annotationSpecs = revealedStates.map((state) => ({
         label: state.state === 'POSITIVE' ? '긍정 진입' : state.state === 'NEGATIVE' ? '부정 진입' : '중립 전환',
         anchorX: xForTime(state.t),
         className: state.state.toLowerCase(),
       }));
-      const playheadLabelWidth = playheadNode.querySelector('span')?.getBoundingClientRect().width
-        ?? playheadLabelFallbackWidth;
-      const playheadLabelOnLeft = playheadNode.classList.contains('label-left');
-      const playheadLabelRange = playheadLabelOnLeft
+      const playheadLabelRange = labelOnLeft
         ? { start: nextPlayheadX - space2 - playheadLabelWidth, end: nextPlayheadX - space2, row: 0 }
         : { start: nextPlayheadX + space2, end: nextPlayheadX + space2 + playheadLabelWidth, row: 0 };
-      const thresholdLabelRanges = Array.from({ length: annotationSpecs.length }, (_, row) => row)
+      const thresholdLabelRanges = Array.from({ length: MAX_ANNOTATION_ROWS }, (_, row) => row)
         .flatMap((row) => {
           const tagTop = space1 + row * annotationRowHeight;
           const tagBottom = tagTop + space6;
@@ -367,14 +472,29 @@
           playheadLabelRange,
           ...thresholdLabelRanges,
         ],
+        MAX_ANNOTATION_ROWS,
       );
 
-      renderedAnnotations = annotationSpecs.map((annotation, index) => ({
-        label: annotation.label,
-        x: annotationLayout[index].x,
-        y: space1 + annotationLayout[index].row * annotationRowHeight,
-        className: annotation.className,
-      }));
+      const nextAnnotations = annotationSpecs.flatMap((annotation, index) => {
+        const layout = annotationLayout[index];
+        if (layout.hidden) return [];
+        return [{
+          key: index,
+          label: annotation.label,
+          x: layout.x,
+          y: space1 + layout.row * annotationRowHeight,
+          className: annotation.className,
+        }];
+      });
+      replaceArray(renderedAnnotations, nextAnnotations);
+
+      const plotBottom = chartHost.clientHeight - chart.timeScale().height();
+      signalStripTop = Math.max(0, plotBottom - space6 - space1);
+      renderedSignalMarks = signalMarks.map((mark) => {
+        const x = Math.min(plotRight, Math.max(0, xForTime(mark.at)));
+        if (!mark.current) return { ...mark, x, y: signalStripTop, alignRight: false };
+        return { ...mark, x, ...placeCallout(mark, x, plotRight, signalStripTop) };
+      });
     }
 
     function syncStateDecorations(nextPlayheadMs: number, aggregatedBars: ReplayBar[], force = false) {
@@ -400,12 +520,24 @@
       syncOverlays(nextPlayheadMs, revealedStates);
     }
 
-    function syncSize() {
-      chart.resize(chartHost.clientWidth, chartHost.clientHeight);
-      setAnchorData(latestInterval);
-      chart.timeScale().fitContent();
-      movePlayhead(smoothPlayheadMs);
-      syncOverlays(latestPlayheadMs, revealedStatesAt(latestPlayheadMs));
+    function syncSize(nextWidth: number, nextHeight: number) {
+      const widthChanged = nextWidth !== chartWidth;
+      const heightChanged = nextHeight !== chartHeight;
+      if (!widthChanged && !heightChanged) return;
+
+      chartWidth = nextWidth;
+      chartHeight = nextHeight;
+      pendingWidthFit ||= widthChanged;
+      cancelAnimationFrame(resizeAnimationFrame);
+      resizeAnimationFrame = requestAnimationFrame(() => {
+        chart.resize(chartWidth, chartHeight);
+        if (pendingWidthFit) {
+          chart.timeScale().fitContent();
+        }
+        pendingWidthFit = false;
+        movePlayhead(smoothPlayheadMs);
+        syncOverlays(latestPlayheadMs, revealedStatesAt(latestPlayheadMs));
+      });
     }
 
     updateChart = (nextPlayhead: string, nextInterval: ReplayBarInterval) => {
@@ -438,14 +570,20 @@
       syncStateDecorations(nextMs, aggregatedBars, initialLoad || intervalChanged);
     };
 
-    const resizeObserver = new ResizeObserver(() => syncSize());
+    const resizeObserver = new ResizeObserver(() => syncSize(chartHost.clientWidth, chartHost.clientHeight));
     resizeObserver.observe(chartHost);
-    updateChart(new Date(latestPlayheadMs).toISOString(), latestInterval);
+    untrack(() => updateChart(new Date(latestPlayheadMs).toISOString(), latestInterval));
     registerPlayheadFrame?.(movePlayhead);
+    overlayAnimationFrame = requestAnimationFrame(() => {
+      movePlayhead(smoothPlayheadMs);
+      syncOverlays(latestPlayheadMs, revealedStatesAt(latestPlayheadMs));
+    });
 
     return () => {
       updateChart = () => {};
       registerPlayheadFrame?.(null);
+      cancelAnimationFrame(resizeAnimationFrame);
+      cancelAnimationFrame(overlayAnimationFrame);
       resizeObserver.disconnect();
       markerApi.detach();
       chart.remove();
@@ -453,16 +591,15 @@
   });
 
   $effect(() => {
-    updateChart(playhead, interval);
+    const nextPlayhead = playhead;
+    const nextInterval = interval;
+    untrack(() => updateChart(nextPlayhead, nextInterval));
   });
 </script>
 
 <section class="replay-chart panel" aria-label="가격 상태 차트">
   <header class="chart-head">
-    <div class="chart-copy">
-      <span class="eyebrow">가격 상태</span>
-      <strong>전일 종가 대비 상태 변화를 재생합니다.</strong>
-    </div>
+    <strong class="chart-title">가격 상태</strong>
     <div class="chart-tools">
       <div class="interval-control" aria-label="봉 간격">
         {#each intervalOptions as option}
@@ -479,7 +616,7 @@
   </header>
   <div class="chart-stage" class:after-close={afterClose}>
     <div class="band-layer" aria-hidden="true">
-      {#each renderedBands as band}
+      {#each renderedBands as band (band.key)}
         <span
           class="state-band {band.state.toLowerCase()}"
           style="left: {band.left}px; width: {band.width}px;"
@@ -489,7 +626,7 @@
     <div bind:this={host} class="chart-host"></div>
     <div bind:this={futureMaskElement} class="future-mask" aria-hidden="true"></div>
     <div class="after-close-dim" aria-hidden="true"></div>
-    {#each renderedThresholds as threshold}
+    {#each renderedThresholds as threshold (threshold.key)}
       <span
         class="threshold-label {threshold.className}"
         style="top: {threshold.y}px; right: calc({priceScaleWidth}px + var(--space-2));"
@@ -503,13 +640,42 @@
         aria-hidden="true"
       >{renderedCurrentPrice.label}</span>
     {/if}
-    {#each renderedAnnotations as annotation}
+    {#each renderedAnnotations as annotation (annotation.key)}
       <span
         class="state-annotation {annotation.className}"
         style="left: {annotation.x}px; top: {annotation.y}px;"
         aria-hidden="true"
       >{annotation.label}</span>
     {/each}
+    {#each renderedSignalMarks as mark (mark.key)}
+      <span
+        class="signal-guide {mark.direction}"
+        class:current={mark.current}
+        style="left: {mark.x}px; height: {signalStripTop}px;"
+        aria-hidden="true"
+      ></span>
+      {#if !mark.current}
+        <span
+          class="signal-pin {mark.direction}"
+          style="left: {mark.x}px; top: {signalStripTop}px;"
+          title={mark.label || `시그널 v${mark.version}`}
+          aria-hidden="true"
+        >v{mark.version}{mark.status === 'HIDDEN' ? ' 숨김' : ''}</span>
+      {/if}
+    {/each}
+    {#if currentSignalMark}
+      {#key currentSignalMark.key}
+        <span
+          class="signal-callout {currentSignalMark.direction}"
+          class:align-right={currentSignalMark.alignRight}
+          style="left: {currentSignalMark.x}px; top: {currentSignalMark.y}px;"
+          role="status"
+        >
+          <strong class="tnum">v{currentSignalMark.version}</strong>
+          <span>{currentSignalMark.label}</span>
+        </span>
+      {/key}
+    {/if}
     <div bind:this={playheadElement} class="playhead" aria-hidden="true">
       <span>
         <strong>{formatReplayTime(playhead, data.date)}</strong>
@@ -521,6 +687,7 @@
 
 <style>
   .replay-chart {
+    box-sizing: border-box;
     min-height: 0;
     display: flex;
     flex-direction: column;
@@ -529,17 +696,11 @@
 
   .chart-head {
     display: flex;
-    align-items: flex-end;
+    align-items: center;
     justify-content: space-between;
-    gap: var(--space-4);
-    padding: var(--space-3) var(--space-4);
+    gap: var(--space-3);
+    padding: var(--space-2) var(--space-3);
     border-bottom: 1px solid var(--border-subtle);
-  }
-
-  .chart-copy {
-    display: flex;
-    flex-direction: column;
-    gap: var(--space-1);
   }
 
   .chart-tools {
@@ -581,20 +742,19 @@
     outline-offset: 2px;
   }
 
-  .eyebrow,
   .price-range {
     font-size: 11px;
     color: var(--text-tertiary);
   }
 
   .chart-head strong {
-    font-size: 14px;
+    font-size: 13px;
     color: var(--text-primary);
   }
 
   .chart-stage {
     position: relative;
-    min-height: 360px;
+    min-height: 0;
     flex: 1;
     overflow: hidden;
   }
@@ -774,6 +934,123 @@
   :global(.playhead.label-left) span {
     right: var(--space-2);
     left: auto;
+  }
+
+  .signal-guide {
+    position: absolute;
+    z-index: 3;
+    top: 0;
+    width: 0;
+    border-left: 1px dashed currentColor;
+    opacity: 0.35;
+    pointer-events: none;
+  }
+
+  .signal-guide.current {
+    border-left-style: solid;
+    opacity: 0.8;
+  }
+
+  .signal-guide.positive,
+  .signal-pin.positive,
+  .signal-callout.positive strong {
+    color: var(--color-positive);
+  }
+
+  .signal-guide.negative,
+  .signal-pin.negative,
+  .signal-callout.negative strong {
+    color: var(--color-negative);
+  }
+
+  .signal-guide.neutral,
+  .signal-pin.neutral,
+  .signal-callout.neutral strong {
+    color: var(--text-tertiary);
+  }
+
+  .signal-pin {
+    position: absolute;
+    z-index: 4;
+    transform: translateX(-50%);
+    padding: 2px var(--space-1);
+    border: 1px solid var(--border-subtle);
+    border-radius: var(--radius-sm);
+    background: color-mix(in srgb, var(--surface-body) 94%, transparent);
+    font-family: var(--font-mono);
+    font-size: 10px;
+    font-weight: 700;
+    line-height: 1.4;
+    white-space: nowrap;
+    pointer-events: none;
+  }
+
+  .signal-callout {
+    position: absolute;
+    z-index: 5;
+    box-sizing: border-box;
+    max-width: min(440px, 62%);
+    height: calc(var(--space-6) + var(--space-1));
+    display: flex;
+    align-items: center;
+    gap: var(--space-2);
+    padding: var(--space-1) var(--space-3) var(--space-1) var(--space-2);
+    border: 1px solid var(--border-strong);
+    border-left: 3px solid currentColor;
+    border-radius: var(--radius-sm);
+    background: var(--surface-overlay);
+    color: var(--text-tertiary);
+    font-size: 12px;
+    font-weight: 700;
+    line-height: 1.4;
+    pointer-events: none;
+    animation: signal-callout-in 260ms var(--ease-out);
+  }
+
+  .signal-callout.positive {
+    color: var(--color-positive);
+  }
+
+  .signal-callout.negative {
+    color: var(--color-negative);
+  }
+
+  .signal-callout.align-right {
+    padding: var(--space-1) var(--space-2) var(--space-1) var(--space-3);
+    transform: translateX(-100%);
+    border-right: 3px solid currentColor;
+    border-left: 1px solid var(--border-strong);
+  }
+
+  .signal-callout strong {
+    flex: 0 0 auto;
+    font-family: var(--font-mono);
+    font-size: 10px;
+  }
+
+  .signal-callout span {
+    min-width: 0;
+    overflow: hidden;
+    color: var(--text-primary);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  @keyframes signal-callout-in {
+    from {
+      opacity: 0;
+      translate: 0 var(--space-1);
+    }
+    to {
+      opacity: 1;
+      translate: 0 0;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .signal-callout {
+      animation: none;
+    }
   }
 
   @media (max-width: 720px) {

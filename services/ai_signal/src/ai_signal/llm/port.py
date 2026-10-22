@@ -62,6 +62,7 @@ class Completion(Generic[T]):
     output: T
     model_version: str
     raw_content: str
+    cached: bool = False
 
 
 class LlmPort(Protocol):

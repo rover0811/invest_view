@@ -122,3 +122,116 @@ move 날짜는 2026-10-20으로 정했습니다. 뉴스 후보 구간(2026-10-19
 2. Gemini가 429 Too Many Requests를 반환한 로그가 document_processor에서 170줄, signal_worker에서 57줄 기록되었습니다. client 재시도로 모두 처리되었고 러너에서 ERROR 로그는 나오지 않았으므로 동시성 설정은 바꾸지 않았습니다.
 3. 하루치 리플레이에는 LLM 호출이 400회를 넘게 필요했습니다. 같은 규모의 날짜를 처리할 때는 `--max-llm-calls`를 450 이상으로 주는 편이 좋습니다.
 4. 미판정 문서 6건에는 `fail_reason`이 비어 있습니다. 판정이 끝나기 전에 export가 집계했는지, 다른 원인인지는 확인하지 않았습니다.
+
+## 10-14 리플레이 재실행 (기사 성격 반영)
+
+2026-10-21 17:20 KST부터 18:05 KST까지 로컬 kind 클러스터(`kind-invest-flink`)에서 같은 날짜의 리플레이를 다시 실행했습니다. 브랜치는 `feat/ai-signal-article-character`이며, 판정 프롬프트 v4(기사 성격 `info_type` 포함), 기사 성격에 따른 재생성 조건, 새 LLM 라우팅이 적용된 코드를 사용했고 코드는 수정하지 않았습니다.
+
+### 실행 단계
+
+1. 현재 작업 트리로 `ai-signal:e2e` 이미지를 다시 빌드하고 `alembic upgrade head`로 0006(`judgement_character`)까지 반영했습니다. alembic은 `/app/services/ai_signal`을 작업 디렉터리로 지정해야 실행됩니다.
+2. 000660의 serving 시그널과 이력, 10-14의 gold move와 시그널, 10-13 15:30부터 10-14 20:00까지 발행된 문서 189건과 그 판정, 엔티티, revision, KIS 뉴스, bronze 원문을 FK 순서대로 삭제했습니다. 이전 상태 파일은 `.bak`으로 옮겼습니다.
+3. Flink `price-move-state`의 FlinkDeployment와 checkpoint PVC를 삭제한 뒤 다시 만들었고, RUNNING과 STABLE 상태를 확인했습니다.
+4. 네 개 consumer group의 offset을 latest로 초기화하고 러너 다섯 개를 띄웠습니다. 판정 라우트는 gemini-3.5-flash-lite, gemini-3-flash-preview, OpenRouter nemotron 순서이고, 생성 라우트는 gemini-3.5-flash, gemini-3.5-flash-lite, OpenRouter nemotron 순서입니다.
+5. driver를 `--max-llm-calls 450`으로 실행했고, 상한에 걸리지 않고 570개 이벤트를 모두 처리했습니다. 이어서 export를 생성했습니다.
+
+### 결과
+
+| 항목 | 이전 실행 | 재실행 |
+| --- | --- | --- |
+| LLM 호출 | 429회 | 193회 |
+| 문서 documents | 186건 (judged 180건) | 189건 (모두 judged) |
+| 상태 구간 states | 3개 | 3개 |
+| 시그널 signals | 58건 | 6건 (SHOWN 5건, HIDDEN 1건) |
+| 시그널 trigger | 확인하지 않음 | PRICE_STATE_CHANGE 3건, NEW_DOCUMENT 3건 |
+| `check_no_lookahead` | 통과 | 통과 |
+| export 파일 크기 | 약 289KB | 약 220KB |
+
+판정 문서의 기사 성격은 PRICE_RECAP 75건, OPINION 44건, NEW_FACT 31건, OTHER 21건, FLOW 18건입니다. 판정은 188건이 gemini-3.5-flash-lite에서 끝났고, 1건은 primary가 TIMEOUT으로 실패해 gemini-3-flash-preview로 넘어갔습니다. 시그널 생성 5건은 모두 gemini-3.5-flash에서 끝났으며 OpenRouter까지 넘어간 호출은 없었습니다. 시세 정리 기사가 새 시그널을 만들지 않게 되면서 시그널 버전이 58건에서 6건으로 줄었습니다.
+
+### 발견한 문제
+
+1. zsh에서는 문자열 변수에 담은 `docker run` 명령이 단어 단위로 나뉘지 않아 러너 실행이 실패했습니다. 실행 스크립트를 bash 배열로 바꿔 해결했습니다.
+2. 이전 기록의 미판정 문서 6건 문제는 이번 실행에서 재현되지 않았습니다.
+
+## 10-14 리플레이 재실행 (유지 판단 반영)
+
+2026-10-21 20:55 KST부터 21:30 KST까지 같은 kind 클러스터에서 10-14 리플레이를 다시 실행했습니다. 시그널 생성 프롬프트 v3(KEEP 또는 UPDATE 판단과 원인별 영향 방향 확인)와 마이그레이션 0007(`gold.signal_decision`)이 적용된 코드를 사용했고, 코드는 수정하지 않았습니다.
+
+### 실행 단계
+
+1. `ai-signal:e2e` 이미지를 다시 빌드하고 `alembic upgrade head`로 0007까지 반영했습니다.
+2. 이전 실행과 같은 범위의 serving 시그널, gold move와 시그널, 문서 189건과 그 하위 행, bronze 원문을 삭제했고, 이번에는 `gold.signal_decision`도 함께 삭제했습니다. 상태 파일은 `.bak`으로 옮기고 입력 파일은 유지했습니다.
+3. Flink `price-move-state`의 상태를 초기화하고 RUNNING과 STABLE을 확인한 뒤, consumer group 네 개를 latest로 초기화하고 러너 다섯 개를 띄웠습니다.
+4. driver는 `--max-llm-calls 450`으로 570개 이벤트를 모두 처리했고, 기록된 LLM 호출은 175회였습니다.
+
+### 결과
+
+| 항목 | 이전 실행 | 이번 실행 |
+| --- | --- | --- |
+| 판정된 문서 | 189건 | 72건 (117건 미판정) |
+| 시그널 버전 | 6건 | 3건 (SHOWN 1건, HIDDEN 2건) |
+| `gold.signal_decision` | 해당 없음 | 0건 |
+
+v1(09:08, PRICE_STATE_CHANGE)은 primary가 UNAVAILABLE이어서 gemini-3.5-flash-lite가 생성했고, 판단은 UPDATE였으며 두 원인의 영향 방향은 모두 POSITIVE였습니다. v2(14:02)는 LLM 호출 없이 HIDDEN으로 기록되었습니다. v3(14:45)는 세 라우트가 모두 실패해 HIDDEN으로 기록되었습니다.
+
+### 발견한 문제
+
+1. 실행을 시작한 지 2분 만에 gemini-3.5-flash-lite와 gemini-3-flash-preview의 일일 할당량이 소진되었고, 무료 OpenRouter 모델은 대부분 RATE_LIMIT으로 실패했습니다. 이 때문에 문서 117건이 판정되지 않았습니다.
+2. 미판정 문서가 많아 NEW_DOCUMENT 요청이 생기지 않았고, 그 결과 KEEP 또는 UPDATE 판단 행이 기록되지 않았습니다. 유지 판단의 효과는 할당량이 초기화된 뒤에 다시 확인해야 합니다.
+3. 생성 결과에 담긴 원인별 영향 방향은 `gold.signal_cause`에 컬럼이 없어 LLM 원문에서만 확인할 수 있습니다.
+
+## 10-14 리플레이 재실행 (유지 판단, 할당량 초기화 뒤)
+
+2026-10-22 18:53 KST부터 20:20 KST까지 같은 kind 클러스터에서 10-14 리플레이를 다시 실행했습니다. 직전 실행은 할당량 소진으로 유지 판단을 확인하지 못했으므로, 할당량이 초기화된 뒤 같은 설정으로 다시 돌렸습니다. 시그널 생성 프롬프트는 v3이고, 이번에는 LLM 응답 캐시(마이그레이션 0008)도 켰습니다.
+
+### 실행 단계
+
+1. 현재 작업 트리로 `ai-signal:e2e` 이미지를 다시 빌드했습니다. DB에는 0008이 빠져 있어서 `alembic upgrade head`로 반영했습니다.
+2. Flink `price-move-state`가 high availability 체크포인트 저장소를 초기화하지 못해 재시작을 반복하고 있었습니다. FlinkDeployment와 체크포인트 PVC를 지우고 다시 만들어 RUNNING과 STABLE을 확인했습니다.
+3. Docker를 다시 시작한 뒤 Kafka 브로커 pod IP가 10.244.0.13으로 바뀌어서 `/tmp/e2e_hosts`를 고쳤습니다.
+4. 직전 실행과 같은 범위의 데이터를 삭제하고, 상태 파일을 옮기고, consumer group 네 개를 latest로 초기화한 뒤 러너 다섯 개를 띄웠습니다. 러너에는 `AI_SIGNAL_LLM_CACHE=postgres`를 넘겼습니다.
+5. driver는 `--max-llm-calls 450`으로 570개 이벤트를 모두 처리했고, 기록된 LLM 호출은 184회였습니다.
+
+### 결과
+
+| 항목 | 유지 판단 도입 전 (10-21) | 이번 실행 |
+| --- | --- | --- |
+| 판정된 문서 | 189건 | 179건 |
+| 시그널 버전 | 6건 (SHOWN 5, HIDDEN 1) | 5건 (SHOWN 4, HIDDEN 1) |
+| 부정 상태의 버전 | 3건 | 2건 |
+| `gold.signal_decision` KEEP | 해당 없음 | 3건 |
+
+상태는 09:11 긍정, 14:04 중립, 14:42 부정입니다. 버전별 내용은 아래와 같습니다.
+
+| 버전 | 시각 | 계기 | 상태 | 문구 |
+| --- | --- | --- | --- | --- |
+| v1 | 09:12 | PRICE_STATE_CHANGE | SHOWN | 미국 반도체 연구 거점 합류 |
+| v2 | 12:31 | NEW_DOCUMENT | SHOWN | 차세대 반도체 개발 착수 |
+| v3 | 14:04 | PRICE_STATE_CHANGE | HIDDEN | 중립이라 모델을 호출하지 않았습니다 |
+| v4 | 14:42 | PRICE_STATE_CHANGE | SHOWN | 중국 업체 D램 물량 공세 우려 |
+| v5 | 16:59 | NEW_DOCUMENT | SHOWN | 중국 반도체 경쟁 심화 우려 |
+
+15:04, 15:40, 17:57에 들어온 NEW_DOCUMENT 요청은 모두 KEEP으로 끝났습니다. 모델이 남긴 이유는 새 기사가 기존 원인인 중국 반도체 업체의 추격과 머스크의 메모리 가격 발언을 다시 다룬다는 것이었습니다. 유지 판단을 도입하기 전에는 같은 계기에서 15:08과 17:00에 새 버전이 만들어졌습니다.
+
+판정 179건 중 178건은 gemini-3.5-flash-lite에서 끝났고, 1건은 gemini-3-flash-preview로 넘어갔습니다. 시그널 생성은 모두 gemini-3.5-flash가 처리했습니다. OpenRouter까지 넘어간 호출은 없었습니다.
+
+### 발견한 문제
+
+1. v5는 장 마감 뒤에 UPDATE로 만들어졌지만, 1순위 원인은 v4와 같은 사건입니다. 장 마감 뒤에는 가격이 움직이지 않으므로, 이 구간에서는 KEEP만 허용하는 규칙을 검토해야 합니다.
+2. 판정되지 않은 10건은 모두 10-14 06:00에서 07:55 사이에 공개된 장 전 기사이고, 판정 행 자체가 없습니다. 원인은 아직 확인하지 않았습니다.
+3. 같은 입력을 재생했는데도 상태 전환 시각이 직전 실행과 몇 분씩 다릅니다. 직전 실행은 14:08 중립, 14:35 부정이었습니다. 원인은 아직 확인하지 않았습니다.
+
+### 화면 기록
+
+`docs/evidence/figures/ai-signal-replay/`에 1920x1080 캡처 6장과 16배속 재생 영상(MP4, GIF)을 두었습니다. 공개 저장소에 올리는 자료라서 근거 기사의 언론사 이름은 "언론사"로 가렸습니다.
+
+| 파일 | 시점 |
+| --- | --- |
+| `01-v1-0912.png` | 09:12 긍정 진입 직후 v1 |
+| `02-v2-1231.png` | 12:31 새 기사로 만든 v2 |
+| `03-neutral-1404.png` | 14:04 중립 전환과 v3 숨김 |
+| `04-v4-1442.png` | 14:42 부정 진입과 v4 |
+| `05-keep-1504.png` | 15:04 문구 유지 |
+| `06-v5-1659.png` | 16:59 장 마감 뒤 v5 |
+| `signal-replay-16x.mp4`, `signal-replay-16x.gif` | 빈 구간을 건너뛰며 16배속으로 09:00부터 장 마감 15:30까지 재생(14초) |

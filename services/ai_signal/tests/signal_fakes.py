@@ -26,9 +26,11 @@ def cause(
     refs: Sequence[str] = ("D1",),
     label: str = "HBM 공급 확대",
     explanation: str = "엔비디아향 HBM 공급이 늘어난다는 소식에 매수세가 몰렸어요.",
+    effect: str = "POSITIVE",
 ) -> dict[str, object]:
     return {
         "rank": rank,
+        "effect": effect,
         "label": label,
         "explanation": explanation,
         "scope": "SYMBOL",
@@ -38,10 +40,15 @@ def cause(
 
 
 def output_json(
-    causes: Sequence[dict[str, object]] | None = None, headline: int = 1
+    causes: Sequence[dict[str, object]] | None = None,
+    headline: int = 1,
+    decision: str = "UPDATE",
+    reason: str = "새 기사가 새로운 원인을 알려 줘요.",
 ) -> str:
     return json.dumps(
         {
+            "decision": decision,
+            "reason": reason,
             "headline_cause_rank": headline,
             "causes": list(causes) if causes is not None else [cause()],
             "probability": 0.7,

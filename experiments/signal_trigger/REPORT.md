@@ -274,53 +274,224 @@
 
 - 판정: `gemini-3.5-flash-lite` 호출 성공 189회와 RATE_LIMIT 65회, TIMEOUT 1회가 있었습니다. 성공 기록이 200회로 표시된 것은 임베딩 요청 11회가 함께 집계되었기 때문입니다.
 - 임베딩: 20건 단위 요청 11회가 성공했고, 429 응답을 4회 받았습니다.
-## v3 결과 (중간 결과, 두 번째 모델로 189건 가운데 23건 판정)
+## v3 결과 (189건 전체 판정)
 
-### 사용한 모델과 선택 이유
+### 사용한 모델과 라우팅
 
-- 판정 모델은 이제 `--model` 인자나 환경 변수 `V3_MODEL`로 정하고, 캐시는 모델마다 `/tmp/sigana/v3_<model>.jsonl`에 따로 저장합니다. 기존 77건 캐시는 `/tmp/sigana/v3_gemini-3.5-flash-lite.jsonl`로 이름을 바꾸었습니다. 동시 호출 수는 1이고, RATE_LIMIT가 연속 20회를 넘으면 캐시를 남긴 채 종료 코드 3으로 멈춥니다.
-- 먼저 `gemini-3.5-flash`로 실행했지만, 약 20분 동안 OK 3회와 RATE_LIMIT 19회가 나왔습니다. 가끔 성공하는 호출 때문에 연속 20회 조건에는 닿지 않았지만, 이 속도라면 189건을 처리하는 데 열 시간 이상 걸리므로 중단했습니다.
-- `gemini-3.6-flash`는 첫 호출부터 할당량 초과(429)를 돌려주었고, `gemini-3.7-flash`, `gemini-3.8-flash`, `gemini-flash-latest`는 수요 과다(503) 응답을 주거나 25초 안에 응답하지 않았습니다. `gemini-2.5-flash`는 신규 사용자에게 제공되지 않는다는 404를 돌려주었습니다.
-- 응답한 모델은 `gemini-3-flash-preview` 하나여서 이 모델로 판정했습니다. 그러나 23건(OK 23회)을 처리한 뒤 RATE_LIMIT가 연속 20회를 넘어 멈췄습니다. 무료 등급에서 모델마다 하루에 허용하는 호출 수가 20회 남짓인 것으로 보입니다.
-- 따라서 SEDEX 기조연설 기사, 장중 트리거 타임라인, v2(4회)와 실제(55회)의 비교는 이번에도 측정하지 못했습니다. 두 번째 모델이 판정한 기사는 10월 13일 15:30부터 시작하는 앞쪽 23건뿐이며, 모두 09:02 첫 상태 변경 이전 기사라서 NEW_DOCUMENT 트리거는 0회로 나옵니다. 이 0회는 비교에 쓰면 안 됩니다.
+- 판정은 새 LLM 포트와 어댑터, 라우팅 계층으로 실행했습니다. 경로는 `gemini:gemini-3.5-flash-lite,openrouter:nvidia/nemotron-3.5-super-vl:free`이고, `--routes` 인자나 환경 변수 `V3_ROUTES`로 줍니다. 첫 경로가 QUOTA_EXHAUSTED를 돌려주거나 차단 상태이면 다음 경로로 넘어가고, RATE_LIMIT이면 같은 경로에서 기다렸다가 다시 시도합니다.
+- 결과는 실제로 판정한 모델의 캐시(`/tmp/sigana/v3_<model>.jsonl`)에 `adapter` 필드와 함께 기록합니다. 분석할 때는 경로 순서대로 모델 캐시를 합치므로, 기존 flash-lite 77건은 그대로 유효합니다.
+- 이번 실행에서 남은 112건은 모두 `gemini:gemini-3.5-flash-lite`가 판정했습니다. 호출은 OK 112회와 RATE_LIMIT 21회였고, QUOTA_EXHAUSTED는 한 번도 나오지 않았으므로 OpenRouter로 넘어간 기사는 없습니다. 따라서 189건 전체가 한 모델(flash-lite)의 판정이며, 모델을 섞어서 생기는 차이는 이번 결과에 들어 있지 않습니다.
+- 앞에서 `gemini-3-flash-preview`로 판정한 23건은 일치도 비교에만 쓰고, 아래 분석에는 쓰지 않았습니다.
 
-### 분포 (`gemini-3-flash-preview`, 23건)
+### 분포 (`gemini-3.5-flash-lite`, 189건)
 
-- info_type: PRICE_RECAP 16, NEW_FACT 3, OPINION 3, FLOW 1입니다.
-- target_relevance: SECTOR 13, COMPETITOR 4, DIRECT 4, UNRELATED 2입니다.
-- event_type: OTHER 22, TECH_ANNOUNCEMENT 1입니다.
+- info_type: PRICE_RECAP 67, OPINION 35, NEW_FACT 33, FLOW 32, OTHER 22입니다.
+- target_relevance: SECTOR 98, DIRECT 40, UNRELATED 32, COMPETITOR 19입니다.
+- event_type: OTHER 146, TECH_ANNOUNCEMENT 22, SCHEDULE 9, CAPITAL 3, PRODUCT 2, INVESTMENT 2, POLICY 2, LEGAL 1, PERSONNEL 1, CONTRACT 1입니다.
+- NEW_FACT이면서 DIRECT 또는 COMPETITOR인 기사는 26건입니다.
 
-### 모델 간 일치도 (두 모델이 모두 판정한 23건)
+### 사건 묶음 결과
 
-- info_type 18건(78%), target_relevance 18건(78%), event_subject 21건(91%), event_type 22건(96%), direction 19건(83%)이 일치했습니다.
-- info_type 혼동표는 아래와 같습니다. 행은 `gemini-3.5-flash-lite`, 열은 `gemini-3-flash-preview`의 판정입니다.
+- 식별자 (event_subject, event_type)에 FLOW만 direction을 더한 규칙으로 189건이 53개 사건으로 묶였습니다.
+- SEDEX 기조연설 기사: 안현 사장의 HBF와 차세대 메모리 발표를 다룬 기사는 12:30부터 16:00까지 이어졌고, 저녁의 SEDEX 기술 경쟁 종합 기사까지 포함해 15건이 하나의 사건 E42(SK하이닉스, TECH_ANNOUNCEMENT)로 묶였습니다. event_object는 메모리 계층 최적화, HBF 최종 규격, 3D 적층 D램 등으로 제각각이었지만 식별자에 들어가지 않으므로 갈라지지 않았습니다. 제목에 SEDEX가 들어간 기사 가운데 에이직랜드 전시 기사는 UNRELATED, 행사 종합 기사는 SEDEX 주체의 SCHEDULE로 따로 분리되었고, 이는 의도한 결과입니다.
+- CXMT 기사: 창신메모리 관련 기사는 네 개의 식별자로 갈라졌습니다. 전망과 해설 기사 7건은 E7(OTHER), 4F스퀘어 D램 기술 기사 4건은 E35(TECH_ANNOUNCEMENT), 연내 상용화와 물량 공세 기사 2건은 E0(PRODUCT), 다음 달 일정을 다룬 기획 기사 1건은 E29(SCHEDULE)입니다. 삼성전자 CTO가 같은 기술을 개발 중이라고 밝힌 기사는 주체가 삼성전자로 잡혀 E12로 갔습니다. 하나의 CXMT 충격을 event_type이 다르게 판정되면서 같은 상태 안에서 여러 번 새 사건으로 볼 위험이 남아 있습니다.
+- 수급 기사는 코스피 주체의 FLOW가 방향별로 E2(-1, 15건), E4(0, 13건), E31(+1, 4건)로 나뉘었습니다. 시황 기사 대부분은 E3(코스피, OTHER) 하나로 모였습니다.
 
-| | NEW_FACT | PRICE_RECAP | OPINION | FLOW | OTHER |
-|---|---|---|---|---|---|
-| NEW_FACT | 2 | 0 | 0 | 0 | 0 |
-| PRICE_RECAP | 0 | 12 | 0 | 0 | 0 |
-| OPINION | 1 | 0 | 3 | 0 | 0 |
-| FLOW | 0 | 4 | 0 | 1 | 0 |
-| OTHER | 0 | 0 | 0 | 0 | 0 |
+### 트리거 시뮬레이션
 
-- 불일치는 두 종류에 몰려 있습니다. flash-lite가 FLOW로 본 수급 섞인 시황 기사 4건을 flash-preview는 PRICE_RECAP으로 보았고, flash-lite가 OPINION으로 본 CXMT 4F스퀘어 D램 기사 1건을 flash-preview는 NEW_FACT(COMPETITOR, TECH_ANNOUNCEMENT, 방향 -1, 확신도 0.90)로 보았습니다.
-- 두 번째 불일치는 트리거에 직접 영향을 줍니다. 같은 기사가 모델에 따라 트리거 후보가 되기도 하고 되지 않기도 하므로, 경쟁사 기술 발표 기사를 사실로 볼지 전망으로 볼지 프롬프트 규칙을 더 분명하게 적어야 합니다.
+- 조건: NEW_FACT, target_relevance DIRECT 또는 COMPETITOR, event_type이 SCHEDULE이나 OTHER가 아님, 확신도 0.7 이상, direction이 가격 상태와 같음, 현재 상태에서 처음 보는 식별자, 사건 시각 기준 10분 쿨다운입니다. 상태 변경은 09:02 POSITIVE, 14:11 NEUTRAL(트리거 없음), 14:37 NEGATIVE입니다.
 
-### 새 사건 식별 규칙과 기사 묶음
+| 시각 | 사유 | 상태 | 주체 | 유형 | 대상 | 대표 기사 (요지) |
+|---|---|---|---|---|---|---|
+| 09:02 | 상태 변경 | POSITIVE | | | | 이전 적격 기사 4건(에픽센터 합류, 메모리 중심 공동 개발 착수, 최태원 회장의 앤디 김 의원 면담, 삼성과 AMD 기술 공개)을 반영 |
+| 12:30 | 새 기사 | POSITIVE | SK하이닉스 | TECH_ANNOUNCEMENT | 메모리 계층 최적화 | 안현 사장이 AI 병목을 메모리 계층 전체의 최적화로 풀어야 한다고 발표 |
+| 14:11 | 상태 변경 | NEUTRAL | | | | 숨김 상태라서 재생성 없음 |
+| 14:37 | 상태 변경 | NEGATIVE | | | | 이전 적격 기사 2건(CXMT 물량 공세, CXMT 4F2 D램 충격)을 반영 |
 
-- 사건 식별자를 (event_subject, event_type)로 단순하게 바꾸고, info_type이 FLOW이면 direction을 함께 넣었습니다. event_object의 2-gram 유사도 비교는 없애고, event_object는 표시용으로만 남겼습니다. 상태 안에서 처음 보는 식별자만 트리거가 된다는 조건과 나머지 규칙은 바꾸지 않았습니다.
-- flash-lite 77건에 새 규칙을 적용하면 사건 수가 28개입니다. 주체가 `창신메모리(CXMT)`이고 유형이 OTHER인 기사 4건은 event_object가 서로 달랐는데도 하나의 사건(E7)으로 묶였습니다. 이전 규칙에서 갈라졌던 문제가 해결되었습니다.
-- 다만 같은 CXMT 4F스퀘어 기사라도 유형을 PRODUCT로 본 기사와 SCHEDULE로 본 기사는 각각 다른 사건이 되었습니다. 새 규칙에서는 event_type이 흔들리면 같은 사건이 갈라집니다.
-- 외국인 순매도 FLOW 기사(방향 -1)와 순매수 FLOW 기사(방향 0)는 서로 다른 사건(E2, E4)으로 나뉘었습니다. 반대 방향의 수급 기사를 한 사건으로 묶던 문제는 사라졌습니다.
-- SEDEX 기조연설 기사는 두 모델 모두 아직 판정하지 못했으므로 새 규칙에서 어떻게 묶이는지 확인하지 못했습니다.
+- 새 기사 트리거는 1회이고, 상태 변경까지 합치면 재생성은 4회입니다. v2의 새 기사 트리거 4회, 실제 리플레이의 55회와 비교하면 크게 줄었습니다.
+- 12:30 이후의 기조연설 후속 기사 14건은 같은 E42라서 트리거가 되지 않았습니다. 14:37 이후의 CXMT 기술 기사(15:04는 방향 0, 15:55는 E35)는 이미 반영된 사건이거나 방향이 맞지 않았고, YMTC 출하량 기사는 event_type이 OTHER라서 제외되었습니다.
 
-### NEW_FACT 가운데 DIRECT 또는 COMPETITOR인 기사 수동 점검 (`gemini-3-flash-preview`)
+### NEW_FACT 가운데 DIRECT 또는 COMPETITOR인 기사 26건 수동 점검
 
-- 10/13 15:30 CXMT 4F스퀘어 D램 연내 상용화 파급력 기사: 경쟁사 신기술이 대상 종목에 불리하다는 방향 -1 판정은 타당합니다. 그러나 제목이 물음표로 끝나는 분석 기사이므로 NEW_FACT보다는 OPINION에 가깝고, flash-lite의 판정이 더 맞다고 봅니다.
+- 10/13 17:00 삼성과 SK하이닉스의 미국 R&D 거점 합류: 공동 주체인데 주체가 삼성전자로 잡혔습니다. 대상 종목을 주체로 우선해야 합니다.
+- 10/13 18:13 삼성과 AMD의 AI 메모리 용량 확장 기술 공개: 경쟁사 호재를 방향 +1로 보았습니다. 대상 종목 기준으로는 0이나 -1이 맞습니다.
+- 09:00 삼성, SK하이닉스, 주성엔지니어링의 메모리 중심 공동 개발 착수: DIRECT, INVESTMENT, +1 판정이 타당합니다.
+- 09:01 최태원 회장의 앤디 김 의원 면담 단독 기사: 사실 보도는 맞지만 주가 영향이 약하므로 확신도 0.80은 높습니다. 18:42 같은 면담 기사는 CONTRACT로 판정되어 다른 사건이 되었습니다.
+- 09:09 CXMT 추격 기획 2편(중국산 D램 물량 공세): 기획 해설 기사이므로 NEW_FACT보다 OPINION에 가깝습니다.
+- 10:00 CXMT 충격으로 반도체주 시가총액이 크게 줄었다는 기사: 주가 결과를 정리한 기사라서 PRICE_RECAP이 맞습니다. 이 오분류가 14:37 NEGATIVE 상태의 이전 반영 기사로 들어갔습니다.
+- 12:30 안현 사장의 메모리 계층 최적화 발표: 타당하며, 유일한 새 기사 트리거입니다.
+- 12:30 2030년 AI 인프라 성능 20배 확대 전망: 같은 기조연설의 일부라서 E42로 묶인 것이 맞습니다.
+- 12:30 HBF 최종 규격을 내년 1월에 발표한다는 기사: 타당하며 E42에 묶였습니다.
+- 12:52 메모리 계층 최적화로 데이터 병목을 극복한다는 기사: 같은 연설의 재보도로 타당합니다.
+- 13:06 HBM 이후의 새로운 메모리 시대를 열겠다는 기사: 같은 연설의 재보도로 타당합니다.
+- 14:05 HBF 최종 표준 제정 목표 기사: 같은 연설의 정리 기사로 타당합니다.
+- 14:24 HBM만으로는 수요를 감당할 수 없어 HBF와 3D 적층 D램을 개발한다는 기사: 같은 연설로 타당합니다.
+- 14:30 중국 추격에 대응해 3D 스택 D램 개발 속도를 높인다는 기사: 같은 연설로 타당합니다.
+- 14:32 HBM 이후 차세대 메모리로 AI 추론 병목을 해소한다는 기사: 같은 연설로 타당합니다.
+- 14:37 메모리가 부품을 넘어 AI의 핵심이 된다는 기사: 같은 연설로 타당합니다.
+- 14:50 HBM 대비 용량 10배인 HBF를 개발한다는 기사: 같은 연설로 타당합니다.
+- 15:02 차세대 메모리 개발 선언 기사: 같은 연설로 타당합니다.
+- 15:04 CXMT 4F2 D램과 국내 업체의 양산 장벽 분석: 분석 기사이므로 OPINION에 가깝고, 방향 0 판정은 타당합니다.
+- 15:42 차세대 메모리 기술 로드맵 제시 기사: 같은 연설로 타당합니다.
+- 15:55 CXMT 차세대 D램 기술과 삼성전자의 개발 언급: COMPETITOR, -1은 타당하며 E35에 묶여 중복 트리거를 막았습니다.
+- 16:00 HBM 이후의 신무기 개발 선언 기사: 같은 연설로 타당합니다.
+- 16:59 YMTC의 낸드 출하량 세계 3위와 IPO 추진: COMPETITOR, -1은 타당하지만 event_type이 OTHER라서 제외되었습니다. CAPITAL이나 EARNINGS에 가깝습니다.
+- 17:49 SEDEX에서 삼성과 SK하이닉스가 기술 경쟁을 벌였다는 종합 기사: 행사 종합이라서 E42에 묶인 것이 맞습니다.
+- 17:57 삼성전자 CTO가 4F2 D램을 개발 중이라는 기사: 사실 보도로 타당하고, 경쟁사 대응 발언에 방향 0을 준 것도 타당합니다.
+- 18:42 최태원 회장과 앤디 김 의원의 협력 회동 기사: 09:01 기사와 같은 사건인데 POLICY와 CONTRACT로 갈라졌습니다. 협약 체결이 아니므로 CONTRACT는 틀립니다.
 
 ### 남은 문제
 
-- 무료 등급의 일일 호출 한도 때문에 한 모델로 189건을 하루에 끝낼 수 없습니다. 내일 할당량이 회복되면 `--model gemini-3-flash-preview --compare gemini-3.5-flash-lite`로 다시 실행해 이어서 판정하거나, 유료 키로 한 번에 처리해야 합니다. 여러 모델을 섞어서 189건을 채우면 모델 간 차이가 트리거 수에 섞이므로 피해야 합니다.
-- 새 식별 규칙은 event_type 판정에 민감합니다. 같은 기사에 대한 event_type 일치도는 96%로 높지만, 같은 사건을 다른 기사가 다른 유형으로 쓰는 경우는 여전히 남아 있습니다.
-- 공동 주체 기사에서 대상 종목을 event_subject로 우선하는 규칙과, 제목에 날짜가 있는 분석 기사를 SCHEDULE로 보지 않는 규칙은 아직 프롬프트에 반영하지 않았습니다.
+- event_type이 흔들리면 같은 사건이 갈라집니다. CXMT 이야기는 OTHER, TECH_ANNOUNCEMENT, PRODUCT, SCHEDULE의 네 식별자로 나뉘었고, 최태원 회장 면담은 POLICY와 CONTRACT로 나뉘었습니다.
+- 주가 결과 정리 기사와 기획 해설 기사가 NEW_FACT로 판정되는 경우가 남아 있습니다(10:00 시가총액 기사, 09:09 기획 기사). 이번에는 상태 변경 시점의 이전 반영 기사로만 들어갔지만, 장중에 나왔다면 잘못된 트리거가 되었을 것입니다.
+- 공동 주체 기사에서 대상 종목을 주체로 우선하는 규칙과, 경쟁사 호재의 방향을 대상 종목 기준으로 판단하는 규칙이 프롬프트에 아직 없습니다.
+- 이번 하루 리플레이에서는 새 기사 트리거가 1회뿐이어서, 쿨다운이 실제로 기사를 모아 주는지는 검증하지 못했습니다.
+
+### 권장 운영 규칙
+
+- 트리거 조건은 이번 시뮬레이션과 같게 둡니다: NEW_FACT, DIRECT 또는 COMPETITOR, SCHEDULE과 OTHER 제외, 확신도 0.7 이상, 가격 상태와 같은 방향, 상태 안에서 처음 보는 (event_subject, event_type) 식별자, FLOW는 방향 포함, 10분 쿨다운입니다.
+- 판정 모델은 `gemini-3.5-flash-lite`를 첫 경로로 두고 OpenRouter의 무료 모델을 대체 경로로 둡니다. 다만 모델마다 판정 경향이 다르므로, 대체 경로가 판정한 기사의 비율을 기록하고 지켜봐야 합니다.
+- 프롬프트 v4에는 세 가지 규칙을 추가합니다. 공동 주체이면 대상 종목을 주체로 쓰고, 주가 결과를 정리한 기사와 연재 기획 기사는 NEW_FACT로 보지 않으며, 경쟁사의 같은 기술 이야기는 event_type을 TECH_ANNOUNCEMENT로 통일합니다.
+## v4 결과 (189건 전체 판정)
+
+### 실행 조건
+
+- 프롬프트는 `document_judgement/v4.md`이고, 출력 필드는 v3와 같습니다. v4에는 공동 주체이면 대상 종목을 주체로 쓰는 규칙, 시가총액이나 주가 변화가 중심인 기사를 PRICE_RECAP으로 보는 규칙, 연재와 기획, 분석 기사를 OPINION으로 보는 규칙, 같은 회사의 같은 기술 이야기에 event_type을 하나로 쓰는 규칙, 경쟁사 사건의 방향을 대상 종목 기준으로 판단하는 규칙, 서명한 합의가 없는 만남을 CONTRACT로 보지 않는 규칙을 넣었습니다. event_type마다 정의와 예를 붙였고, 분류 예시는 16건입니다.
+- 스크립트에 `--prompt-version` 인자를 추가했습니다(기본값 v3). 캐시는 `/tmp/sigana/<prompt>_<model>.jsonl`이므로 v3 캐시와 섞이지 않습니다.
+- 경로는 v3와 같은 `gemini:gemini-3.5-flash-lite,openrouter:nvidia/nemotron-3.5-super-vl:free`입니다. 호출은 OK 189회, RATE_LIMIT 31회, UNAVAILABLE 7회였습니다. 178건은 flash-lite가, 11건은 Gemini가 UNAVAILABLE을 돌려준 동안 nemotron이 판정했습니다. 따라서 v3와 달리 두 모델의 판정이 섞여 있습니다.
+
+### 분포 비교
+
+| 항목 | v3 | v4 |
+|---|---|---|
+| info_type | PRICE_RECAP 67, OPINION 35, NEW_FACT 33, FLOW 32, OTHER 22 | PRICE_RECAP 68, OPINION 51, NEW_FACT 26, OTHER 25, FLOW 19 |
+| event_type OTHER 비율 | 146/189 (77%) | 147/189 (78%) |
+| NEW_FACT 가운데 event_type OTHER | 3/33 | 0/26 |
+| NEW_FACT이면서 DIRECT 또는 COMPETITOR | 26 | 20 |
+| 사건 수 | 53 | 41 |
+
+- 전체 OTHER 비율은 줄지 않았습니다. NEW_FACT였던 기사가 OPINION과 PRICE_RECAP으로 옮겨 가면서 규칙상 OTHER가 되었기 때문입니다. 트리거에 쓰이는 NEW_FACT 안에서는 OTHER가 3건에서 0건으로 줄었으므로, 의도한 효과는 나타났습니다.
+- FLOW가 32건에서 19건으로 줄고 OPINION이 늘었습니다. 수급을 해석한 기사가 OPINION으로 옮겨 간 것으로 보이며, 수급 기사의 분류 기준은 다음에 따로 점검해야 합니다.
+
+### 알려진 오분류 6건
+
+| 기사 | v3 | v4 | 판단 |
+|---|---|---|---|
+| 10/14 10:00 CXMT 충격에 시총 800조 증발 | NEW_FACT, CXMT, TECH_ANNOUNCEMENT | PRICE_RECAP, 코스피, OTHER | 고쳐졌습니다 |
+| 10/14 09:09 [CXMT 추격②] 물량 공세 | NEW_FACT, PRODUCT | OPINION, OTHER | 고쳐졌습니다. 같은 연재의 ③도 SCHEDULE에서 OPINION으로 바뀌었습니다 |
+| 10/13 17:00 삼성과 하닉의 R&D 거점 합류 | 주체 삼성전자 | 주체 SK하이닉스 | 고쳐졌습니다 |
+| 10/13 18:13 삼성과 AMD 기술 공개 | COMPETITOR, 방향 +1 | COMPETITOR, 방향 -1 | 고쳐졌습니다 |
+| 최태원 회장과 앤디 김 의원 면담 (09:01, 18:42) | POLICY와 CONTRACT로 갈라짐 | 둘 다 POLICY | 고쳐졌습니다. 한 사건으로 묶입니다 |
+| 10/14 16:59 YMTC 출하량 3위와 IPO 추진 | OTHER | CAPITAL | 고쳐졌습니다 |
+
+### 사건 묶음 결과
+
+- CXMT: 제목에 CXMT나 창신이 들어간 기사가 v3에서는 창신메모리 주체의 식별자 4개(OTHER, TECH_ANNOUNCEMENT, PRODUCT, SCHEDULE)로 갈라졌습니다. v4에서는 2개(TECH_ANNOUNCEMENT 4건, OTHER 3건)로 줄었고, OTHER 3건은 모두 OPINION이나 PRICE_RECAP이라서 트리거 대상이 아닙니다. 따라서 트리거에 쓰이는 CXMT 식별자는 TECH_ANNOUNCEMENT 하나뿐입니다. 시가총액 기사를 포함한 시황 기사 5건은 코스피 주체로 갔습니다.
+- SEDEX 기조연설: SK하이닉스 TECH_ANNOUNCEMENT 사건은 v3의 15건에서 v4의 12건으로 줄었습니다. 같은 연설에서 나온 기사 가운데 12:30 HBF 최종 규격 발표 예고 기사는 SCHEDULE로, 14:37 "메모리가 AI 핵심" 기사는 OPINION으로 빠졌습니다. 16:39 SEDEX 종합 기사는 코스피 주체의 TECH_ANNOUNCEMENT로 잡혔는데, 이는 주체 판정이 틀린 것입니다. 다만 트리거 조건을 통과하지 않으므로 이번 결과에는 영향이 없습니다.
+
+### 트리거 시뮬레이션 (v3와 같은 규칙)
+
+| 시각 | 사유 | 상태 | 주체 | 유형 | 대표 기사 (요지) |
+|---|---|---|---|---|---|
+| 09:02 | 상태 변경 | POSITIVE | | | 이전 적격 기사 3건(R&D 거점 합류, 메모리 중심 공동 개발 착수, 최태원 회장 면담)을 반영 |
+| 12:30 | 새 기사 | POSITIVE | SK하이닉스 | TECH_ANNOUNCEMENT | 안현 사장의 메모리 계층 최적화 발표 |
+| 14:11 | 상태 변경 | NEUTRAL | | | 숨김 상태라서 재생성 없음 |
+| 14:37 | 상태 변경 | NEGATIVE | | | 이전 적격 기사 1건(삼성과 AMD 기술 공개)을 반영 |
+| 15:55 | 새 기사 | NEGATIVE | 창신메모리(CXMT) | TECH_ANNOUNCEMENT | CXMT 차세대 D램 기술과 삼성전자의 개발 언급 |
+| 16:59 | 새 기사 | NEGATIVE | 창장메모리(YMTC) | CAPITAL | YMTC 낸드 출하량 3위와 IPO 추진 |
+
+- 새 기사 트리거는 1회에서 3회로 늘었고, 상태 변경까지 합친 재생성은 4회에서 6회가 되었습니다. 늘어난 2회는 모두 오분류를 고친 결과입니다. v3에서는 잘못 NEW_FACT로 판정된 10:00 시총 기사가 CXMT 기술 사건을 미리 반영해 15:55 기사를 막았고, YMTC 기사는 OTHER라서 빠졌습니다. v4에서는 하락 상태에서 처음 나온 경쟁사 사건 두 건이 정상적으로 트리거가 되었습니다.
+- 14:37 NEGATIVE 상태의 이전 반영 기사가 v3의 CXMT 기사 2건(연재 기사와 시총 기사)에서 v4의 삼성과 AMD 기사 1건으로 바뀌었습니다. 하락 상태를 설명하는 근거로는 CXMT 기술 기사가 더 적절하지만, 그 기사가 14:37 이후에 나왔으므로 시간 순서상 맞는 결과입니다.
+
+### 결론
+
+- v4는 알려진 오분류 6건을 모두 고쳤고, CXMT 이야기의 트리거 식별자를 하나로 모았습니다. 트리거 횟수는 조금 늘었지만 늘어난 트리거는 모두 타당합니다.
+- 남은 문제는 세 가지입니다. 행사 종합 기사의 주체가 코스피로 잡히는 경우가 있고, 같은 연설의 일정 예고나 발언 기사가 SCHEDULE이나 OPINION으로 빠지며, FLOW와 OPINION의 경계가 v3와 달라졌습니다.
+- 이번 결과에는 nemotron 판정 11건이 섞여 있습니다. 운영에서는 대체 경로가 판정한 비율을 계속 기록해야 합니다.
+
+## 로컬 모델 (gemma4 12b) 결과
+
+### 실행 조건
+
+- Ollama 0.40.6에 올린 `gemma4:12b-it-qat`를 `ollama:gemma4:12b-it-qat` 경로 하나로만 호출했고, 프롬프트는 v4이며 189건을 모두 판정했습니다. 클라우드 모델은 호출하지 않았습니다.
+- 어댑터는 strict `json_schema` response_format을 그대로 보냅니다. 실제 호출로 확인해 보니 Ollama는 스키마를 제약 디코딩으로 지켰고, enum에 없는 값을 요구하는 프롬프트에도 스키마 안의 값만 돌려주었습니다. 판정 189건에서 스키마 오류는 0건이었습니다.
+- gemma4는 기본적으로 사고 과정을 생성합니다. `/v1` 경로에서는 `think: false`가 무시되었고, `reasoning_effort: "none"`을 보내야 사고 과정이 꺼졌습니다. 그래서 어댑터는 reasoning을 끌 때 `"none"`을 보내고, 이번 실험도 그렇게 실행했습니다.
+- 동시 호출은 1개입니다. Docker 컨테이너에서는 `OLLAMA_BASE_URL=http://host.docker.internal:11434/v1`로 호스트에 접근하며, 리플레이 실행기의 hosts 파일에 `host.docker.internal` 항목이 있어야 합니다.
+
+### 소요 시간
+
+- 189회 호출에 모두 3,072초(약 51분)가 걸렸습니다. 호출 1회는 평균 16.3초, 중앙값 12.4초, p95 25.6초, 최대 46.0초였습니다.
+- 실시간 기사 유입 속도를 감안하면 동시 호출 1개로도 따라갈 수는 있지만, 기사가 몰리는 장 시작 무렵에는 판정이 몇 분씩 밀릴 수 있습니다.
+
+### flash-lite v4와 일치율 (같은 기사 178건)
+
+| 필드 | 일치 |
+|---|---|
+| info_type | 142/178 (80%) |
+| target_relevance | 130/178 (73%) |
+| event_subject | 114/178 (64%) |
+| event_type | 161/178 (90%) |
+| direction | 133/178 (75%) |
+
+info_type 혼동표입니다. 행은 flash-lite, 열은 gemma4입니다.
+
+| | NEW_FACT | PRICE_RECAP | OPINION | FLOW | OTHER |
+|---|---|---|---|---|---|
+| NEW_FACT | 23 | 0 | 1 | 0 | 1 |
+| PRICE_RECAP | 1 | 48 | 4 | 11 | 0 |
+| OPINION | 7 | 0 | 38 | 0 | 1 |
+| FLOW | 0 | 0 | 1 | 17 | 0 |
+| OTHER | 6 | 0 | 1 | 2 | 16 |
+
+- gemma4는 NEW_FACT를 더 넓게 봅니다. NEW_FACT는 39건으로 flash-lite보다 많고, NEW_FACT이면서 DIRECT 또는 COMPETITOR인 기사도 28건으로 flash-lite의 20건보다 많습니다. flash-lite가 OPINION이나 OTHER로 본 기사 13건을 gemma4는 NEW_FACT로 판정했습니다.
+- 시황 기사 11건은 PRICE_RECAP 대신 FLOW로 갔습니다. 트리거에는 영향이 없지만, 수급 기사 경계가 모델마다 다르다는 점은 v4에서 남긴 문제와 같습니다.
+- event_subject 일치율이 64%로 가장 낮습니다. "창장메모리(YMTC)"와 "YMTC"처럼 같은 회사를 다르게 쓰고, 여러 회사를 주체로 나열하는 경우가 있습니다. 그래서 사건 수가 flash-lite의 37개보다 훨씬 많은 73개로 늘었습니다.
+
+### 트리거 후보 기사의 불일치 (어느 한쪽이 NEW_FACT이면서 DIRECT 또는 COMPETITOR인 기사 17건)
+
+| 기사 (요지) | flash-lite | gemma4 |
+|---|---|---|
+| 10/14 08:01 이재용 회장 삼성전자 주식 증여 | OTHER, UNRELATED | NEW_FACT, COMPETITOR, CAPITAL |
+| 10/14 08:07 루빈 투입과 HBM4 성장 기대 | OPINION, DIRECT, OTHER | NEW_FACT, DIRECT, TECH_ANNOUNCEMENT |
+| 10/14 09:00 메모리 중심 차세대 반도체 공동 개발 착수 | NEW_FACT, 주체 SK하이닉스, INVESTMENT | NEW_FACT, 주체 3개사 나열, TECH_ANNOUNCEMENT |
+| 10/14 09:01, 18:42 최태원 회장과 앤디 김 의원 면담 (2건) | NEW_FACT, DIRECT, 주체 SK하이닉스, +1 | NEW_FACT, UNRELATED, 주체 최태원, 0 |
+| 10/14 10:48 두 회사의 자사주 소각 규모 | PRICE_RECAP, SECTOR | NEW_FACT, DIRECT, CAPITAL |
+| 10/14 12:30 안현 사장의 메모리 계층 최적화 발표 | NEW_FACT, TECH_ANNOUNCEMENT | OPINION, TECH_ANNOUNCEMENT |
+| 10/14 12:30 2030년 AI 인프라 20배 전망 | OPINION, OTHER | NEW_FACT, TECH_ANNOUNCEMENT |
+| 10/14 12:30 HBF 최종 규격 발표 예고 | OTHER, SCHEDULE, 0 | NEW_FACT, TECH_ANNOUNCEMENT, +1 |
+| 10/14 14:37 메모리가 AI 핵심이라는 발언 | OPINION, OTHER | NEW_FACT, TECH_ANNOUNCEMENT |
+| 10/14 15:04 CXMT 4F2 D램 도발과 양산 장벽 | OPINION, COMPETITOR | NEW_FACT, COMPETITOR |
+| 10/14 16:47 삼성전자 주거 솔루션 외 소식 모음 | OTHER, UNRELATED | NEW_FACT, COMPETITOR, PRODUCT |
+| 10/14 16:59 YMTC 출하량 3위와 IPO 추진 | 주체 창장메모리(YMTC) | 주체 YMTC |
+| 10/14 17:00 엑시나의 CBO 영입 | NEW_FACT, UNRELATED, 0 | NEW_FACT, COMPETITOR, -1 |
+| 10/14 17:10 SK스퀘어 기업가치와 주주환원 | OPINION | NEW_FACT |
+| 10/14 17:57 삼성전자 CTO의 CXMT 기술 언급 | COMPETITOR, 0 | COMPETITOR, -1 |
+| 10/14 19:11 CXMT 청사진과 양산까지 2년 | OPINION, COMPETITOR, +1 | NEW_FACT, COMPETITOR, -1 |
+
+- v4 프롬프트로 고친 오분류 가운데 일부가 gemma4에서 다시 나타났습니다. 최태원 회장 면담 기사는 대상 종목과 무관한 것으로 판정되었고, 분석 기사와 발언 기사, 일정 예고 기사가 NEW_FACT로 올라왔습니다.
+- 08:07 루빈 기사가 SK하이닉스 TECH_ANNOUNCEMENT로 잡히면서, 같은 식별자를 쓰는 SEDEX 기조연설 기사들이 장 시작 전에 이미 반영된 것으로 처리되었습니다.
+
+### 트리거 시뮬레이션
+
+리플레이 내보내기의 상태 변경 시각이 v4 실행 이후에 바뀌었으므로(09:07 POSITIVE, 14:02 NEUTRAL, 14:45 NEGATIVE), flash-lite 판정도 캐시에서 다시 시뮬레이션해 같은 조건으로 비교했습니다. 이 flash-lite 결과에는 nemotron 판정 11건이 빠져 있습니다.
+
+| 시각 | 사유 | 상태 | flash-lite v4 | gemma4 |
+|---|---|---|---|---|
+| 09:07 | 상태 변경 | POSITIVE | 이전 적격 기사 3건 | 이전 적격 기사 3건 |
+| 12:30 | 새 기사 | POSITIVE | 안현 사장 발표 | 없음 (08:07 루빈 기사로 이미 반영됨) |
+| 14:02 | 상태 변경 | NEUTRAL | 재생성 없음 | 재생성 없음 |
+| 14:45 | 상태 변경 | NEGATIVE | 이전 적격 기사 0건 | 이전 적격 기사 1건 |
+| 15:04 | 새 기사 | NEGATIVE | 없음 | CXMT 도발 분석 기사 |
+| 15:55 | 새 기사 | NEGATIVE | CXMT 차세대 D램 기사 | 없음 (15:04에 반영됨) |
+| 16:59 | 새 기사 | NEGATIVE | YMTC 출하량과 IPO | YMTC 출하량과 IPO |
+| 17:09 | 새 기사 | NEGATIVE | 없음 | 엑시나 CBO 영입 |
+
+- 재생성 횟수는 두 모델 모두 6회(상태 변경 3회와 새 기사 3회)로 같습니다. 그러나 gemma4의 새 기사 트리거 3회 가운데 타당한 것은 YMTC 기사 1회뿐입니다. 15:04 트리거는 분석 기사로 일어났고, 17:09 트리거는 대상 종목과 무관한 스타트업의 인사 기사로 일어났습니다. 상승 상태에서 SEDEX 발표를 반영하는 12:30 트리거는 빠졌습니다.
+
+### 판단과 권장
+
+- 스키마 준수와 안정성에는 문제가 없습니다. 189회 호출이 모두 성공했고, 비용과 호출 한도가 없습니다.
+- 하지만 판정 품질은 아직 첫 번째 경로로 쓰기에 부족합니다. 트리거에 직접 쓰이는 NEW_FACT와 target_relevance 판정이 flash-lite보다 넓고 흔들리며, 주체 이름이 일관되지 않아 사건 묶음이 쪼개지거나 잘못 합쳐집니다. 그 결과 시뮬레이션에서 새 기사 트리거 3회 가운데 2회가 부적절했습니다.
+- 따라서 첫 번째 판정 경로는 계속 `gemini:gemini-3.5-flash-lite`로 두고, gemma4는 Gemini와 OpenRouter가 모두 실패할 때 쓰는 마지막 대체 경로로만 두기를 권장합니다. 대체 경로로 쓸 때도 gemma4가 판정한 기사에는 표시를 남겨서 트리거 결과를 따로 점검해야 합니다.
+- 첫 번째 경로로 올리려면 주체 이름 정규화(종목 사전으로 별칭을 묶는 처리)와 NEW_FACT 판정 예시 보강을 먼저 하고, 같은 189건으로 다시 비교해야 합니다.
 <!-- NOTES:END -->

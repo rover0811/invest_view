@@ -11,7 +11,14 @@ from ai_signal.replay import driver, runner
 
 
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="python -m ai_signal.replay")
+    parser = argparse.ArgumentParser(
+        prog="python -m ai_signal.replay",
+        epilog=(
+            "Run the runners with AI_SIGNAL_LLM_CACHE=postgres during a replay: "
+            "identical prompts are then answered from gold.llm_cache, which the "
+            "replay cleanup keeps."
+        ),
+    )
     sub = parser.add_subparsers(dest="command", required=True)
     for command in ("run", "export", "prepare"):
         p = sub.add_parser(command)

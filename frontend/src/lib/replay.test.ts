@@ -3,8 +3,12 @@ import { describe, expect, it } from 'vitest';
 import {
   assembleHeadline,
   aggregateReplayBars,
+  advanceReplayPlayhead,
+  buildChartSignalMarks,
   buildReplayDensity,
   buildReplayEvents,
+  buildReplayKeyEvents,
+  buildReplayPlaybackPlan,
   buildReplayTimeline,
   buildScrubberTicks,
   clusterByPixelDistance,
@@ -17,10 +21,13 @@ import {
   replayPositionToTime,
   replayTimeToChartCoordinate,
   replayTimeToPosition,
+  selectReplaySignalCard,
   selectReplayFrame,
+  shouldRecomputeReplayOverlays,
   splitAtSessionOpen,
   visibleBarsAt,
   type ReplayData,
+  type ReplayOverlayKey,
 } from './replay';
 
 const replay: ReplayData = {
@@ -120,6 +127,86 @@ describe('selectReplayFrame', () => {
 
     expect(frame.signal?.status).toBe('SHOWN');
     expect(frame.shownSignal?.version).toBe(2);
+  });
+});
+
+describe('buildChartSignalMarks', () => {
+  it('marks every regenerated version up to the playhead and expands only the card signal', () => {
+    const marks = buildChartSignalMarks(replay, '2026-10-20T10:10:00+09:00');
+
+    expect(marks.map((mark) => [mark.version, mark.status, mark.direction, mark.current])).toEqual([
+      [1, 'HIDDEN', 'neutral', false],
+      [2, 'SHOWN', 'positive', true],
+    ]);
+    expect(marks[1].label).toBe('HBM 장기 공급 계약');
+    expect(buildChartSignalMarks(replay, '2026-10-20T09:00:00+09:00')).toEqual([]);
+  });
+
+  it('collapses a stale headline once the price state moves past it', () => {
+    const marks = buildChartSignalMarks(replay, '2026-10-20T11:53:00+09:00');
+
+    expect(marks.map((mark) => mark.current)).toEqual([false, false]);
+  });
+});
+
+describe('selectReplaySignalCard', () => {
+  it('hides an older SHOWN signal when the latest version is HIDDEN', () => {
+    const hiddenAfterShown: ReplayData = {
+      ...replay,
+      signals: [
+        ...replay.signals,
+        {
+          ...replay.signals[0],
+          at: '2026-10-20T10:20:00+09:00',
+          move_version: 1,
+          version: 3,
+          status: 'HIDDEN',
+        },
+      ],
+    };
+    const frame = selectReplayFrame(hiddenAfterShown, '2026-10-20T10:21:00+09:00');
+
+    expect(selectReplaySignalCard(hiddenAfterShown, frame)).toEqual({
+      mode: 'empty',
+      signal: hiddenAfterShown.signals[2],
+    });
+  });
+
+  it('shows a pending state after a state change and before the next signal', () => {
+    const reversed: ReplayData = {
+      ...replay,
+      states: [
+        ...replay.states.slice(0, 1),
+        { t: '2026-10-20T11:00:00+09:00', state: 'NEGATIVE', move_id: 'move-1', move_version: 2, return_pct: -1.2 },
+      ],
+    };
+    const frame = selectReplayFrame(reversed, '2026-10-20T11:01:00+09:00');
+
+    expect(selectReplaySignalCard(reversed, frame)).toEqual({
+      mode: 'pending',
+      signal: reversed.signals[1],
+    });
+  });
+
+  it('guards against a live return whose sign disagrees with the signal direction', () => {
+    const frame = {
+      ...selectReplayFrame(replay, '2026-10-20T10:10:00+09:00'),
+      returnPct: -1.2,
+    };
+
+    expect(selectReplaySignalCard(replay, frame)).toEqual({
+      mode: 'pending',
+      signal: replay.signals[1],
+    });
+  });
+
+  it('returns the latest SHOWN signal when state and live return agree', () => {
+    const frame = selectReplayFrame(replay, '2026-10-20T10:10:00+09:00');
+
+    expect(selectReplaySignalCard(replay, frame)).toEqual({
+      mode: 'shown',
+      signal: replay.signals[1],
+    });
   });
 });
 
@@ -252,6 +339,22 @@ describe('layoutReplayAnnotationTags', () => {
       { x: 90, row: 2 },
     ]);
   });
+
+  it('hides overflow tags when the chart reserves only two rows', () => {
+    const layout = layoutReplayAnnotationTags(
+      [60, 90],
+      48,
+      160,
+      8,
+      [{ start: 40, end: 152, row: 0 }],
+      2,
+    );
+
+    expect(layout).toEqual([
+      { x: 60, row: 1 },
+      { x: 90, row: 1, hidden: true },
+    ]);
+  });
 });
 
 describe('planReplaySeriesUpdate', () => {
@@ -299,6 +402,33 @@ describe('planReplaySeriesUpdate', () => {
   });
 });
 
+describe('shouldRecomputeReplayOverlays', () => {
+  it('recomputes only when an overlay input changes', () => {
+    const key: ReplayOverlayKey = {
+      width: 884,
+      height: 360,
+      priceScaleWidth: 74,
+      interval: 3,
+      revealedStateCount: 1,
+      revealedSignalCount: 0,
+      currentBarTime: '2026-10-20T10:10:00+09:00',
+      labelOnLeft: false,
+    };
+
+    expect(shouldRecomputeReplayOverlays(null, key)).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key })).toBe(false);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, currentBarTime: '2026-10-20T10:11:00+09:00' })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, revealedStateCount: 2 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, revealedSignalCount: 1 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, width: 900 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, height: 400 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, priceScaleWidth: 80 })).toBe(true);
+    expect(shouldRecomputeReplayOverlays(key, { ...key, interval: 5 })).toBe(true);
+
+    expect(shouldRecomputeReplayOverlays(key, { ...key, labelOnLeft: true })).toBe(true);
+  });
+});
+
 describe('assembleHeadline', () => {
   it('assembles a Korean rise headline from the live bar return', () => {
     expect(assembleHeadline(replay.signals[1], replay.name, 3.6)).toBe(
@@ -341,6 +471,123 @@ describe('buildReplayEvents', () => {
     expect(events).toContain('2026-10-20T09:50:00+09:00');
     expect(events.filter((time) => time === '2026-10-20T10:10:00+09:00')).toHaveLength(1);
     expect(events.at(-1)).toBe('2026-10-20T11:53:00+09:00');
+  });
+});
+
+describe('buildReplayKeyEvents', () => {
+  it('lists state changes, visible signal versions, and KEEP decisions without articles', () => {
+    const keyEventReplay: ReplayData = {
+      ...replay,
+      signals: [
+        ...replay.signals,
+        {
+          ...replay.signals[1],
+          at: '2026-10-20T10:20:00+09:00',
+          version: 3,
+          status: 'NO_CANDIDATE',
+        },
+      ],
+      log: [
+        ...replay.log,
+        { t: '2026-10-20T10:30:00+09:00', kind: 'signal', text: '기존 문구 유지: 새 기사가 기존 원인과 같습니다.' },
+      ],
+    };
+
+    expect(buildReplayKeyEvents(keyEventReplay)).toEqual([
+      {
+        id: 'state-2026-10-20T09:24:00+09:00-POSITIVE-1',
+        at: '2026-10-20T09:24:00+09:00',
+        kind: 'state',
+        label: '긍정 진입',
+      },
+      {
+        id: 'signal-2026-10-20T09:24:00+09:00-1-HIDDEN',
+        at: '2026-10-20T09:24:00+09:00',
+        kind: 'signal',
+        label: '시그널 v1',
+        direction: 'neutral',
+      },
+      {
+        id: 'signal-2026-10-20T10:10:00+09:00-2-SHOWN',
+        at: '2026-10-20T10:10:00+09:00',
+        kind: 'signal',
+        label: '시그널 v2',
+        direction: 'positive',
+        headline: 'HBM 장기 공급 계약',
+      },
+      {
+        id: 'keep-2026-10-20T10:30:00+09:00-2',
+        at: '2026-10-20T10:30:00+09:00',
+        kind: 'keep',
+        label: '문구 유지',
+        headline: '새 기사가 기존 원인과 같습니다.',
+      },
+      {
+        id: 'state-2026-10-20T11:53:00+09:00-NEUTRAL-2',
+        at: '2026-10-20T11:53:00+09:00',
+        kind: 'state',
+        label: '중립 전환',
+      },
+    ]);
+  });
+});
+
+describe('advanceReplayPlayhead', () => {
+  const keyEvents = buildReplayKeyEvents(replay);
+  const startMs = Date.parse('2026-10-20T09:00:00+09:00');
+  const endMs = Date.parse('2026-10-20T11:53:00+09:00');
+  const playbackPlan = buildReplayPlaybackPlan(keyEvents, startMs, endMs);
+
+  it('uses the selected speed from five minutes before through ten minutes after an event', () => {
+    const currentMs = Date.parse('2026-10-20T10:06:00+09:00');
+    const result = advanceReplayPlayhead(currentMs, 1_000, 4, playbackPlan, true);
+
+    expect(result).toEqual({
+      nextMs: Date.parse('2026-10-20T10:10:00+09:00'),
+      fastForwarding: false,
+    });
+  });
+
+  it('compresses a complete idle segment to about two and a half seconds', () => {
+    const idleStartMs = Date.parse('2026-10-20T09:34:00+09:00');
+    const result = advanceReplayPlayhead(idleStartMs, 2_500, 4, playbackPlan, true);
+
+    expect(result).toEqual({
+      nextMs: Date.parse('2026-10-20T10:05:00+09:00'),
+      fastForwarding: true,
+    });
+  });
+
+  it('uses the selected speed throughout when idle skipping is off', () => {
+    const idleStartMs = Date.parse('2026-10-20T09:34:00+09:00');
+    const result = advanceReplayPlayhead(idleStartMs, 1_000, 4, playbackPlan, false);
+
+    expect(result).toEqual({
+      nextMs: Date.parse('2026-10-20T09:38:00+09:00'),
+      fastForwarding: false,
+    });
+  });
+
+  it('consumes remaining wall time after crossing a playback window boundary', () => {
+    const boundaryPlan = buildReplayPlaybackPlan([
+      {
+        id: 'signal-2026-10-20T09:10:00+09:00-1-SHOWN',
+        at: '2026-10-20T09:10:00+09:00',
+        kind: 'signal',
+        label: '시그널 v1',
+      },
+    ], startMs, Date.parse('2026-10-20T10:00:00+09:00'));
+
+    expect(advanceReplayPlayhead(
+      Date.parse('2026-10-20T09:19:00+09:00'),
+      2_000,
+      1,
+      boundaryPlan,
+      true,
+    )).toEqual({
+      nextMs: Date.parse('2026-10-20T09:36:00+09:00'),
+      fastForwarding: true,
+    });
   });
 });
 
