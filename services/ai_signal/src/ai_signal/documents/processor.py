@@ -12,8 +12,9 @@ Per message, inside the frame's single transaction:
    without an enabled symbol get no judgement row, which is the "not judged"
    state (``direction`` null in 6.4). When every fallback step passes the
    document also stays unjudged.
-5. a judgement without ``fail_reason`` publishes ``NEW_DOCUMENT`` signal
-   requests through the outbox
+5. a judgement without ``fail_reason``, with probability >= 0.7 and a
+   direction equal to the symbol's latest move state publishes ``NEW_DOCUMENT``
+   signal requests (event time = ``published_at``) through the outbox
 """
 
 from __future__ import annotations
@@ -39,6 +40,7 @@ from ai_signal.documents.judgement import (
 from ai_signal.documents.linking import ENTITY_SYMBOL, LINK_METHODS, LinkMethod
 from ai_signal.documents.news import DOCUMENT_SOURCE, NewsRecord
 from ai_signal.llm import shared_client
+from ai_signal.signals.move import DIRECTION_BY_PRICE_STATE, latest_move
 from ai_signal.signal_requests import (
     RequestTrigger,
     SignalRequestReason,
@@ -48,6 +50,7 @@ from ai_signal.signal_requests import (
 
 logger = logging.getLogger(__name__)
 
+NEW_DOCUMENT_MIN_PROBABILITY = 0.7
 UUID_T = postgresql.UUID(as_uuid=True)
 TS = sa.DateTime(timezone=True)
 
@@ -326,6 +329,14 @@ async def sector_names(
     return {key: tuple(names) for key, names in sectors.items()}
 
 
+async def move_direction(session: AsyncSession, symbol: str) -> int:
+    """Direction of the symbol's latest move state; 0 when NEUTRAL or no move."""
+    move = await latest_move(session, symbol)
+    if move is None:
+        return 0
+    return DIRECTION_BY_PRICE_STATE.get(move.price_state, 0)
+
+
 async def judgement_exists(
     session: AsyncSession, document_id: UUID, version: int
 ) -> bool:
@@ -417,7 +428,12 @@ class DocumentProcessor:
             )
             return
         await insert_judgement(session, state, judgement)
-        if not judgement.output.is_signal_candidate:
+        output = judgement.output
+        if (
+            not output.is_signal_candidate
+            or output.probability < NEW_DOCUMENT_MIN_PROBABILITY
+            or not output.direction
+        ):
             return
         targets = await request_targets(
             session,
@@ -425,6 +441,14 @@ class DocumentProcessor:
                 scope=judgement.output.scope, symbols=tuple(s.ticker for s in enabled)
             ),
         )
+        aligned = [
+            symbol
+            for symbol in targets
+            if await move_direction(session, symbol) == output.direction
+        ]
         _ = await publish_signal_requests(
-            context.outbox, targets, SignalRequestReason.NEW_DOCUMENT
+            context.outbox,
+            aligned,
+            SignalRequestReason.NEW_DOCUMENT,
+            record.published_at,
         )

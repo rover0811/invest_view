@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
+from datetime import datetime
 from enum import StrEnum
 from typing import Literal
 from uuid import UUID
@@ -52,6 +53,7 @@ async def publish_signal_requests(
     outbox: OutboxWriter,
     symbols: Sequence[str],
     reason: SignalRequestReason,
+    event_time: datetime,
 ) -> tuple[UUID, ...]:
     event_ids: list[UUID] = []
     for symbol in _unique(symbols):
@@ -59,7 +61,11 @@ async def publish_signal_requests(
             await outbox.write(
                 topic=SIGNAL_REQUESTS_TOPIC,
                 key=symbol,
-                value={"symbol": symbol, "reason": reason.value},
+                value={
+                    "symbol": symbol,
+                    "reason": reason.value,
+                    "event_time": event_time,
+                },
             )
         )
     return tuple(event_ids)

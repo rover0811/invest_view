@@ -86,3 +86,39 @@ move 날짜는 2026-10-20으로 정했습니다. 뉴스 후보 구간(2026-10-19
 1. 조립된 헤드라인이 "보합"으로 나왔습니다. `serving.symbol_snapshot`의 000660 행이 business_date 20261019 기준이고 등락률이 0.0이기 때문입니다. move 자체는 합성 tick으로 만든 +2.014% 상승이지만 snapshot에는 그 tick이 반영되지 않았습니다. 헤드라인 조립 코드는 snapshot 값대로 정상 동작했으므로 코드 결함이 아니라 데이터 조건 때문입니다.
 2. primary 모델은 2026-10-20 실행 이후 계속 provider 404를 반환합니다. 이번 실행에서는 fallback이 의도대로 secondary 모델로 넘어갔지만, primary 모델을 계속 유지할지는 별도로 판단해야 합니다.
 3. 이번 실행에서 코드를 수정한 부분은 없습니다.
+
+## 10-14 리플레이 실행
+
+2026-10-21 02:50 KST부터 04:06 KST까지 로컬 kind 클러스터(`kind-invest-flink`)에서 000660의 2026-10-14 하루치 리플레이를 실행하고 프론트엔드용 export를 만들었습니다. 브랜치는 `feat/ai-signal-replay`이며 코드는 수정하지 않았습니다.
+
+### 실행 단계
+
+1. 현재 작업 트리로 `ai-signal:e2e` amd64 이미지를 다시 빌드했습니다.
+2. `/tmp/e2e_hosts`에 적힌 broker pod IP(10.244.0.14)와 Kafka, Schema Registry, Postgres의 ClusterIP가 현재 값과 일치하는 것을 확인했습니다. 파일은 수정하지 않았습니다.
+3. Flink `price-move-state`가 RUNNING, STABLE 상태이고 JobManager와 TaskManager pod가 모두 Ready인 것을 확인했습니다.
+4. `ai-signal-document_processor`, `ai-signal-move_sink`, `ai-signal-signal_worker`, `ai-signal-serving_sink` 그룹의 offset을 news-raw, price-moves, signal-requests, signal-updates 토픽에서 latest로 초기화했습니다.
+5. outbox_relay, document_processor, move_sink, signal_worker, serving_sink 러너를 각각 별도 컨테이너로 띄웠습니다. LLM은 Gemini이며 primary는 gemini-3.5-flash, secondary는 gemini-3.5-flash-lite입니다.
+6. driver 컨테이너에서 `python -m ai_signal.replay run --max-llm-calls 400`을 실행했습니다. 570개 이벤트 중 563번째에서 호출 상한에 걸려 멈췄고, 상한을 450으로 올려 다시 실행하자 상태 파일에서 이어서 570번째 이벤트까지 끝났습니다.
+7. `python -m ai_signal.replay export`로 `frontend/public/replay/000660-2026-10-14.json`을 생성했습니다.
+8. 리플레이 컨테이너는 모두 정리했고, alert_service(8000), vite(5173), port-forward(15432)는 그대로 두었습니다.
+
+### 결과
+
+| 항목 | 값 |
+| --- | --- |
+| 처리한 이벤트 | 570건 (tick과 news) |
+| LLM 호출 | 429회 |
+| 분봉 bars | 381개 |
+| 상태 구간 states | 3개 |
+| 문서 documents | 186건 (judged 180건, 미판정 6건) |
+| 시그널 signals | 58건 (SHOWN 42건, HIDDEN 16건) |
+| SHOWN 시그널의 결정 모델 | gemini-3.5-flash-lite 41건, gemini-3.5-flash 1건 |
+| `check_no_lookahead` | 통과 |
+| export 파일 크기 | 약 289KB |
+
+### 발견한 문제
+
+1. 이미지의 기본 entrypoint(`docker-entrypoint.sh`)는 alembic 마이그레이션 뒤에 인자와 관계없이 `python -m ai_signal all`을 실행합니다. 처음에는 러너 이름을 인자로 넘겼지만 모든 러너가 함께 떴고, 그중 market_data가 KIS 자격 증명이 없어 컨테이너가 종료되었습니다. 러너별로 실행하려면 `--entrypoint python`을 지정하고 `-m ai_signal <runner>`를 넘겨야 합니다.
+2. Gemini가 429 Too Many Requests를 반환한 로그가 document_processor에서 170줄, signal_worker에서 57줄 기록되었습니다. client 재시도로 모두 처리되었고 러너에서 ERROR 로그는 나오지 않았으므로 동시성 설정은 바꾸지 않았습니다.
+3. 하루치 리플레이에는 LLM 호출이 400회를 넘게 필요했습니다. 같은 규모의 날짜를 처리할 때는 `--max-llm-calls`를 450 이상으로 주는 편이 좋습니다.
+4. 미판정 문서 6건에는 `fail_reason`이 비어 있습니다. 판정이 끝나기 전에 export가 집계했는지, 다른 원인인지는 확인하지 않았습니다.

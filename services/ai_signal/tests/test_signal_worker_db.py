@@ -4,7 +4,7 @@ import asyncio
 import importlib
 import json
 from collections.abc import Iterator
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -322,7 +322,7 @@ def test_no_candidate_without_llm_then_new_move_version_increments(
 def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
     _seed_documents(seeded_url)
     generator, llm = fake_generator([429, 503])
-    _work(seeded_url, generator, request_message())
+    _work(seeded_url, generator, request_message(reason=STATE_CHANGE))
 
     assert llm.calls == 2
     assert [row[:4] for row in _signals(seeded_url)] == [(1, "HIDDEN", 1, None)]
@@ -344,9 +344,9 @@ def test_llm_failure_hides_and_registers_retry(seeded_url: str) -> None:
     ]
     assert _rows(
         seeded_url,
-        "SELECT target_version, attempts, last_error, next_attempt_at > now() - "
-        "interval '1 day' FROM gold.signal_retry",
-    ) == [(1, 0, "HTTP", True)]
+        "SELECT target_version, attempts, last_error, next_attempt_at "
+        "FROM gold.signal_retry",
+    ) == [(1, 0, "HTTP", NOW + timedelta(seconds=30))]
     (update,) = _updates(seeded_url)
     assert (update["status"], update["generation_method"]) == ("HIDDEN", None)
 
@@ -360,7 +360,7 @@ def test_rule_violating_answers_are_kept_on_hidden_signal(seeded_url: str) -> No
     _seed_documents(seeded_url)
     uncited = output_json([cause(1, ["D9"])])
     generator, llm = fake_generator([uncited, "not json"])
-    _work(seeded_url, generator, request_message())
+    _work(seeded_url, generator, request_message(reason=STATE_CHANGE))
 
     assert llm.calls == 2
     assert [row[:2] for row in _signals(seeded_url)] == [(1, "HIDDEN")]
@@ -398,3 +398,113 @@ def test_disabled_symbol_and_missing_move_are_skipped(seeded_url: str) -> None:
         )
     assert llm.calls == 0
     assert _signals(seeded_url) == []
+
+
+STATE_CHANGE = "PRICE_STATE_CHANGE"
+
+
+def _retry_targets(url: str) -> list[tuple[Any, ...]]:
+    return _rows(url, "SELECT target_version FROM gold.signal_retry")
+
+
+def _forget_inputs(url: str) -> None:
+    """Make the next request see a changed input so only the rule under test decides."""
+    _execute(url, "UPDATE gold.signal SET input_hash = NULL")
+
+
+def test_new_document_failure_keeps_previous_shown_signal(seeded_url: str) -> None:
+    _seed_documents(seeded_url)
+    generator, _ = fake_generator([output_json()])
+    _work(seeded_url, generator, request_message())
+    _forget_inputs(seeded_url)
+
+    failing, llm = fake_generator([429, 503])
+    later = NOW + timedelta(minutes=30)
+    _work(seeded_url, failing, request_message(offset=2, event_time=later))
+
+    assert llm.calls == 2
+    assert [row[:3] for row in _signals(seeded_url)] == [(1, "SHOWN", 1)]
+    assert [u["status"] for u in _updates(seeded_url)] == ["SHOWN"]
+    assert _retry_targets(seeded_url) == [(1,)]
+    assert _rows(seeded_url, "SELECT signal_status FROM gold.move") == [("SHOWN",)]
+
+
+def test_new_document_failure_without_previous_writes_nothing(
+    seeded_url: str,
+) -> None:
+    _seed_documents(seeded_url)
+    generator, _ = fake_generator([429, 503])
+    _work(seeded_url, generator, request_message())
+
+    assert _signals(seeded_url) == []
+    assert _updates(seeded_url) == []
+    assert _retry_targets(seeded_url) == [(1,)]
+
+
+def test_neutral_move_hides_on_state_change_and_ignores_documents(
+    seeded_url: str,
+) -> None:
+    _seed_documents(seeded_url)
+    _execute(seeded_url, "UPDATE gold.move SET price_state = 'NEUTRAL'")
+    generator, llm = fake_generator([output_json()])
+    _work(seeded_url, generator, request_message())
+    assert _signals(seeded_url) == []
+
+    _work(seeded_url, generator, request_message(offset=2, reason=STATE_CHANGE))
+    _forget_inputs(seeded_url)
+    _work(seeded_url, generator, request_message(offset=3))
+
+    assert llm.calls == 0
+    assert [row[:4] for row in _signals(seeded_url)] == [(1, "HIDDEN", 1, None)]
+    (update,) = _updates(seeded_url)
+    assert (update["status"], update["causes"]) == ("HIDDEN", [])
+    assert _retry_targets(seeded_url) == []
+
+
+def test_new_document_requests_coalesce_in_event_time(seeded_url: str) -> None:
+    _seed_documents(seeded_url)
+    generator, llm = fake_generator([output_json(), output_json(), output_json()])
+    _work(seeded_url, generator, request_message())
+    _forget_inputs(seeded_url)
+    _work(
+        seeded_url,
+        generator,
+        request_message(offset=2, event_time=NOW + timedelta(minutes=9, seconds=59)),
+    )
+    assert llm.calls == 1
+
+    _work(
+        seeded_url,
+        generator,
+        request_message(offset=3, event_time=NOW + timedelta(minutes=10)),
+    )
+    _forget_inputs(seeded_url)
+    _work(
+        seeded_url,
+        generator,
+        request_message(
+            offset=4, reason=STATE_CHANGE, event_time=NOW + timedelta(minutes=11)
+        ),
+    )
+
+    assert llm.calls == 3
+    assert _rows(
+        seeded_url, "SELECT version, as_of_event_time FROM gold.signal ORDER BY 1"
+    ) == [
+        (1, NOW),
+        (2, NOW + timedelta(minutes=10)),
+        (3, NOW + timedelta(minutes=11)),
+    ]
+
+
+def test_candidates_are_bounded_by_request_event_time(seeded_url: str) -> None:
+    _seed_documents(seeded_url)
+    generator, llm = fake_generator([output_json()])
+    early = IN_RANGE - timedelta(minutes=11)
+    _work(seeded_url, generator, request_message(event_time=early))
+    assert llm.calls == 0
+    assert [row[:2] for row in _signals(seeded_url)] == [(1, "NO_CANDIDATE")]
+
+    _work(seeded_url, generator, request_message(offset=2, event_time=IN_RANGE))
+    assert llm.calls == 1
+    assert [row[:2] for row in _signals(seeded_url)][-1] == (2, "SHOWN")

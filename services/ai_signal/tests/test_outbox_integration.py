@@ -9,6 +9,8 @@ Each test module run creates and drops its own database, so the shared
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 import asyncio
 import os
 import time
@@ -59,6 +61,8 @@ ENTITY = sa.table(
     sa.column("name"),
     schema="reference",
 )
+
+EVENT_TIME = datetime(2026, 10, 20, 1, 5, tzinfo=UTC)
 
 
 async def _admin(statement: str) -> None:
@@ -187,7 +191,7 @@ def test_outbox_write_relay_and_consume_back(database_url: str) -> None:
                 topic="signal-updates", key="000660", value=update
             )
             request_ids = await publish_signal_requests(
-                writer, ["005930"], SignalRequestReason.NEW_DOCUMENT
+                writer, ["005930"], SignalRequestReason.NEW_DOCUMENT, EVENT_TIME
             )
         return update_id, request_ids
 
@@ -223,13 +227,15 @@ def test_outbox_write_relay_and_consume_back(database_url: str) -> None:
     assert deserializer.deserialize("signal-requests", request_value) == {
         "symbol": "005930",
         "reason": "NEW_DOCUMENT",
+        "event_time": EVENT_TIME,
     }
 
 
 def _produce_request(symbol: str) -> TopicPartition:
     assert BOOTSTRAP is not None and SR_URL is not None
     payload = AvroValueSerializer(schema_registry_client(SR_URL)).serialize(
-        "signal-requests", {"symbol": symbol, "reason": "PRICE_STATE_CHANGE"}
+        "signal-requests",
+        {"symbol": symbol, "reason": "PRICE_STATE_CHANGE", "event_time": EVENT_TIME},
     )
     reports: list[TopicPartition] = []
 
@@ -359,7 +365,11 @@ def test_consumer_frame_rolls_back_and_keeps_offset_on_failure(
         _ = await context.outbox.write(
             topic="signal-requests",
             key=symbol,
-            value={"symbol": symbol, "reason": "MARKET_CLOSE"},
+            value={
+                "symbol": symbol,
+                "reason": "MARKET_CLOSE",
+                "event_time": EVENT_TIME,
+            },
         )
         raise RuntimeError("handler failure after writes")
 
