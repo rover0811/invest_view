@@ -1,0 +1,54 @@
+apiVersion: flink.apache.org/v1beta1
+kind: FlinkDeployment
+metadata:
+  name: price-move-state
+spec:
+  image: stream-detection-java:pricemove2
+  imagePullPolicy: Never
+  flinkVersion: v1_18
+  flinkConfiguration:
+    taskmanager.numberOfTaskSlots: "1"
+    state.checkpoints.dir: file:///opt/flink/checkpoints/price-move-state
+    state.savepoints.dir: file:///opt/flink/checkpoints/price-move-state/savepoints
+    high-availability: org.apache.flink.kubernetes.highavailability.KubernetesHaServicesFactory
+    high-availability.storageDir: file:///opt/flink/checkpoints/price-move-state/ha
+    execution.checkpointing.interval: "60000"
+    execution.checkpointing.mode: EXACTLY_ONCE
+  serviceAccount: flink
+  jobManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  taskManager:
+    resource:
+      memory: "1024m"
+      cpu: 1
+  job:
+    jarURI: local:///opt/flink/usrlib/stream-detection.jar
+    entryClass: com.invest_view.stream_detection.PriceMoveStateJob
+    parallelism: 1
+    upgradeMode: last-state
+  podTemplate:
+    spec:
+      containers:
+        - name: flink-main-container
+          env:
+            - name: KAFKA_BOOTSTRAP_SERVERS
+              value: "invest-kafka-kafka-bootstrap.kafka.svc:9092"
+            - name: SCHEMA_REGISTRY_URL
+              value: "http://schema-registry:8081"
+            - name: CONSUMER_GROUP_ID
+              value: "price-move-state-java"
+            - name: PRICE_STATE_ENTER_PCT
+              value: "1.0"
+            - name: PRICE_STATE_EXIT_PCT
+              value: "0.5"
+            - name: CHECKPOINT_DIR
+              value: "file:///opt/flink/checkpoints/price-move-state"
+          volumeMounts:
+            - name: checkpoint-storage
+              mountPath: /opt/flink/checkpoints
+      volumes:
+        - name: checkpoint-storage
+          persistentVolumeClaim:
+            claimName: price-move-checkpoint-storage

@@ -1,0 +1,24 @@
+{
+  "namespace": "com.invest_view.events",
+  "type": "record",
+  "name": "PriceMove",
+  "doc": "Price state transition and four-layer return decomposition",
+  "fields": [
+    {"name": "move_id", "type": "string", "doc": "Deterministic UUIDv5 move identity"},
+    {"name": "move_type", "type": {"type": "enum", "name": "MoveType", "symbols": ["DAILY", "INTRADAY_SPIKE"]}},
+    {"name": "symbol", "type": "string"},
+    {"name": "window_start", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "window_end", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "return_pct", "type": "double"},
+    {"name": "price_state", "type": {"type": "enum", "name": "PriceState", "symbols": ["POSITIVE", "NEUTRAL", "NEGATIVE"]}},
+    {"name": "contrib_global", "type": ["null", "double"], "default": null},
+    {"name": "contrib_market", "type": ["null", "double"], "default": null},
+    {"name": "contrib_sector", "type": ["null", "double"], "default": null},
+    {"name": "contrib_idio", "type": ["null", "double"], "default": null},
+    {"name": "beta_method", "type": ["null", {"type": "enum", "name": "BetaMethod", "symbols": ["OLS_4L", "UNIT_4L"]}], "default": null},
+    {"name": "beta_as_of", "type": ["null", {"type": "int", "logicalType": "date"}], "default": null},
+    {"name": "dominant_layer", "type": ["null", {"type": "enum", "name": "DominantLayer", "symbols": ["GLOBAL", "MARKET", "SECTOR", "IDIO"]}], "default": null},
+    {"name": "signal_status", "type": {"type": "enum", "name": "MoveSignalStatus", "symbols": ["SHOWN", "HIDDEN", "NO_CANDIDATE"]}},
+    {"name": "version", "type": "int"}
+  ]
+}

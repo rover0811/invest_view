@@ -1,0 +1,19 @@
+{
+  "namespace": "com.invest_view.events",
+  "type": "record",
+  "name": "NewsRaw",
+  "doc": "Raw news title observed by the news poller",
+  "fields": [
+    {"name": "raw_id", "type": "string", "doc": "Deterministic UUIDv5 raw record identity"},
+    {"name": "idempotency_key", "type": "string", "doc": "Business-fact identity kis_news:{symbol}:{source_doc_id}:{sha256(title)}; raw_id is UUIDv5 of this key"},
+    {"name": "symbol", "type": "string", "doc": "Source-tagged stock symbol"},
+    {"name": "source_doc_id", "type": "string", "doc": "Provider document identifier"},
+    {"name": "title", "type": "string"},
+    {"name": "provider_code", "type": ["null", "string"], "default": null},
+    {"name": "category_code", "type": ["null", "string"], "default": null},
+    {"name": "published_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "observed_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "received_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "source_payload", "type": {"type": "map", "values": "string"}, "doc": "Original provider fields preserved as received"}
+  ]
+}

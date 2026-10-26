@@ -10,6 +10,7 @@ dependencies = [
     "pydantic-settings",
     "confluent-kafka[avro,schemaregistry]>=2.3",
     "fastavro",
+    "asyncpg",
 ]
 
 [tool.uv]

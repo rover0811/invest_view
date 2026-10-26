@@ -12,6 +12,83 @@ spec:
 apiVersion: kafka.strimzi.io/v1
 kind: KafkaTopic
 metadata:
+  name: news-raw
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: flow-raw
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: opinion-raw
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: price-moves
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: signal-requests
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: signal-updates
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
+  name: signal-dlq
+  namespace: kafka
+  labels:
+    strimzi.io/cluster: invest-kafka
+spec:
+  partitions: 3
+  replicas: 1
+---
+apiVersion: kafka.strimzi.io/v1
+kind: KafkaTopic
+metadata:
   name: stock-alerts
   namespace: kafka
   labels:

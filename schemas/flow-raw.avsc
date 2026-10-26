@@ -1,0 +1,17 @@
+{
+  "namespace": "com.invest_view.events",
+  "type": "record",
+  "name": "FlowRaw",
+  "doc": "Raw investor flow observation contract reserved for the second phase",
+  "fields": [
+    {"name": "raw_id", "type": "string", "doc": "Deterministic raw observation identity"},
+    {"name": "symbol", "type": "string"},
+    {"name": "investor_type", "type": {"type": "enum", "name": "FlowInvestorType", "symbols": ["INDIVIDUAL", "FOREIGN", "INSTITUTION", "PROGRAM"]}},
+    {"name": "business_date", "type": {"type": "int", "logicalType": "date"}},
+    {"name": "net_amount", "type": "long"},
+    {"name": "trade_value", "type": "long"},
+    {"name": "source_kind", "type": {"type": "enum", "name": "FlowSourceKind", "symbols": ["ESTIMATE_1", "ESTIMATE_2", "ESTIMATE_3", "ESTIMATE_4", "ESTIMATE_5", "CONFIRMED"]}},
+    {"name": "observed_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "received_at", "type": {"type": "long", "logicalType": "timestamp-millis"}}
+  ]
+}

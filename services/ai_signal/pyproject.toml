@@ -1,0 +1,34 @@
+[project]
+name = "ai-signal"
+version = "0.1.0"
+description = "AI signal processing and serving pipeline"
+requires-python = ">=3.11"
+dependencies = [
+    "alembic",
+    "asyncpg",
+    "confluent-kafka[avro,schemaregistry]>=2.3",
+    "fastavro",
+    "httpx",
+    "numpy",
+    "pandas",
+    "pydantic>=2",
+    "pydantic-settings",
+    "sqlalchemy[asyncio]>=2.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest",
+    "statsmodels",
+    "testcontainers[postgres]>=4",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_signal"]

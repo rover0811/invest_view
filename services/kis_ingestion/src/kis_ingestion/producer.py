@@ -1,6 +1,7 @@
 import json
 import logging
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from functools import partial
 from importlib import import_module
 from pathlib import Path
 from typing import Protocol, cast
@@ -149,27 +150,101 @@ class StockTickProducer:
             logger.error("Kafka producer queue full, dropping tick symbol=%s", tick.symbol)
 
     def _on_delivery(self, err: object | None, msg: KafkaMessage) -> None:
-        if err:
-            logger.error(
-                "Kafka delivery failed: %s [topic=%s partition=%s]",
-                err,
-                msg.topic(),
-                msg.partition(),
-            )
-            return
-
-        logger.debug(
-            "Kafka delivery ok: topic=%s partition=%s offset=%s",
-            msg.topic(),
-            msg.partition(),
-            msg.offset(),
-        )
+        _ = _log_delivery(err, msg)
 
     def flush(self, timeout: float = 30.0) -> int:
         return self._producer.flush(timeout)
 
     def __len__(self) -> int:
         return len(self._producer)
+
+
+class AvroEventProducer:
+    """Publishes Avro records of one registered schema to one Kafka topic.
+
+    Unlike StockTickProducer, this producer does not know the record shape.
+    BufferError from a full local queue is raised to the caller so that the
+    caller can retry the record later instead of silently dropping it.
+    """
+
+    def __init__(
+        self,
+        bootstrap_servers: str,
+        topic: str,
+        schema_path: str,
+        schema_registry_url: str,
+    ) -> None:
+        self._topic: str = topic
+        self._sr_client: SchemaRegistryClientLike = SchemaRegistryClient({"url": schema_registry_url})
+        self._value_serializer: AvroSerializerCallable = AvroSerializer(
+            self._sr_client,
+            Path(schema_path).read_text(),
+            conf={"auto.register.schemas": False},
+        )
+        self._producer: ProducerLike = Producer({
+            "bootstrap.servers": bootstrap_servers,
+            "acks": "all",
+            "enable.idempotence": True,
+        })
+
+    @property
+    def topic(self) -> str:
+        return self._topic
+
+    def publish(
+        self,
+        *,
+        key: str,
+        value: Mapping[str, object],
+        headers: Sequence[tuple[str, str]] = (),
+        on_delivered: Callable[[], None] | None = None,
+    ) -> None:
+        value_bytes = self._value_serializer(
+            dict(value),
+            SerializationContext(self._topic, MessageField.VALUE),
+        )
+        self._producer.produce(
+            topic=self._topic,
+            key=key.encode("utf-8"),
+            value=value_bytes,
+            headers=[(name, header.encode("utf-8")) for name, header in headers],
+            on_delivery=partial(_notify_delivery, on_delivered),
+        )
+        _ = self._producer.poll(0)
+
+    def flush(self, timeout: float = 30.0) -> int:
+        return self._producer.flush(timeout)
+
+    def __len__(self) -> int:
+        return len(self._producer)
+
+
+def _notify_delivery(
+    on_delivered: Callable[[], None] | None,
+    err: object | None,
+    msg: KafkaMessage,
+) -> None:
+    if _log_delivery(err, msg) and on_delivered is not None:
+        on_delivered()
+
+
+def _log_delivery(err: object | None, msg: KafkaMessage) -> bool:
+    if err:
+        logger.error(
+            "Kafka delivery failed: %s [topic=%s partition=%s]",
+            err,
+            msg.topic(),
+            msg.partition(),
+        )
+        return False
+
+    logger.debug(
+        "Kafka delivery ok: topic=%s partition=%s offset=%s",
+        msg.topic(),
+        msg.partition(),
+        msg.offset(),
+    )
+    return True
 
 
 def _schema_has_field(schema_str: str, field_name: str) -> bool:
