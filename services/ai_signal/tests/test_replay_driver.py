@@ -127,3 +127,9 @@ def test_cleanup_args_bind_stale_move_id_only_for_gold() -> None:
         stale,
         driver.daily_move_id("000660", stale),
     )
+
+
+def test_cleanup_keeps_the_llm_cache() -> None:
+    for table, sql in driver.CLEANUP_STATEMENTS:
+        assert table != "gold.llm_cache"
+        assert "llm_cache" not in sql

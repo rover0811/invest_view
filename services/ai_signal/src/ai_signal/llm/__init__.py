@@ -1,14 +1,3 @@
-from ai_signal.llm.client import (
-    Completion,
-    LlmError,
-    LlmErrorKind,
-    LlmSettings,
-    ModelSpec,
-    OpenRouterClient,
-    primary_spec,
-    secondary_spec,
-    shared_client,
-)
 from ai_signal.llm.fallback import (
     FallbackOutcome,
     FallbackStep,
@@ -16,24 +5,35 @@ from ai_signal.llm.fallback import (
     ModelStep,
     StepFailures,
     StepResult,
+    route_step_names,
     run_fallback,
 )
+from ai_signal.llm.port import (
+    Completion,
+    CompletionRequest,
+    LlmError,
+    LlmErrorKind,
+    LlmPort,
+    ReasoningEffort,
+)
+from ai_signal.llm.routing import Llm, Route, RouteHealth
 
 __all__ = [
     "Completion",
+    "CompletionRequest",
     "FallbackOutcome",
     "FallbackStep",
+    "Llm",
     "LlmAttempt",
     "LlmError",
     "LlmErrorKind",
-    "LlmSettings",
-    "ModelSpec",
+    "LlmPort",
     "ModelStep",
-    "OpenRouterClient",
+    "ReasoningEffort",
+    "Route",
+    "RouteHealth",
     "StepFailures",
     "StepResult",
-    "primary_spec",
+    "route_step_names",
     "run_fallback",
-    "secondary_spec",
-    "shared_client",
 ]

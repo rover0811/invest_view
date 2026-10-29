@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 from collections.abc import Iterator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -19,7 +20,12 @@ from ai_signal.documents.news import NewsRecord
 from ai_signal.documents.processor import DocumentProcessor
 from ai_signal.outbox import OutboxWriter
 from alembic import command
-from tests.document_fakes import judgement, news_message, scripted_judge
+from tests.document_fakes import (
+    PUBLISHED_AT,
+    judgement,
+    news_message,
+    scripted_judge,
+)
 from tests.fakes import FakeSerializer
 
 PostgresContainer = importlib.import_module(
@@ -71,7 +77,9 @@ def clean_url(database_url: str) -> str:
     return database_url
 
 
-def _set_move(url: str, price_state: str | None) -> None:
+def _set_move(
+    url: str, price_state: str | None, window_end: datetime | None = None
+) -> None:
     """Latest move state of 000660; ``None`` removes the move."""
 
     async def run() -> None:
@@ -88,12 +96,13 @@ def _set_move(url: str, price_state: str | None) -> None:
                             signal_status, version
                         )
                         SELECT gen_random_uuid(), 'DAILY', entity_id,
-                               now() - interval '1 day', now(), 3.1, :state,
+                               CAST(:end AS timestamptz) - interval '1 day',
+                               CAST(:end AS timestamptz), 3.1, :state,
                                'OLS_4L', 'HIDDEN', 1
                         FROM reference.entity_symbol WHERE ticker = '000660'
                         """
                     ),
-                    {"state": price_state},
+                    {"state": price_state, "end": window_end or datetime.now(UTC)},
                 )
         await engine.dispose()
 
@@ -147,7 +156,7 @@ def test_enabled_symbol_is_judged_and_requests_a_signal(clean_url: str) -> None:
         "SELECT direction, scope, fail_reason, decided_by, model_version, "
         "prompt_version, probability::text, version FROM silver.document_judgement",
     ) == [
-        (1, "SYMBOL", None, "llm", "fake/model", "document_judgement/v1", "0.8765", 1)
+        (1, "SYMBOL", None, "llm", "fake/model", "document_judgement/v3", "0.8765", 1)
     ]
     assert _rows(
         clean_url,
@@ -287,3 +296,134 @@ def test_new_document_request_requires_probability_and_move_direction(
     counts = _counts(clean_url)
     assert counts["silver.document_judgement"] == 1
     assert counts["outbox.events"] == (1 if requested else 0)
+
+
+STATE_START = PUBLISHED_AT - timedelta(hours=1)
+
+
+def _execute(url: str, sql: str) -> None:
+    async def run() -> None:
+        engine = create_async_engine(url, poolclass=NullPool)
+        async with engine.begin() as connection:
+            _ = await connection.execute(text(sql))
+        await engine.dispose()
+
+    asyncio.run(run())
+
+
+def _articles(url: str, *outputs: Any) -> int:
+    """Processes one article per output (minutes after ``PUBLISHED_AT``)."""
+    judge, _ = scripted_judge(list(outputs))
+    messages = [
+        news_message(
+            source_doc_id=f"20261019{index:05d}",
+            title=f"SK하이닉스 기사 {index}",
+            published_at=PUBLISHED_AT + timedelta(minutes=index),
+        )
+        for index in range(len(outputs))
+    ]
+    _process(url, judge, *messages)
+    return _counts(url)["outbox.events"]
+
+
+@pytest.mark.parametrize(
+    ("override", "requested"),
+    [
+        ({}, True),
+        ({"info_type": "PRICE_RECAP"}, False),
+        ({"info_type": "OPINION"}, False),
+        ({"info_type": "FLOW"}, False),
+        ({"target_relevance": "COMPETITOR"}, True),
+        ({"target_relevance": "SECTOR"}, False),
+        ({"target_relevance": "SUPPLY_CHAIN"}, False),
+        ({"event_type": "SCHEDULE"}, False),
+        ({"event_type": "OTHER"}, False),
+        ({"probability": 0.69}, False),
+        ({"fail_reason": "NO_EVIDENCE"}, False),
+    ],
+)
+def test_article_character_gates_regeneration(
+    clean_url: str, override: dict[str, Any], requested: bool
+) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    assert _articles(clean_url, judgement(**override)) == (1 if requested else 0)
+    assert _counts(clean_url)["silver.document_judgement"] == 1
+
+
+def test_character_columns_are_stored(clean_url: str) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    _ = _articles(
+        clean_url, judgement(event_subject="SK하이닉스", event_type="EARNINGS")
+    )
+    assert _rows(
+        clean_url,
+        "SELECT info_type, event_subject, event_type, event_object, target_relevance "
+        "FROM silver.document_judgement",
+    ) == [("NEW_FACT", "SK하이닉스", "EARNINGS", "공급 계약", "DIRECT")]
+
+
+def test_identity_seen_in_the_same_state_does_not_regenerate(clean_url: str) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    same = {"event_subject": "SK하이닉스", "event_type": "EARNINGS"}
+    assert _articles(clean_url, judgement(**same), judgement(**same)) == 1
+
+
+def test_unseen_identity_in_the_same_state_regenerates(clean_url: str) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    first = judgement(event_subject="SK하이닉스", event_type="EARNINGS")
+    other = judgement(event_subject="SK하이닉스", event_type="CONTRACT")
+    assert _articles(clean_url, first, other) == 2
+
+
+def test_recap_article_marks_its_identity_as_seen(clean_url: str) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    same = {"event_subject": "SK하이닉스", "event_type": "EARNINGS"}
+    recap = judgement(info_type="PRICE_RECAP", **same)
+    assert _articles(clean_url, recap, judgement(**same)) == 0
+
+
+def test_flow_identity_includes_direction(clean_url: str) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    same = {"event_subject": "외국인", "event_type": "CAPITAL"}
+    flow = judgement(info_type="FLOW", **same)
+    assert _articles(clean_url, flow, judgement(**same)) == 1
+
+
+def test_new_state_resets_seen_identities(clean_url: str) -> None:
+    same = {"event_subject": "SK하이닉스", "event_type": "EARNINGS"}
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    assert _articles(clean_url, judgement(**same)) == 1
+    _set_move(clean_url, "POSITIVE", PUBLISHED_AT + timedelta(minutes=30))
+    judge, _ = scripted_judge([judgement(**same)])
+    _process(
+        clean_url,
+        judge,
+        news_message(
+            source_doc_id="2026101999999",
+            title="SK하이닉스 새 상태 기사",
+            published_at=PUBLISHED_AT + timedelta(minutes=40),
+        ),
+    )
+    assert _counts(clean_url)["outbox.events"] == 2
+
+
+def test_old_rows_without_character_are_never_seen(clean_url: str) -> None:
+    _set_move(clean_url, "POSITIVE", STATE_START)
+    same = {"event_subject": "SK하이닉스", "event_type": "EARNINGS"}
+    assert _articles(clean_url, judgement(**same)) == 1
+    _execute(
+        clean_url,
+        "UPDATE silver.document_judgement SET info_type = NULL, event_subject = NULL, "
+        "event_type = NULL, event_object = NULL, target_relevance = NULL",
+    )
+    judge, _ = scripted_judge([judgement(**same)])
+    _process(
+        clean_url,
+        judge,
+        news_message(
+            source_doc_id="2026101988888",
+            title="SK하이닉스 후속 기사",
+            published_at=PUBLISHED_AT + timedelta(minutes=5),
+        ),
+    )
+    assert _counts(clean_url)["outbox.events"] == 2

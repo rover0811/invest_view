@@ -12,7 +12,9 @@ look-ahead). A NEUTRAL move shows no cause, so PRICE_STATE_CHANGE writes HIDDEN
 without a model call and other reasons are ignored. NEW_DOCUMENT requests whose
 event time is within ``COALESCE_WINDOW`` after the event time of the latest
 signal of the same move version are deferred; the next later request picks up
-every candidate. When every model step failed a ``gold.signal_retry`` row is
+every candidate. A NEW_DOCUMENT request shows the model the latest SHOWN
+signal of the move version; a KEEP answer writes a ``gold.signal_decision`` row
+instead of a new version. When every model step failed a ``gold.signal_retry`` row is
 written; only PRICE_STATE_CHANGE then writes HIDDEN, other reasons keep the
 previous version because its text still describes the current state.
 """
@@ -26,7 +28,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 from ai_signal.consumers.frame import ConsumedMessage, HandlerContext
-from ai_signal.llm import shared_client
+from ai_signal.llm.container import shared_llm
 from ai_signal.signal_requests import SignalRequestReason
 from ai_signal.signals.candidates import (
     CANDIDATE_SOURCES,
@@ -47,10 +49,12 @@ from ai_signal.signals.move import (
 )
 from ai_signal.signals.store import (
     clear_retry,
+    current_signal,
     insert_signal,
     latest_signal,
     next_signal_version,
     publish_update,
+    record_decision,
     record_retry,
     set_move_status,
 )
@@ -90,7 +94,7 @@ class SignalRequest:
 
 
 def default_generator() -> SignalGenerator:
-    return SignalGenerator.from_client(shared_client())
+    return SignalGenerator.from_llm(shared_llm())
 
 
 def utc_now() -> datetime:
@@ -149,7 +153,14 @@ class SignalWorker:
         full = candidate_range(move)
         window = CandidateRange(full.start, min(full.end, request.event_time))
         candidates = await collect_candidates(session, move, window, self._sources)
-        generation_request = GenerationRequest(move, candidates)
+        current = (
+            None
+            if request.is_state_change
+            else await current_signal(session, move.move_id, move.version)
+        )
+        generation_request = GenerationRequest(
+            move, candidates, current, request.event_time
+        )
         generator = self._get_generator()
         input_hash = generation_request.input_hash(generator.prompt_version)
         if latest is not None and latest.input_hash == input_hash:
@@ -184,6 +195,15 @@ class SignalWorker:
                     request.reason,
                 )
                 return
+        if generation.decision.keep:
+            await record_decision(session, move, request.event_time, generation, now)
+            logger.info(
+                "keep signal of %s move %s: %s",
+                request.symbol,
+                move.move_id,
+                generation.decision.reason,
+            )
+            return
         version = await next_signal_version(session, move.move_id)
         await insert_signal(
             session, move, version, generation, input_hash, now, request.event_time

@@ -6,22 +6,19 @@ import json
 from collections.abc import Callable, Sequence
 from dataclasses import asdict, dataclass
 from datetime import datetime
-from typing import Literal
+from typing import Literal, get_args
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from ai_signal.llm import (
     FallbackOutcome,
     FallbackStep,
+    Llm,
     LlmAttempt,
-    ModelSpec,
     ModelStep,
-    OpenRouterClient,
-    primary_spec,
+    route_step_names,
     run_fallback,
-    secondary_spec,
 )
-from ai_signal.llm.client import json_schema_text
 from ai_signal.prompts import Prompt, load_prompt
 
 PURPOSE = "document_judgement"
@@ -29,6 +26,25 @@ PURPOSE = "document_judgement"
 Direction = Literal[-1, 0, 1]
 Scope = Literal["MARKET", "SECTOR", "SYMBOL"]
 FailReason = Literal["LISTING_ONLY", "AD", "NO_EVIDENCE"]
+InfoType = Literal["NEW_FACT", "PRICE_RECAP", "OPINION", "FLOW", "OTHER"]
+EventType = Literal[
+    "CONTRACT",
+    "EARNINGS",
+    "INVESTMENT",
+    "TECH_ANNOUNCEMENT",
+    "PRODUCT",
+    "PERSONNEL",
+    "POLICY",
+    "REGULATION",
+    "LEGAL",
+    "CAPITAL",
+    "SCHEDULE",
+    "OTHER",
+]
+TargetRelevance = Literal["DIRECT", "COMPETITOR", "SUPPLY_CHAIN", "SECTOR", "UNRELATED"]
+INFO_TYPES: tuple[str, ...] = get_args(InfoType)
+EVENT_TYPES: tuple[str, ...] = get_args(EventType)
+TARGET_RELEVANCES: tuple[str, ...] = get_args(TargetRelevance)
 
 
 class DocumentJudgementOutput(BaseModel):
@@ -38,6 +54,11 @@ class DocumentJudgementOutput(BaseModel):
     scope: Scope
     fail_reason: FailReason | None
     probability: float = Field(ge=0, le=1)
+    info_type: InfoType
+    event_subject: str
+    event_type: EventType
+    event_object: str
+    target_relevance: TargetRelevance
 
     @property
     def is_signal_candidate(self) -> bool:
@@ -73,22 +94,16 @@ class Judgement:
     attempts: tuple[LlmAttempt, ...] = ()
 
     @property
-    def llm_attempts(self) -> list[dict[str, str | None]] | None:
+    def llm_attempts(self) -> list[dict[str, str | bool | None]] | None:
         return [a.as_json() for a in self.attempts] if self.attempts else None
 
 
 def judgement_messages(
     prompt: Prompt,
-) -> Callable[[JudgementRequest, ModelSpec], list[dict[str, str]]]:
-    def build(request: JudgementRequest, spec: ModelSpec) -> list[dict[str, str]]:
-        system = prompt.text
-        if spec.response_mode == "json_object":
-            schema = json_schema_text(DocumentJudgementOutput)
-            system = (
-                f"{system}\nThe JSON object must match this JSON schema:\n{schema}\n"
-            )
+) -> Callable[[JudgementRequest], list[dict[str, str]]]:
+    def build(request: JudgementRequest) -> list[dict[str, str]]:
         return [
-            {"role": "system", "content": system},
+            {"role": "system", "content": prompt.text},
             {"role": "user", "content": request.as_json()},
         ]
 
@@ -96,24 +111,19 @@ def judgement_messages(
 
 
 def default_steps(
-    client: OpenRouterClient, prompt: Prompt
+    llm: Llm, prompt: Prompt
 ) -> tuple[FallbackStep[JudgementRequest, DocumentJudgementOutput], ...]:
     messages = judgement_messages(prompt)
-    return (
+    routes = llm.routes_for(PURPOSE)
+    return tuple(
         ModelStep(
-            name="primary",
-            client=client,
-            spec=primary_spec(client.settings),
+            name=name,
+            llm=llm,
+            route=route,
             output_type=DocumentJudgementOutput,
             messages=messages,
-        ),
-        ModelStep(
-            name="secondary",
-            client=client,
-            spec=secondary_spec(client.settings),
-            output_type=DocumentJudgementOutput,
-            messages=messages,
-        ),
+        )
+        for name, route in zip(route_step_names(routes), routes, strict=True)
     )
 
 
@@ -129,9 +139,9 @@ class DocumentJudge:
         self._prompt = prompt
 
     @classmethod
-    def from_client(cls, client: OpenRouterClient) -> DocumentJudge:
+    def from_llm(cls, llm: Llm) -> DocumentJudge:
         prompt = load_prompt(PURPOSE)
-        return cls(default_steps(client, prompt), prompt)
+        return cls(default_steps(llm, prompt), prompt)
 
     async def judge(self, request: JudgementRequest) -> Judgement | None:
         outcome: FallbackOutcome[DocumentJudgementOutput] = await run_fallback(

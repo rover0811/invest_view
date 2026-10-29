@@ -41,6 +41,12 @@ def test_count_llm_attempts_handles_text_list_and_null() -> None:
     assert cluster.count_llm_attempts(None) == 0
 
 
+def test_count_llm_attempts_excludes_cache_hits() -> None:
+    raw = '[{"model": "a", "cached": true}, {"model": "b", "cached": false}, {"model": "c"}]'
+    assert cluster.count_llm_attempts(raw) == 2
+    assert cluster.count_llm_attempts([{"model": "a", "cached": True}]) == 0
+
+
 class _Clock:
     def __init__(self) -> None:
         self.now = 0.0
@@ -239,3 +245,22 @@ def test_state_round_trip_keeps_observations(tmp_path) -> None:
     save_state(state, tmp_path)
     loaded = load_state("000660", datetime(2026, 10, 14).date(), tmp_path)
     assert loaded == state
+
+
+def test_keep_decisions_become_signal_log_entries_on_the_replay_clock() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    from ai_signal.replay import cluster as replay_cluster
+
+    created = datetime(2026, 10, 20, 2, 0, tzinfo=UTC)
+    rows = [
+        {"decision": "KEEP", "reason": "같은 사건이에요.", "created_at": created},
+        {"decision": "UPDATE", "reason": "새 사건이에요.", "created_at": created},
+        {"decision": "KEEP", "reason": "범위 밖이에요.", "created_at": created + timedelta(days=1)},
+    ]
+    entries = replay_cluster.decisions_to_log(
+        rows, lambda at: at + timedelta(hours=1) if at == created else None
+    )
+    assert [(e.t, e.kind, e.text) for e in entries] == [
+        (created + timedelta(hours=1), "signal", "기존 문구 유지: 같은 사건이에요.")
+    ]

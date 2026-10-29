@@ -12,9 +12,13 @@ Per message, inside the frame's single transaction:
    without an enabled symbol get no judgement row, which is the "not judged"
    state (``direction`` null in 6.4). When every fallback step passes the
    document also stays unjudged.
-5. a judgement without ``fail_reason``, with probability >= 0.7 and a
-   direction equal to the symbol's latest move state publishes ``NEW_DOCUMENT``
-   signal requests (event time = ``published_at``) through the outbox
+5. a judgement that passes ``regenerates_signal`` (NEW_FACT, DIRECT or
+   COMPETITOR, a concrete event type, probability >= 0.7, direction equal to
+   the symbol's current move state) and whose event identity is new in that
+   state publishes ``NEW_DOCUMENT`` signal requests (event time =
+   ``published_at``) through the outbox. The current state starts at the
+   latest ``gold.move`` version's ``window_end``: the move sink writes a new
+   version only on a price state transition.
 """
 
 from __future__ import annotations
@@ -34,12 +38,13 @@ from ai_signal.consumers.frame import ConsumedMessage, HandlerContext
 from ai_signal.documents.judgement import (
     Candidate,
     DocumentJudge,
+    DocumentJudgementOutput,
     Judgement,
     JudgementRequest,
 )
 from ai_signal.documents.linking import ENTITY_SYMBOL, LINK_METHODS, LinkMethod
 from ai_signal.documents.news import DOCUMENT_SOURCE, NewsRecord
-from ai_signal.llm import shared_client
+from ai_signal.llm.container import shared_llm
 from ai_signal.signals.move import DIRECTION_BY_PRICE_STATE, latest_move
 from ai_signal.signal_requests import (
     RequestTrigger,
@@ -51,6 +56,8 @@ from ai_signal.signal_requests import (
 logger = logging.getLogger(__name__)
 
 NEW_DOCUMENT_MIN_PROBABILITY = 0.7
+TRIGGER_RELEVANCES = frozenset({"DIRECT", "COMPETITOR"})
+NON_TRIGGER_EVENT_TYPES = frozenset({"SCHEDULE", "OTHER"})
 UUID_T = postgresql.UUID(as_uuid=True)
 TS = sa.DateTime(timezone=True)
 
@@ -119,6 +126,11 @@ DOCUMENT_JUDGEMENT = sa.table(
     sa.column("prompt_version", sa.Text()),
     sa.column("probability", sa.Numeric(5, 4)),
     sa.column("llm_attempts", postgresql.JSONB()),
+    sa.column("info_type", sa.Text()),
+    sa.column("event_subject", sa.Text()),
+    sa.column("event_type", sa.Text()),
+    sa.column("event_object", sa.Text()),
+    sa.column("target_relevance", sa.Text()),
     schema="silver",
 )
 ENTITY = sa.table(
@@ -329,12 +341,90 @@ async def sector_names(
     return {key: tuple(names) for key, names in sectors.items()}
 
 
-async def move_direction(session: AsyncSession, symbol: str) -> int:
-    """Direction of the symbol's latest move state; 0 when NEUTRAL or no move."""
+@dataclass(frozen=True)
+class MoveState:
+    direction: int
+    started_at: datetime
+
+
+async def move_state(session: AsyncSession, symbol: str) -> MoveState | None:
+    """The symbol's current price state; it starts at the latest move version."""
     move = await latest_move(session, symbol)
     if move is None:
-        return 0
-    return DIRECTION_BY_PRICE_STATE.get(move.price_state, 0)
+        return None
+    return MoveState(DIRECTION_BY_PRICE_STATE.get(move.price_state, 0), move.window_end)
+
+
+def regenerates_signal(output: DocumentJudgementOutput) -> bool:
+    """Article character that may rewrite a signal, before direction and identity."""
+    return (
+        output.is_signal_candidate
+        and output.info_type == "NEW_FACT"
+        and output.target_relevance in TRIGGER_RELEVANCES
+        and output.event_type not in NON_TRIGGER_EVENT_TYPES
+        and output.probability >= NEW_DOCUMENT_MIN_PROBABILITY
+        and output.direction != 0
+    )
+
+
+def identity_filter(output: DocumentJudgementOutput) -> sa.ColumnElement[bool]:
+    """Event identity: (subject, type), plus direction for FLOW articles."""
+    clauses = [
+        DOCUMENT_JUDGEMENT.c.event_subject == output.event_subject,
+        DOCUMENT_JUDGEMENT.c.event_type == output.event_type,
+    ]
+    if output.info_type == "FLOW":
+        clauses.append(DOCUMENT_JUDGEMENT.c.info_type == "FLOW")
+        clauses.append(DOCUMENT_JUDGEMENT.c.direction == output.direction)
+    else:
+        clauses.append(DOCUMENT_JUDGEMENT.c.info_type.is_distinct_from("FLOW"))
+    return sa.and_(*clauses)
+
+
+def event_identity(output: DocumentJudgementOutput) -> tuple[object, ...]:
+    """The identity ``identity_filter`` matches, as a value."""
+    if output.info_type == "FLOW":
+        return (output.event_subject, output.event_type, output.direction)
+    return (output.event_subject, output.event_type)
+
+
+async def identity_seen(
+    session: AsyncSession,
+    symbol: str,
+    document_id: UUID,
+    output: DocumentJudgementOutput,
+    since: datetime,
+    until: datetime,
+) -> bool:
+    """An earlier judged article of the symbol has the identity in ``[since, until]``."""
+    result = await session.execute(
+        sa.select(DOCUMENT.c.document_id)
+        .select_from(
+            DOCUMENT.join(
+                DOCUMENT_JUDGEMENT,
+                sa.and_(
+                    DOCUMENT_JUDGEMENT.c.document_id == DOCUMENT.c.document_id,
+                    DOCUMENT_JUDGEMENT.c.version == DOCUMENT.c.version,
+                ),
+            )
+            .join(
+                DOCUMENT_ENTITY,
+                DOCUMENT_ENTITY.c.document_id == DOCUMENT.c.document_id,
+            )
+            .join(
+                ENTITY_SYMBOL, ENTITY_SYMBOL.c.entity_id == DOCUMENT_ENTITY.c.entity_id
+            )
+        )
+        .where(
+            ENTITY_SYMBOL.c.ticker == symbol,
+            DOCUMENT.c.document_id != document_id,
+            DOCUMENT.c.published_at >= since,
+            DOCUMENT.c.published_at <= until,
+            identity_filter(output),
+        )
+        .limit(1)
+    )
+    return bool(result.all())
 
 
 async def judgement_exists(
@@ -366,13 +456,18 @@ async def insert_judgement(
             prompt_version=judgement.prompt_version,
             probability=Decimal(str(round(output.probability, 4))),
             llm_attempts=judgement.llm_attempts,
+            info_type=output.info_type,
+            event_subject=output.event_subject,
+            event_type=output.event_type,
+            event_object=output.event_object,
+            target_relevance=output.target_relevance,
         )
         .on_conflict_do_nothing(index_elements=["document_id", "version"])
     )
 
 
 def default_judge() -> DocumentJudge:
-    return DocumentJudge.from_client(shared_client())
+    return DocumentJudge.from_llm(shared_llm())
 
 
 class DocumentProcessor:
@@ -429,11 +524,7 @@ class DocumentProcessor:
             return
         await insert_judgement(session, state, judgement)
         output = judgement.output
-        if (
-            not output.is_signal_candidate
-            or output.probability < NEW_DOCUMENT_MIN_PROBABILITY
-            or not output.direction
-        ):
+        if not regenerates_signal(output):
             return
         targets = await request_targets(
             session,
@@ -441,11 +532,21 @@ class DocumentProcessor:
                 scope=judgement.output.scope, symbols=tuple(s.ticker for s in enabled)
             ),
         )
-        aligned = [
-            symbol
-            for symbol in targets
-            if await move_direction(session, symbol) == output.direction
-        ]
+        aligned: list[str] = []
+        for symbol in targets:
+            current = await move_state(session, symbol)
+            if current is None or current.direction != output.direction:
+                continue
+            if await identity_seen(
+                session,
+                symbol,
+                state.document_id,
+                output,
+                current.started_at,
+                record.published_at,
+            ):
+                continue
+            aligned.append(symbol)
         _ = await publish_signal_requests(
             context.outbox,
             aligned,

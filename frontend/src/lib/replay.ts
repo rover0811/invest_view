@@ -99,6 +99,11 @@ export interface ReplayFrame {
   returnPct: number;
 }
 
+export interface ReplaySignalCard {
+  mode: 'shown' | 'pending' | 'empty';
+  signal: ReplaySignal | undefined;
+}
+
 export interface StateBand {
   start: string;
   end: string;
@@ -137,12 +142,46 @@ export interface ReplayPixelRange {
 export interface ReplayAnnotationTagLayout {
   x: number;
   row: number;
+  hidden?: boolean;
 }
 
 export type ReplaySeriesUpdatePlan =
   | { mode: 'none' }
   | { mode: 'replace'; bars: ReplayBar[] }
   | { mode: 'update'; bars: ReplayBar[] };
+
+export interface ReplayOverlayKey {
+  width: number;
+  height: number;
+  priceScaleWidth: number;
+  interval: ReplayBarInterval;
+  revealedStateCount: number;
+  revealedSignalCount: number;
+  currentBarTime: string | null;
+  labelOnLeft: boolean;
+}
+
+export type ReplayKeyEventKind = 'state' | 'signal' | 'keep';
+
+export interface ReplayKeyEvent {
+  id: string;
+  at: string;
+  kind: ReplayKeyEventKind;
+  label: string;
+  headline?: string;
+  direction?: 'positive' | 'negative' | 'neutral';
+}
+
+export interface ReplayPlaybackAdvance {
+  nextMs: number;
+  fastForwarding: boolean;
+}
+
+export interface ReplayPlaybackPlan {
+  startMs: number;
+  endMs: number;
+  windows: Array<{ startMs: number; endMs: number }>;
+}
 
 export type ReplayFetch = (input: string | URL | Request, init?: RequestInit) => Promise<Response>;
 
@@ -359,6 +398,64 @@ export function selectReplayFrame(data: ReplayData, playhead: string): ReplayFra
   };
 }
 
+export function selectReplaySignalCard(data: ReplayData, frame: ReplayFrame): ReplaySignalCard {
+  const signal = frame.signal;
+  if (signal == null) return { mode: frame.state == null ? 'empty' : 'pending', signal };
+
+  const stateChangedAfterSignal = frame.state != null
+    && Date.parse(frame.state.t) > Date.parse(signal.at);
+  if (stateChangedAfterSignal) return { mode: 'pending', signal };
+  if (signal.status !== 'SHOWN') return { mode: 'empty', signal };
+
+  const signalState = data.states.findLast((state) => state.move_version === signal.move_version)
+    ?? latestAtOrBefore(data.states, signal.at, (state) => state.t);
+  const directionMismatch = signalState != null
+    && frame.state != null
+    && signalState.state !== frame.state.state;
+  const signMismatch = signalState?.state === 'POSITIVE'
+    ? frame.returnPct <= 0
+    : signalState?.state === 'NEGATIVE' && frame.returnPct >= 0;
+
+  if (directionMismatch || signMismatch) return { mode: 'pending', signal };
+  return { mode: 'shown', signal };
+}
+
+export interface ChartSignalMark {
+  key: string;
+  at: string;
+  version: number;
+  status: SignalStatus;
+  direction: 'positive' | 'negative' | 'neutral';
+  label: string;
+  current: boolean;
+}
+
+export function signalDirection(data: ReplayData, signal: ReplaySignal): 'positive' | 'negative' | 'neutral' {
+  if (signal.status !== 'SHOWN') return 'neutral';
+  const state = data.states.findLast((item) => item.move_version === signal.move_version)?.state;
+  if (state === 'POSITIVE') return 'positive';
+  if (state === 'NEGATIVE') return 'negative';
+  return 'neutral';
+}
+
+export function buildChartSignalMarks(data: ReplayData, playhead: string): ChartSignalMark[] {
+  const playheadMs = Date.parse(playhead);
+  const card = selectReplaySignalCard(data, selectReplayFrame(data, playhead));
+  const currentSignal = card.mode === 'shown' ? card.signal : undefined;
+  return data.signals
+    .filter((signal) => (signal.status === 'SHOWN' || signal.status === 'HIDDEN')
+      && Date.parse(signal.at) <= playheadMs)
+    .map((signal) => ({
+      key: `${signal.at}-${signal.version}`,
+      at: signal.at,
+      version: signal.version,
+      status: signal.status,
+      direction: signalDirection(data, signal),
+      label: signal.status === 'SHOWN' ? signal.headline_label : '',
+      current: signal === currentSignal,
+    }));
+}
+
 export function visibleBarsAt(bars: ReplayBar[], playhead: string): ReplayBar[] {
   const playheadTime = Date.parse(playhead);
   return bars.filter((bar) => Date.parse(bar.t) <= playheadTime);
@@ -436,6 +533,21 @@ export function planReplaySeriesUpdate(
   return { mode: 'update', bars: next.slice(firstChanged) };
 }
 
+export function shouldRecomputeReplayOverlays(
+  previous: ReplayOverlayKey | null,
+  next: ReplayOverlayKey,
+): boolean {
+  return previous == null
+    || previous.width !== next.width
+    || previous.height !== next.height
+    || previous.priceScaleWidth !== next.priceScaleWidth
+    || previous.interval !== next.interval
+    || previous.revealedStateCount !== next.revealedStateCount
+    || previous.revealedSignalCount !== next.revealedSignalCount
+    || previous.currentBarTime !== next.currentBarTime
+    || previous.labelOnLeft !== next.labelOnLeft;
+}
+
 export function assembleHeadline(signal: ReplaySignal | undefined, name: string, rate: number): string | null {
   if (signal?.status !== 'SHOWN') {
     return null;
@@ -472,6 +584,130 @@ export function buildReplayEvents(data: ReplayData): string[] {
   data.signals.forEach((item) => moments.add(item.at));
   data.log.forEach((item) => moments.add(item.t));
   return [...moments].toSorted((a, b) => Date.parse(a) - Date.parse(b));
+}
+
+export function buildReplayKeyEvents(data: ReplayData): ReplayKeyEvent[] {
+  const stateEvents = data.states.map((state) => ({
+    id: `state-${state.t}-${state.state}-${state.move_version}`,
+    at: state.t,
+    kind: 'state' as const,
+    label: state.state === 'POSITIVE'
+      ? '긍정 진입'
+      : state.state === 'NEGATIVE' ? '부정 진입' : '중립 전환',
+  }));
+  const signalEvents = data.signals
+    .filter((signal) => signal.status === 'SHOWN' || signal.status === 'HIDDEN')
+    .map((signal) => ({
+      id: `signal-${signal.at}-${signal.version}-${signal.status}`,
+      at: signal.at,
+      kind: 'signal' as const,
+      label: `시그널 v${signal.version}`,
+      direction: signalDirection(data, signal),
+      ...(signal.status === 'SHOWN' && signal.headline_label
+        ? { headline: signal.headline_label }
+        : {}),
+    }));
+  const keepEvents = data.log.flatMap((entry, index): ReplayKeyEvent[] => {
+    const prefix = '기존 문구 유지:';
+    if (entry.kind !== 'signal' || !entry.text.startsWith(prefix)) return [];
+    const headline = entry.text.slice(prefix.length).trim();
+    return [{
+      id: `keep-${entry.t}-${index}`,
+      at: entry.t,
+      kind: 'keep',
+      label: '문구 유지',
+      ...(headline ? { headline } : {}),
+    }];
+  });
+
+  return [...stateEvents, ...signalEvents, ...keepEvents]
+    .toSorted((left, right) => Date.parse(left.at) - Date.parse(right.at));
+}
+
+const KEY_EVENT_LEAD_MS = 5 * 60_000;
+const KEY_EVENT_TRAIL_MS = 10 * 60_000;
+const IDLE_TARGET_WALL_MS = 2_500;
+
+export function buildReplayPlaybackPlan(
+  events: ReplayKeyEvent[],
+  startMs: number,
+  endMs: number,
+): ReplayPlaybackPlan {
+  const windows: Array<{ startMs: number; endMs: number }> = [];
+  const eventTimes = [...new Set(events.map((event) => Date.parse(event.at)))]
+    .filter((time) => time >= startMs && time <= endMs)
+    .toSorted((left, right) => left - right);
+
+  for (const eventTime of eventTimes) {
+    const window = {
+      startMs: Math.max(startMs, eventTime - KEY_EVENT_LEAD_MS),
+      endMs: Math.min(endMs, eventTime + KEY_EVENT_TRAIL_MS),
+    };
+    const previous = windows.at(-1);
+    if (previous && window.startMs <= previous.endMs) {
+      previous.endMs = Math.max(previous.endMs, window.endMs);
+    } else {
+      windows.push(window);
+    }
+  }
+  return { startMs, endMs, windows };
+}
+
+export function advanceReplayPlayhead(
+  currentMs: number,
+  elapsedWallMs: number,
+  selectedSpeed: number,
+  plan: ReplayPlaybackPlan,
+  skipIdle: boolean,
+): ReplayPlaybackAdvance {
+  const clampedCurrent = Math.max(plan.startMs, Math.min(plan.endMs, currentMs));
+  const normalRate = Math.max(0, selectedSpeed) * 60;
+  if (!skipIdle || clampedCurrent >= plan.endMs || elapsedWallMs <= 0) {
+    return {
+      nextMs: Math.min(plan.endMs, clampedCurrent + Math.max(0, elapsedWallMs) * normalRate),
+      fastForwarding: false,
+    };
+  }
+
+  let nextMs = clampedCurrent;
+  let remainingWallMs = elapsedWallMs;
+  let fastForwarding = false;
+
+  while (remainingWallMs > 0 && nextMs < plan.endMs) {
+    const activeWindow = plan.windows.find((window) => (
+      nextMs >= window.startMs && nextMs < window.endMs
+    ));
+    let segmentEndMs: number;
+    let rate: number;
+
+    if (activeWindow) {
+      segmentEndMs = activeWindow.endMs;
+      rate = normalRate;
+      fastForwarding = false;
+    } else {
+      const previousWindow = plan.windows.findLast((window) => window.endMs <= nextMs);
+      const nextWindow = plan.windows.find((window) => window.startMs > nextMs);
+      const idleStartMs = previousWindow?.endMs ?? plan.startMs;
+      segmentEndMs = nextWindow?.startMs ?? plan.endMs;
+      rate = Math.max(normalRate, (segmentEndMs - idleStartMs) / IDLE_TARGET_WALL_MS);
+      fastForwarding = rate > normalRate;
+    }
+
+    if (rate <= 0) break;
+    const wallTimeToBoundary = (segmentEndMs - nextMs) / rate;
+    if (remainingWallMs <= wallTimeToBoundary) {
+      nextMs += remainingWallMs * rate;
+      remainingWallMs = 0;
+    } else {
+      nextMs = segmentEndMs;
+      remainingWallMs -= wallTimeToBoundary;
+    }
+  }
+
+  return {
+    nextMs: Math.min(plan.endMs, nextMs),
+    fastForwarding,
+  };
 }
 
 const SESSION_END_POSITION = 82;
@@ -547,6 +783,7 @@ export function layoutReplayAnnotationTags(
   plotWidth: number,
   gap: number,
   blockedRanges: ReplayPixelRange[] = [],
+  maxRows = Number.POSITIVE_INFINITY,
 ): ReplayAnnotationTagLayout[] {
   const width = Math.max(0, tagWidth);
   const availableWidth = Math.max(0, plotWidth);
@@ -561,9 +798,10 @@ export function layoutReplayAnnotationTags(
     }))
     .filter((range) => range.end > range.start);
   const rows: ReplayPixelRange[][] = [];
+  const rowLimit = Number.isFinite(maxRows) ? Math.max(1, Math.floor(maxRows)) : Number.POSITIVE_INFINITY;
 
   return anchors.map((anchor) => {
-    for (let row = 0; ; row += 1) {
+    for (let row = 0; row < rowLimit; row += 1) {
       const rowBlocked = blocked.filter((range) => range.row == null || range.row === row);
       const occupied = [...rowBlocked, ...(rows[row] ?? [])];
       const anchorX = clampX(anchor);
@@ -592,6 +830,8 @@ export function layoutReplayAnnotationTags(
       rows[row].push({ start: x, end: x + width });
       return { x, row };
     }
+
+    return { x: clampX(anchor), row: Math.max(0, rowLimit - 1), hidden: true };
   });
 }
 

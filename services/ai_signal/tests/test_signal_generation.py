@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass, field, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
+from uuid import UUID
 
 import pytest
 
@@ -17,7 +18,11 @@ from ai_signal.consumers.registry import CONSUMERS
 from ai_signal.llm import LlmErrorKind
 from ai_signal.runners import runner_names
 from ai_signal.signals.candidates import CANDIDATE_SOURCES, CandidateSet
-from ai_signal.signals.generation import GenerationRequest
+from ai_signal.signals.generation import (
+    CurrentCause,
+    CurrentSignal,
+    GenerationRequest,
+)
 from ai_signal.signals.move import candidate_range
 from ai_signal.signals.store import update_value
 from tests.fakes import (
@@ -30,8 +35,10 @@ from tests.fakes import (
 from tests.signal_fakes import (
     BASE_MOVE,
     NOW,
+    WINDOW_END,
     candidates,
     cause,
+    document,
     fake_generator,
     output_json,
 )
@@ -60,7 +67,7 @@ def test_primary_model_result_is_shown_with_cited_sources() -> None:
     assert [s.ref for s in decision.causes[0].sources] == ["D1", "D2"]
     assert generation.decided_by == "llm"
     assert generation.model_version == "nvidia/nemotron-3-super-120b-a12b:free"
-    assert generation.prompt_version == "signal_generation/v2"
+    assert generation.prompt_version == "signal_generation/v3"
     assert llm.calls == 1
 
 
@@ -131,7 +138,7 @@ def test_every_model_failing_hides_the_signal() -> None:
     assert generation.decision.status == "HIDDEN"
     assert generation.decided_by is None
     assert generation.llm_failed
-    assert generation.last_error == LlmErrorKind.HTTP
+    assert generation.last_error == LlmErrorKind.UNAVAILABLE
     assert llm.calls == 2
 
 
@@ -164,7 +171,7 @@ def test_input_hash_depends_on_move_version_and_prompt() -> None:
         "signal_generation/v1"
     )
     assert request.input_hash("signal_generation/v1") != request.input_hash(
-        "signal_generation/v2"
+        "signal_generation/v3"
     )
 
 
@@ -272,7 +279,105 @@ def test_prompt_lists_every_output_field() -> None:
     from ai_signal.signals.generation import SignalGenerationOutput
 
     schema = json.loads(json.dumps(SignalGenerationOutput.model_json_schema()))
-    for version in ("v1", "v2"):
+    for version in ("v3",):
         text = load_prompt("signal_generation", version).text
         for name in schema["properties"]:
             assert f"`{name}`" in text
+
+
+def _current(as_of: datetime = WINDOW_END) -> CurrentSignal:
+    return CurrentSignal(
+        version=1,
+        headline_label="HBM 공급 확대",
+        as_of_event_time=as_of,
+        causes=(CurrentCause("HBM 공급 확대", "기존 설명이에요.", (UUID(int=1),)),),
+    )
+
+
+def _keep_request(found: CandidateSet) -> GenerationRequest:
+    return GenerationRequest(
+        BASE_MOVE, found, _current(), WINDOW_END + timedelta(hours=1)
+    )
+
+
+def _found_with_new() -> CandidateSet:
+    return CandidateSet(
+        documents=(
+            document("D1"),
+            document("D2", WINDOW_END + timedelta(minutes=30)),
+            document("D3", WINDOW_END + timedelta(hours=2)),
+        )
+    )
+
+
+def test_prompt_input_marks_new_candidates_and_current_signal() -> None:
+    value = _keep_request(_found_with_new()).prompt_input()
+    assert [d["is_new"] for d in value["documents"]] == [False, True, False]
+    assert value["current_signal"] == {
+        "headline_label": "HBM 공급 확대",
+        "causes": [
+            {
+                "label": "HBM 공급 확대",
+                "explanation": "기존 설명이에요.",
+                "refs": ["D1"],
+            }
+        ],
+    }
+    assert (
+        GenerationRequest(BASE_MOVE, _found_with_new()).prompt_input()["current_signal"]
+        == "none"
+    )
+
+
+def test_input_hash_ignores_current_signal() -> None:
+    found = _found_with_new()
+    assert _keep_request(found).input_hash("v") == GenerationRequest(
+        BASE_MOVE, found
+    ).input_hash("v")
+
+
+def test_keep_with_empty_causes_is_accepted() -> None:
+    generator, llm = fake_generator(
+        [output_json([], decision="KEEP", reason="같아요.")]
+    )
+    generation = asyncio.run(generator.generate(_keep_request(_found_with_new())))
+    assert generation.decision.keep
+    assert generation.decision.reason == "같아요."
+    assert not generation.decision.guard_applied
+    assert llm.calls == 1
+
+
+def test_keep_without_current_signal_is_a_schema_failure() -> None:
+    generator, llm = fake_generator([output_json([], decision="KEEP"), output_json()])
+    generation = asyncio.run(
+        generator.generate(GenerationRequest(BASE_MOVE, candidates("D1")))
+    )
+    assert generation.decision.status == "SHOWN"
+    assert not generation.decision.keep
+    assert generation.attempts[0].error is LlmErrorKind.SCHEMA
+    assert llm.calls == 2
+
+
+def test_effect_mismatch_is_a_schema_failure() -> None:
+    mismatch = output_json([cause(label="경쟁사 칭찬 발언", effect="NEGATIVE")])
+    generator, llm = fake_generator([mismatch, output_json()])
+    generation = asyncio.run(
+        generator.generate(GenerationRequest(BASE_MOVE, candidates("D1")))
+    )
+    assert generation.decision.status == "SHOWN"
+    assert generation.attempts[0].error is LlmErrorKind.SCHEMA
+    assert llm.calls == 2
+
+
+def test_update_citing_no_new_candidate_becomes_keep() -> None:
+    generator, _ = fake_generator([output_json([cause(refs=["D1"])])])
+    generation = asyncio.run(generator.generate(_keep_request(_found_with_new())))
+    assert generation.decision.keep
+    assert generation.decision.guard_applied
+
+
+def test_update_citing_a_new_candidate_is_shown() -> None:
+    generator, _ = fake_generator([output_json([cause(refs=["D2"])])])
+    generation = asyncio.run(generator.generate(_keep_request(_found_with_new())))
+    assert not generation.decision.keep
+    assert generation.decision.status == "SHOWN"

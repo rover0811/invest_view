@@ -2,15 +2,14 @@ from __future__ import annotations
 
 import json
 from collections.abc import Sequence
-from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import UUID
 
-import httpx
-
 from ai_signal.consumers import ConsumedMessage
-from ai_signal.llm import LlmSettings, OpenRouterClient
+from ai_signal.llm import Llm, Route
+from ai_signal.llm.adapters.fake import FakeAdapter
+from ai_signal.llm.container import LlmSettings
 from ai_signal.prompts import load_prompt
 from ai_signal.signals.candidates import CandidateSet, SignalCandidate
 from ai_signal.signals.generation import SignalGenerator, default_steps
@@ -27,9 +26,11 @@ def cause(
     refs: Sequence[str] = ("D1",),
     label: str = "HBM 공급 확대",
     explanation: str = "엔비디아향 HBM 공급이 늘어난다는 소식에 매수세가 몰렸어요.",
+    effect: str = "POSITIVE",
 ) -> dict[str, object]:
     return {
         "rank": rank,
+        "effect": effect,
         "label": label,
         "explanation": explanation,
         "scope": "SYMBOL",
@@ -39,10 +40,15 @@ def cause(
 
 
 def output_json(
-    causes: Sequence[dict[str, object]] | None = None, headline: int = 1
+    causes: Sequence[dict[str, object]] | None = None,
+    headline: int = 1,
+    decision: str = "UPDATE",
+    reason: str = "새 기사가 새로운 원인을 알려 줘요.",
 ) -> str:
     return json.dumps(
         {
+            "decision": decision,
+            "reason": reason,
             "headline_cause_rank": headline,
             "causes": list(causes) if causes is not None else [cause()],
             "probability": 0.7,
@@ -51,34 +57,23 @@ def output_json(
     )
 
 
-@dataclass
-class FakeLlm:
-    replies: list[str | int]
-    requests: list[dict[str, object]] = field(default_factory=list)
+FakeLlm = FakeAdapter
 
-    def handle(self, request: httpx.Request) -> httpx.Response:
-        body: dict[str, object] = json.loads(request.content)
-        self.requests.append(body)
-        reply = self.replies.pop(0) if self.replies else 503
-        if isinstance(reply, int):
-            return httpx.Response(reply, json={"error": "fake"})
-        content = {"choices": [{"message": {"content": reply}}], "model": body["model"]}
-        return httpx.Response(200, json=content)
 
-    @property
-    def calls(self) -> int:
-        return len(self.requests)
+def fake_llm(adapter: FakeAdapter) -> Llm:
+    routes = tuple(
+        Route("fake", route.model) for route in LlmSettings().default_routes()
+    )
+    return Llm(
+        adapters={"fake": adapter},
+        routes={"signal_generation": routes, "document_judgement": routes},
+    )
 
 
 def fake_generator(replies: Sequence[str | int]) -> tuple[SignalGenerator, FakeLlm]:
-    llm = FakeLlm(list(replies))
-    settings = LlmSettings.model_validate({"api_key": "test-key"})
-    http = httpx.AsyncClient(
-        base_url=settings.base_url, transport=httpx.MockTransport(llm.handle)
-    )
-    client = OpenRouterClient(settings, http=http)
+    llm = FakeAdapter(list(replies))
     prompt = load_prompt("signal_generation", environ={})
-    return SignalGenerator(default_steps(client, prompt), prompt), llm
+    return SignalGenerator(default_steps(fake_llm(llm), prompt), prompt), llm
 
 
 BASE_MOVE = OpenMove(
