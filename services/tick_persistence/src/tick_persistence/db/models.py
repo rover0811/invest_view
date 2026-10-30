@@ -32,7 +32,6 @@ class Base(DeclarativeBase):
 class TickHistory(Base):
     __tablename__: str = "tick_history"
     __table_args__: tuple[object, ...] = (
-        UniqueConstraint("tick_dedupe_key", name="tick_history_dedupe_key_uq"),
         UniqueConstraint("event_id", name="tick_history_event_id_uq"),
         Index("ix_tick_history_symbol_persisted", "symbol", text("persisted_at DESC")),
         Index(
@@ -44,6 +43,7 @@ class TickHistory(Base):
         {"schema": SCHEMA_BRONZE},
     )
 
+    # ORM-only identity: the DB-level primary key was dropped in 0009 to save disk.
     tick_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
     )
