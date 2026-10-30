@@ -100,8 +100,10 @@ def test_tick_history_column_types():
     assert "INTEGER" in cols["kafka_partition"]
 
 
-def test_tick_history_dedupe_unique_and_nullability():
-    assert ("tick_dedupe_key",) in _unique_column_sets(TickHistory)
+def test_tick_history_unique_keys_and_nullability():
+    unique_sets = _unique_column_sets(TickHistory)
+    assert ("event_id",) in unique_sets
+    assert ("tick_dedupe_key",) not in unique_sets
     not_null = {c.name for c in TickHistory.__table__.columns if not c.nullable}
     assert "symbol" in not_null
     assert "tick_dedupe_key" in not_null

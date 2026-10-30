@@ -194,7 +194,9 @@ def test_alembic_upgrade_and_downgrade_create_expected_objects(monkeypatch: pyte
             ("serving", "symbol_snapshot"),
         }
         assert "is_final" in state["silver_columns"]
-        assert "tick_history_dedupe_key_uq" in state["constraints"]
+        assert "tick_history_dedupe_key_uq" not in state["constraints"]
+        assert "tick_history_pkey" not in state["indexes"]
+        assert "ix_tick_history_kafka_offset" not in state["indexes"]
         assert "symbol_5m_metrics_symbol_bucket_uq" in state["constraints"]
         assert "symbol_daily_ohlc_symbol_interval_date_uq" in state["constraints"]
         assert "ix_tick_history_symbol_event_ts" in state["indexes"]
